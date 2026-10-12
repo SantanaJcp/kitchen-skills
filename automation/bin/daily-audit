@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# Daily audit: one sealed Claude Code run of the audit-verification skill, as a churn pass on the SHA the nightly
+# guard just proved.
+# Principles: `prove` (it cites the guard's live drives and never ships an undriven harness fix), `truthful-state`
+# (no green guard, no audit; a pass without an outcome is incomplete), `isolate` (a sealed sandbox, as the gardener's).
+# Run it after the nightly guard, under the same project lock, before anything syncs the guard's clone again:
+#   1. Inputs, outside the sandbox. The audited SHA is the one of the latest nightly guard run, which must be green
+#      and must have run every AUDIT_GUARD_STEPS step (e.g. prove and control): a red or incomplete guard blocks
+#      the pass, and the agent does not run. The guard's clone must still be at that SHA, since the evidence the
+#      pass cites lives there (AUDIT_EVIDENCE_PATHS); otherwise the job refuses. The baseline is the newest
+#      audit-verification entry of the last 30 days in the kitchen journal whose outcome moves it (the skill's
+#      rule); with none, the job refuses: a full pass is run by hand. Audited SHA equal to the baseline: skipped.
+#   2. The agent runs sealed like the gardener's (lib/sealed.sh), minus its domains and sockets: its own clone, no
+#      network, no Docker, no gh, no git credentials, so it cannot drive the app. It gets the skill, the guard's
+#      record, step logs and evidence copies, and writes a report and a one-word outcome. AUDIT_TIMEOUT_SECONDS
+#      (default 3600) bounds it; AUDIT_MODEL and AUDIT_EFFORT pass as --model and --effort when set.
+#   3. Outputs, outside the sandbox. The job logs the outcome in the kitchen journal for the next churn pass
+#      ("audit-verification <outcome> churn at <sha>"). Only for `changed` it publishes the agent's branch with the
+#      gardener's validation and independent verification (lib/sealed.sh publish), restricted to AUDIT_EDIT_PATHS
+#      and to Markdown prose outside fenced code blocks (lib/prose_only.py): a fix to what runs (a drive block, an
+#      assertion, the verifier, a control) must be driven live before it ships, and nothing here may run the
+#      agent's code with Docker, so such a fix is a finding. Fixes are authorized only when AUDIT_EDIT_PATHS and
+#      AUDIT_VERIFY_STEPS are set and no audit PR is open; otherwise the pass is findings-only.
+# Every run that holds the lock ends with one AUDIT-RESULT line and one line in $STATE_ROOT/audit/<project>.jsonl:
+# clean, changed <url>, findings, blocked, skipped (the pass's outcome), refused <reason> (an input or the
+# publication failed validation) or incomplete <reason> (claude failed or timed out, no outcome, aborted, killed).
+# Findings, blocked, refused and incomplete also show a local notification.
+# A run skipped as busy never held the lock: it only logs and records nothing.
+# Usage: daily-audit <project>
+source "$(dirname "$0")/../lib/common.sh" "$1" audit
+AGENT_KIND=audit
+source "$KITCHEN_AUTOMATION/lib/sealed.sh"
+
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+RESULT=""
+RESULT_DETAIL=""
+BUSY=0
+SHA=""        # the audited SHA: the latest green guard run's
+BASELINE=""   # the SHA of the journal entry the churn starts from
+RUN_LOG="$LOG_DIR/audit-$RUN_ID.log"
+WORK_DIR="$STATE_DIR/audit/$RUN_ID"
+SUMMARY_FILE="$WORK_DIR/summary.md"
+REPORT_FILE="$WORK_DIR/report.md"
+OUTCOME_FILE="$WORK_DIR/outcome"
+AGENT_CLONE="$WORK_DIR/clone"
+JOB_DIR="$STATE_DIR/audit-job/$RUN_ID"  # outside every path the agent may write
+exec > >(tee -a "$RUN_LOG") 2>&1
+
+declare -p AUDIT_GUARD_STEPS >/dev/null 2>&1 || AUDIT_GUARD_STEPS=()
+declare -p AUDIT_EVIDENCE_PATHS >/dev/null 2>&1 || AUDIT_EVIDENCE_PATHS=()
+declare -p AUDIT_EDIT_PATHS >/dev/null 2>&1 || AUDIT_EDIT_PATHS=()
+declare -p AUDIT_VERIFY_STEPS >/dev/null 2>&1 || AUDIT_VERIFY_STEPS=()
+AUDIT_TIMEOUT="${AUDIT_TIMEOUT_SECONDS:-3600}"
+MAX_CHANGED_LINES="${AUDIT_MAX_CHANGED_LINES:-200}"
+PROTECTED_PATHS=(".github/*")
+EDIT_PATHS=(${AUDIT_EDIT_PATHS[@]+"${AUDIT_EDIT_PATHS[@]}"})
+PROSE_ONLY=1
+VERIFY_STEPS=(${AUDIT_VERIFY_STEPS[@]+"${AUDIT_VERIFY_STEPS[@]}"})
+VERIFY_STEPS_NAME=AUDIT_VERIFY_STEPS
+PUBLISH_LABEL="${AUDIT_LABEL:-audit-verification}"
+RESULT_TAG=AUDIT-RESULT
+AGENT_ENV=(AUDIT_BRANCH_PREFIX="audit/$RUN_DATE-" AUDIT_SUMMARY_FILE="$SUMMARY_FILE" AUDIT_REPORT_FILE="$REPORT_FILE"
+  AUDIT_OUTCOME_FILE="$OUTCOME_FILE")
+AGENT_DIRS=()
+# The audit's boundary is stricter than the gardener's: whatever domains or sockets the project grants the gardener
+# (a package feed, the Docker socket), the audit's agent and its verification get none. Docker would let the agent
+# run its own harness code with any host path mounted, and the pass must not drive the app.
+GARDENER_SANDBOX_DOMAINS=()
+GARDENER_SANDBOX_UNIX_SOCKETS=()
+STARTED=0
+
+result() { RESULT="$1"; RESULT_DETAIL="$2"; log "AUDIT-RESULT: $1 - $2"; }
+refuse() { result refused "$1"; return 1; }
+stop() { result incomplete "$1"; exit 1; }
+
+# The pass's line in the kitchen journal, on the project's behalf: the next churn pass starts from it when the
+# outcome moves the baseline (clean, changed, skipped).
+journal_outcome() { # outcome
+  local word="$1" status=note
+  [ "$word" != clean ] || word="clean (churn)"
+  [ "$1" != blocked ] || status=blocked
+  python3 "$KITCHEN_AUTOMATION/lib/audit_state.py" log "$PROJECT" "$BRANCH" "$SHA" "$RUN_ID" "$status" \
+    "audit-verification $word churn at $SHA" || warn "journal entry failed: the next churn pass will not see this one"
+}
+
+finish() {
+  local rc=$?
+  trap - EXIT INT TERM HUP
+  set +e
+  unset GIT_DIR  # set for publish only; a signal can arrive while it runs
+  # The agent had no Docker, so there is nothing for CLEANUP_CMD to stop; the supervisor stops its processes.
+  cleanup_agent_run 0
+  if [ "$BUSY" = 0 ]; then
+    [ -n "$RESULT" ] || result incomplete "aborted (exit $rc)"
+    case "$RESULT" in
+      findings|blocked|refused|incomplete) notify "kitchen audit: $PROJECT $RESULT" "$RESULT_DETAIL" || warn "not notified: see the log" ;;
+    esac
+    record_audit "$RESULT" "$RESULT_DETAIL" "$SHA" "$BASELINE" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" ${WARNINGS[@]+"${WARNINGS[@]}"} ||
+      log "FAILED to write the audit record $AUDIT_RECORD"
+  fi
+  log "audit end: status=$rc"
+  exit "$rc"
+}
+trap finish EXIT
+trap 'log "audit interrupted (SIGINT)"; exit 130' INT
+trap 'log "audit interrupted (SIGTERM)"; exit 143' TERM
+trap 'log "audit interrupted (SIGHUP)"; exit 129' HUP
+
+if [ "$LOCK_STATE" = busy ]; then
+  log "audit skipped: busy (another job of $PROJECT held the clone for ${LOCK_WAIT_SECONDS:-3600}s); not recorded"
+  BUSY=1
+  exit 75
+fi
+close_stale_records "$RUN_ID" "$AUDIT_RECORD"
+record_audit running "" "" "" "$RUN_ID" "$RUN_LOG" "$STARTED_AT"
+log "audit start: project=$PROJECT"
+
+# A sealed pass cannot drive the app: without guard steps to cite it would claim drives nobody ran.
+[ ${#AUDIT_GUARD_STEPS[@]} -gt 0 ] ||
+  { refuse "AUDIT_GUARD_STEPS is empty: a sealed pass cannot drive the app, so it needs the guard steps that did; the agent did not run"; exit 1; }
+FIXES=yes
+if [ ${#AUDIT_EDIT_PATHS[@]} = 0 ]; then
+  FIXES="no: AUDIT_EDIT_PATHS is empty"
+elif [ ${#AUDIT_VERIFY_STEPS[@]} = 0 ]; then
+  FIXES="no: AUDIT_VERIFY_STEPS is empty, so the job could not verify a fix"
+elif [ -n "$(malformed_steps "${AUDIT_VERIFY_STEPS[@]}")" ]; then
+  refuse "AUDIT_VERIFY_STEPS has a step that is not name|command with both parts; the agent did not run"; exit 1
+fi
+
+# 1. The guard run the pass stands on.
+guard="$(python3 "$KITCHEN_AUTOMATION/lib/audit_state.py" guard "$NIGHTLY_RECORD")" ||
+  { refuse "no nightly guard run is recorded; the agent did not run"; exit 1; }
+{ read -r guard_status || true; read -r SHA || true; read -r guard_run || true; read -r guard_failed || true; } <<< "$guard"
+if [ "$guard_status" != green ]; then
+  result blocked "the latest nightly guard run $guard_run is $guard_status on ${SHA:-no sha}${guard_failed:+ (failed: $guard_failed)}; the audit runs only on a green guard"
+  exit 0
+fi
+[[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { refuse "the green guard run $guard_run has no full SHA"; exit 1; }
+for step in "${AUDIT_GUARD_STEPS[@]}"; do
+  [ -f "$LOG_DIR/guard-$guard_run-$step.log" ] ||
+    { refuse "the nightly guard run $guard_run did not run step $step (no $LOG_DIR/guard-$guard_run-$step.log); the agent did not run"; exit 1; }
+done
+
+# 2. The baseline, from the journal.
+if ! baseline="$(python3 "$KITCHEN_AUTOMATION/lib/audit_state.py" baseline "$PROJECT" 2> "$LOG_DIR/audit-$RUN_ID-baseline.err")"; then
+  refuse "no churn baseline: $(cat "$LOG_DIR/audit-$RUN_ID-baseline.err"); run a full audit-verification pass by hand; the agent did not run"
+  exit 1
+fi
+{ read -r BASELINE || true; read -r baseline_line || true; } <<< "$baseline"
+if [ "$BASELINE" = "$SHA" ]; then
+  # Nothing to audit, so no evidence is needed. Logged like any skipped pass: the checkpoint keeps the baseline
+  # inside the 30-day window while the branch stands still.
+  journal_outcome skipped
+  result skipped "no change since the last audit at ${SHA:0:12}"
+  exit 0
+fi
+git -C "$CLONE_DIR" -c core.hooksPath=/dev/null merge-base --is-ancestor "$BASELINE" "$SHA" 2>/dev/null ||
+  { refuse "the baseline ${BASELINE:0:12} is not in the history of the audited ${SHA:0:12}; the agent did not run"; exit 1; }
+
+# 3. The guard's evidence is in its clone until the next sync: the clone must still be at the guard's SHA.
+head="$(git -C "$CLONE_DIR" -c core.hooksPath=/dev/null rev-parse --verify --quiet HEAD || true)"
+[ "$head" = "$SHA" ] ||
+  { refuse "the guard proved ${SHA:0:12} but its clone is at ${head:-nothing}: its evidence is gone; the agent did not run"; exit 1; }
+mkdir -p "$WORK_DIR/guard/logs" "$WORK_DIR/guard/evidence" "$WORK_DIR/skill"
+mkdir -p -m 700 "$JOB_DIR"
+tail -n 1 "$NIGHTLY_RECORD" > "$WORK_DIR/guard/record.json"
+cp "$LOG_DIR/guard-$guard_run.log" "$LOG_DIR/guard-$guard_run-"*.log "$WORK_DIR/guard/logs/"
+for path in ${AUDIT_EVIDENCE_PATHS[@]+"${AUDIT_EVIDENCE_PATHS[@]}"}; do
+  [ -e "$CLONE_DIR/$path" ] || { refuse "the guard's evidence $path is missing from its clone; the agent did not run"; exit 1; }
+  mkdir -p "$(dirname "$WORK_DIR/guard/evidence/$path")"
+  cp -R "$CLONE_DIR/$path" "$WORK_DIR/guard/evidence/$path"
+done
+cp "$KITCHEN_AUTOMATION/../skills/audit-verification/SKILL.md" "$WORK_DIR/skill/SKILL.md"
+
+if [ "$FIXES" = yes ]; then
+  gh label create "$PUBLISH_LABEL" -R "$GH_REPO" --color 5319E7 --description "Daily verification audit PR" >/dev/null 2>&1 || true
+  pending="$(gh pr list -R "$GH_REPO" --label "$PUBLISH_LABEL" --state open --json number --jq 'length')"
+  [ "${pending:-0}" = 0 ] || FIXES="no: $pending audit PR(s) still open"
+fi
+
+BASE_SHA="$SHA"
+make_agent_clone "$SHA"
+[ "$FIXES" != yes ] || require_srt
+sandbox_platform
+write_agent_settings
+
+guard_steps="${AUDIT_GUARD_STEPS[*]}"
+FACTS="- audited SHA (your clone's HEAD): $SHA
+- scope: churn from the baseline $BASELINE, whose journal line is \"$baseline_line\"; the churn is git log $BASELINE..$SHA
+- the skill: $WORK_DIR/skill/SKILL.md
+- nightly guard run $guard_run, green on the audited SHA: its record $WORK_DIR/guard/record.json, its log and step logs in $WORK_DIR/guard/logs/
+- guard steps that drove the app and that you cite: ${guard_steps// /, } (logs guard-$guard_run-<step>.log)
+- evidence from the guard's clone, copied after the run: $WORK_DIR/guard/evidence/ (${AUDIT_EVIDENCE_PATHS[*]:-none configured})
+- work dir, for scratch notes: $WORK_DIR
+- report file: $REPORT_FILE
+- outcome file: $OUTCOME_FILE
+- fixes authorized: $FIXES"
+if [ "$FIXES" = yes ]; then
+  VERIFY_NAMES=""
+  for spec in "${AUDIT_VERIFY_STEPS[@]}"; do VERIFY_NAMES+="${VERIFY_NAMES:+, }${spec%%|*}"; done
+  FACTS+="
+- paths you may edit: ${AUDIT_EDIT_PATHS[*]}, Markdown prose only, outside fenced code blocks
+- your branch name, only for changed: audit/$RUN_DATE-<slug> (exactly one branch)
+- PR summary file: $SUMMARY_FILE
+- largest diff the job will publish: $MAX_CHANGED_LINES changed lines
+- steps the job reruns on your final tree before publishing (same sandbox, no Docker): $VERIFY_NAMES"
+fi
+PROMPT="$(cat "$KITCHEN_AUTOMATION/prompts/audit.md")
+
+Run facts:
+$FACTS
+- run id: $RUN_ID"
+
+STARTED=1
+status=0
+run_agent "$PROMPT" "$AUDIT_TIMEOUT" "${AUDIT_MODEL:-}" "${AUDIT_EFFORT:-}" Agent || status=$?
+[ "$status" != 124 ] || stop "claude timed out after ${AUDIT_TIMEOUT}s; no outcome"
+[ "$status" = 0 ] || stop "claude exited $status; no outcome"
+OUTCOME="$(tr -d '[:space:]' < "$OUTCOME_FILE" 2>/dev/null || true)"
+case "$OUTCOME" in
+  clean|changed|findings|blocked|skipped) ;;
+  *) stop "no valid outcome in $OUTCOME_FILE (got '${OUTCOME:0:40}')" ;;
+esac
+[ -s "$REPORT_FILE" ] || stop "outcome $OUTCOME, but no report at $REPORT_FILE"
+
+if [ "$OUTCOME" != changed ]; then
+  branches="$(git --git-dir="$AGENT_CLONE/.git" for-each-ref --format='%(refname:short)' refs/heads/audit/ | tr '\n' ' ')"
+  if [ -n "${branches// /}" ]; then
+    # A pass that fixed something found drift: it cannot be clean or skipped, and the baseline must not move.
+    case "$OUTCOME" in
+      clean|skipped)
+        journal_outcome findings
+        refuse "outcome $OUTCOME, but the agent committed ${branches% }: logged as findings, nothing published, report $REPORT_FILE"
+        exit 1 ;;
+    esac
+    warn "not published: the agent committed ${branches% } but its outcome is $OUTCOME"
+  fi
+  journal_outcome "$OUTCOME"
+  result "$OUTCOME" "report $REPORT_FILE"
+  exit 0
+fi
+# changed: the drift stays in scope (findings) unless the fix is published.
+if [ "$FIXES" != yes ]; then
+  journal_outcome findings
+  refuse "outcome changed, but fixes were not authorized ($FIXES); logged as findings, report $REPORT_FILE"
+  exit 1
+fi
+if ! GIT_DIR="$JOB_DIR/publish.git" publish; then
+  journal_outcome findings
+  exit 1
+fi
+if [ -z "$PUBLISHED_URL" ]; then
+  journal_outcome findings
+  refuse "outcome changed, but no audit branch was committed; logged as findings, report $REPORT_FILE"
+  exit 1
+fi
+journal_outcome changed
+result changed "$PUBLISHED_URL"

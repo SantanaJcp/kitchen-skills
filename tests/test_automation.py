@@ -914,6 +914,18 @@ class GardenerPublicationTests(AutomationFixture):
         keys = sorted(line.split("=")[0] for line in Path(f"{args}.git").read_text().splitlines())
         self.assertEqual(keys, ["user.email", "user.name"])
 
+    def test_model_and_effort_reach_claude_only_when_set(self):
+        args = Path(self.tmp.name) / "args"
+        self.agent(f'printf "%s\\n" "$@" > {args}')
+        for extra, expected in (("", (None, None)), ('GARDENER_MODEL="opus"\nGARDENER_EFFORT="medium"\n', ("opus", "medium"))):
+            with self.subTest(extra=extra):
+                self.configure_publishing(extra=extra)
+
+                self.run_job("weekly-gardener", "shop")
+
+                argv = args.read_text().splitlines()
+                self.assertEqual(tuple(argv[argv.index(flag) + 1] if flag in argv else None for flag in ("--model", "--effort")), expected)
+
     def test_agent_environment_is_an_allowlist(self):
         names = Path(self.tmp.name) / "names"
         self.configure_publishing()
@@ -1352,6 +1364,333 @@ git commit -q -am "More notes"
         self.assert_refused(self.run_job("weekly-gardener", "shop"), "no PR summary")
 
 
+class DailyAuditTests(AutomationFixture):
+    """The audit stands on the guard's green run of the same SHA, runs a sealed agent, then logs and publishes itself."""
+
+    PROVE = "prove|mkdir -p .verify/evidence && echo held > .verify/evidence/ledger.jsonl"
+    MAP = "# Map\n\nReaders: list them.\n\n```bash\n$V api GET /readers --expect 200\n```\n"
+
+    def setUp(self):
+        super().setUp()
+        self.checkout = Path(self.tmp.name) / "shop"  # the owner's checkout, named like the project; only read
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.checkout)], check=True, env=clean_env())
+        (self.config / "projects.txt").write_text(f"{self.checkout}\n")
+
+    def audit_config(self, guard_steps=(PROVE, "control|true"), cited="prove control", extra=""):
+        node = Path(shutil.which("node")).parent  # srt, for the job's verification of a fix
+        self.configure(list(guard_steps), extra=f'EXTRA_PATH="{self.bin}:{node}"\nAUDIT_GUARD_STEPS=({cited})\n'
+                                                f'AUDIT_EVIDENCE_PATHS=(".verify/evidence")\n' + extra)
+
+    FIXES = 'AUDIT_EDIT_PATHS=("docs/*")\nAUDIT_VERIFY_STEPS=("map|grep -q \'every reader\' docs/map.md")\n'
+
+    def log_baseline(self, sha, outcome="changed full"):
+        entry = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "repo": str(self.checkout),
+                 "project": str((self.checkout / ".git").resolve()), "status": "note", "message": f"audit-verification {outcome} at {sha}"}
+        self.state.mkdir(parents=True, exist_ok=True)
+        with open(self.state / "log.jsonl", "a") as handle:
+            handle.write(json.dumps(entry) + "\n")
+
+    def journal(self):
+        path = self.state / "log.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def audits(self):
+        return [json.loads(line) for line in (self.state / "audit" / "shop.jsonl").read_text().splitlines()]
+
+    def churn(self):
+        """A baseline on the first commit, then one change on dev: the churn of the next pass."""
+        self.log_baseline(self.git(self.origin, "rev-parse", "dev"))
+        self.commit_to_origin({"docs/map.md": (self.MAP, 0o644)})
+        return self.git(self.origin, "rev-parse", "dev")
+
+    def agent(self, outcome="findings", script=""):
+        self.fake("claude", 'echo "claude" >> "$CALLS"\n' + script +
+                  f'\nprintf "# Audit\\n\\nOutcome: {outcome}\\n" > "$AUDIT_REPORT_FILE"\necho {outcome} > "$AUDIT_OUTCOME_FILE"\n')
+
+    def guard_then_audit(self, **env):
+        guard = self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+        self.assertEqual(guard.returncode in (0, 1), True, guard.stdout)
+        return self.run_job("daily-audit", "shop", **env)
+
+    def test_a_red_guard_blocks_the_pass_and_the_agent_never_runs(self):
+        sha = self.churn()
+        self.audit_config(guard_steps=(self.PROVE, "control|false"))
+        self.agent()
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        run = self.audits()[-1]
+        self.assertEqual((run["status"], run["sha"]), ("blocked", sha))
+        self.assertIn("is red on", run["detail"])
+        self.assertIn("(failed: control)", run["detail"])
+        self.assertNotIn("claude", self.calls_log())
+        self.assertEqual(len(self.journal()), 1)  # only the baseline: a pass that never ran logs nothing
+        self.assertIn("kitchen audit: shop blocked", self.notifications()[-1])
+
+    def test_a_clone_moved_off_the_guards_sha_is_refused(self):
+        guarded = self.churn()
+        self.audit_config()
+        self.agent()
+        self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+        self.commit_to_origin({"later.txt": ("merged after the guard\n", 0o644)})
+        clone = self.state / "automation" / "shop" / "clone"  # what the next sync does to the guard's clone
+        self.git(clone, "fetch", "-q", "origin")
+        self.git(clone, "checkout", "-q", "--detach", "origin/dev")
+        moved = self.git(clone, "rev-parse", "HEAD")
+
+        result = self.run_job("daily-audit", "shop")
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"AUDIT-RESULT: refused - the guard proved {guarded[:12]} but its clone is at {moved}", result.stdout)
+        self.assertNotIn("claude", self.calls_log())
+        self.assertEqual(self.audits()[-1]["status"], "refused")
+
+    def test_no_change_since_the_baseline_is_skipped_without_the_agent(self):
+        self.log_baseline(self.git(self.origin, "rev-parse", "dev"))
+        self.audit_config()
+        self.agent()
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.audits()[-1]["status"], "skipped")
+        self.assertNotIn("claude", self.calls_log())
+        self.assertEqual(self.notifications(), [])
+        sha = self.git(self.origin, "rev-parse", "dev")  # the checkpoint keeps the baseline inside the journal window
+        self.assertEqual([e["message"] for e in self.journal()], [f"audit-verification changed full at {sha}",
+                                                                  f"audit-verification skipped churn at {sha}"])
+
+    def test_a_guard_run_without_a_cited_step_is_refused(self):
+        self.churn()
+        self.audit_config(guard_steps=(self.PROVE,))
+        self.agent()
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("did not run step control", result.stdout)
+        self.assertNotIn("claude", self.calls_log())
+
+    def test_without_a_baseline_the_job_refuses_instead_of_a_full_pass(self):
+        self.commit_to_origin({"docs/map.md": (self.MAP, 0o644)})
+        self.audit_config()
+        self.agent()
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no churn baseline", result.stdout)
+        self.assertIn("run a full audit-verification pass by hand", result.stdout)
+        self.assertNotIn("claude", self.calls_log())
+
+    def test_the_agent_runs_sealed_with_the_guards_evidence_and_the_configured_model(self):
+        tmp = Path(self.tmp.name)
+        sha = self.churn()
+        baseline = self.git(self.origin, "rev-parse", "dev~1")
+        self.audit_config(extra='AUDIT_MODEL="sonnet"\nAUDIT_EFFORT="low"\nGARDENER_SANDBOX_DOMAINS=("nuget.org")\n'
+                                'GARDENER_SANDBOX_UNIX_SOCKETS=("/var/run/docker.sock")\n')
+        self.agent(script=f"""printf "%s\\n" "$@" > {tmp}/args; printf '%s' "$2" > {tmp}/prompt
+work=$(dirname "$AUDIT_REPORT_FILE")
+cat "$work/guard/evidence/.verify/evidence/ledger.jsonl" > {tmp}/ledger
+ls "$work/guard/logs" > {tmp}/logs
+head -1 "$work/skill/SKILL.md" > {tmp}/skill
+git rev-parse HEAD > {tmp}/head
+echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        argv = (tmp / "args").read_text().splitlines()
+        prompt = (tmp / "prompt").read_text()
+        self.assertEqual((argv[argv.index("--model") + 1], argv[argv.index("--effort") + 1]), ("sonnet", "low"))
+        self.assertIn("Agent", argv)  # the skill's source wave
+        settings = json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
+        self.assertEqual((settings["sandbox"]["enabled"], settings["sandbox"]["allowUnsandboxedCommands"]), (True, False))
+        self.assertIn("~/", settings["sandbox"]["filesystem"]["denyRead"])
+        # stricter than the gardener's: no package feed, no Docker socket, whatever the project grants the gardener
+        self.assertEqual((settings["sandbox"]["network"]["allowedDomains"], settings["sandbox"]["network"]["allowUnixSockets"]), ([], []))
+        self.assertIn(f"audited SHA (your clone's HEAD): {sha}", prompt)
+        self.assertIn(f"churn from the baseline {baseline}", prompt)
+        self.assertIn("fixes authorized: no: AUDIT_EDIT_PATHS is empty", prompt)
+        self.assertEqual((tmp / "head").read_text().strip(), sha)
+        self.assertEqual((tmp / "ledger").read_text(), "held\n")
+        self.assertTrue(any(name.endswith("-prove.log") for name in (tmp / "logs").read_text().split()))
+        self.assertTrue(any(name.endswith("-control.log") for name in (tmp / "logs").read_text().split()))
+        self.assertEqual((tmp / "skill").read_text().strip(), "---")
+        self.assertEqual((tmp / "gh").read_text().strip(), "unset")
+
+    def test_a_pass_logs_its_outcome_and_a_clean_one_moves_the_baseline(self):
+        sha = self.churn()
+        self.audit_config()
+        for outcome, journal_line in (("findings", f"audit-verification findings churn at {sha}"),
+                                      ("clean", f"audit-verification clean (churn) churn at {sha}")):
+            with self.subTest(outcome=outcome):
+                self.agent(outcome)
+
+                result = self.guard_then_audit()
+
+                self.assertEqual(result.returncode, 0, result.stdout)
+                entry = self.journal()[-1]
+                self.assertEqual(entry["message"], journal_line)
+                self.assertEqual(entry["project"], str((self.checkout / ".git").resolve()))  # status lists it under the project
+                self.assertEqual(self.audits()[-1]["status"], outcome)
+        self.assertEqual(len([n for n in self.notifications() if "kitchen audit" in n]), 1)  # findings, not clean
+
+        again = self.run_job("daily-audit", "shop")  # the clean pass is the new baseline: nothing left to audit
+
+        self.assertEqual(self.audits()[-1]["status"], "skipped", again.stdout)
+        self.assertEqual(self.calls_log().count("claude"), 2)
+
+    def test_a_pass_without_an_outcome_or_past_its_deadline_is_incomplete(self):
+        self.churn()
+        self.audit_config()
+        for name, fake, env, reason in (("no outcome", 'echo "claude" >> "$CALLS"', {}, "no valid outcome"),
+                                        ("timeout", 'echo "claude" >> "$CALLS"; sleep 30', {"AUDIT_TIMEOUT_SECONDS": "1"}, "timed out after 1s")):
+            with self.subTest(name):
+                self.fake("claude", fake)
+
+                result = self.guard_then_audit(**env)
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(self.audits()[-1]["status"], "incomplete")
+                self.assertIn(reason, self.audits()[-1]["detail"])
+                self.assertEqual(len(self.journal()), 1)
+
+    def fix_script(self, line="Readers: list every reader.", at="Readers: list them."):
+        text = self.MAP.replace(at, line)
+        return textwrap.dedent(f"""\
+            git checkout -q -b "${{AUDIT_BRANCH_PREFIX}}map"
+            cat > docs/map.md <<'MAP'
+            {textwrap.indent(text, '            ').strip()}
+            MAP
+            git commit -q -am "docs: correct the map"
+            printf '# Correct the map\\n\\nDrift and how it was checked.\\n' > "$AUDIT_SUMMARY_FILE"
+            """)
+
+    def test_a_changed_pass_publishes_a_prose_fix_through_the_gardeners_validation(self):
+        sha = self.churn()
+        self.audit_config(extra=self.FIXES)
+        self.agent("changed", self.fix_script())
+
+        result = self.guard_then_audit()
+
+        branch = f"audit/{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d}-map"
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.git(self.origin, "rev-parse", f"{branch}^"), sha)
+        pr = [line for line in self.calls_log().splitlines() if line.startswith("gh pr create")]
+        self.assertEqual(len(pr), 1)
+        self.assertIn("--label audit-verification", pr[0])
+        body = Path(pr[0].split("--body-file ")[1].split()[0]).read_text()
+        self.assertIn("- map: passed", body)  # the job reran AUDIT_VERIFY_STEPS on the tree, as for the gardener
+        self.assertEqual(self.audits()[-1]["status"], "changed")
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification changed churn at {sha}")
+
+    def test_a_fix_the_gardeners_validation_or_the_prose_rule_refuses_is_logged_as_findings(self):
+        token = "gh" + "p_" + "".join(random.Random(7).choice(string.ascii_letters) for _ in range(36))  # runtime only
+        for name, script, reason in (
+                ("inside a drive block", self.fix_script("$V api GET /readers --expect 204", "$V api GET /readers --expect 200"),
+                 "changes more than prose: docs/map.md:6: inside a fenced code block"),
+                ("inside a blockquoted drive block", self.fix_script("> ```bash\n> $V api GET /readers --expect 204\n> ```"),
+                 "changes more than prose: docs/map.md:3: inside a fenced code block"),
+                ("outside the edit paths", self.fix_script() + "echo note > notes.md && git add notes.md && git commit -qm more\n",
+                 "touches notes.md, outside the paths it may edit"),
+                ("a planted token", self.fix_script() + f"echo 'key {token}' >> docs/map.md && git commit -qam more\n",
+                 "possible secret in the diff")):
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                sha = self.churn()
+                self.audit_config(extra=self.FIXES)
+                self.agent("changed", script)
+
+                result = self.guard_then_audit()
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f"AUDIT-RESULT: refused - ", result.stdout)
+                self.assertIn(reason, result.stdout)
+                self.assertEqual([b for b in self.origin_branches() if b.startswith("audit/")], [])
+                self.assertNotIn("gh pr create", self.calls_log())
+                self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+    def test_a_clean_outcome_with_a_committed_fix_is_refused_and_logged_as_findings(self):
+        sha = self.churn()
+        self.audit_config(extra=self.FIXES)
+        self.agent("clean", self.fix_script())
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("outcome clean, but the agent committed audit/", result.stdout)
+        self.assertNotIn("gh pr create", self.calls_log())
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+    def test_changed_without_authorization_is_refused_and_logged_as_findings(self):
+        for name, extra, env in (("no edit paths", "", {}), ("an audit PR still open", self.FIXES, {"OPEN_PRS": "1"})):
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                sha = self.churn()
+                self.audit_config(extra=extra)
+                self.agent("changed", self.fix_script())
+
+                result = self.guard_then_audit(**env)
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("fixes were not authorized", result.stdout)
+                self.assertNotIn("gh pr create", self.calls_log())
+                self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+    def test_busy_project_lock_skips_the_audit_and_records_nothing(self):
+        self.audit_config()
+        lock = self.state / "automation" / "shop" / "job.lock"
+        lock.parent.mkdir(parents=True)
+
+        with open(lock, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            result = self.run_job("daily-audit", "shop", LOCK_WAIT_SECONDS="1", LOCK_POLL_SECONDS="0.1")
+
+        self.assertEqual(result.returncode, 75, result.stdout)
+        self.assertIn("audit skipped: busy", result.stdout)
+        self.assertFalse((self.state / "audit" / "shop.jsonl").exists())
+
+
+class ProseOnlyTests(unittest.TestCase):
+    """Which lines of a Markdown file the audit's prose gate keeps as code: every line a fence may hold."""
+
+    def code_lines(self, text):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("prose_only", AUTOMATION / "lib" / "prose_only.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return sorted(module.code_lines(textwrap.dedent(text)))
+
+    def test_fences_count_at_the_top_level_and_nested_in_quotes_and_lists(self):
+        self.assertEqual(self.code_lines("""\
+            prose
+            ```bash
+            drive
+            ```
+            > ```
+            > drive
+            > ```
+            - ```
+              drive
+              ```
+            prose
+            """), [2, 3, 4, 5, 6, 7, 8, 9, 10])
+
+    def test_a_line_that_only_looks_like_a_closing_fence_keeps_the_block_open(self):
+        # inside a quoted fence, "> - ```" is content, not the quote's closing fence (round 2 of the review)
+        self.assertEqual(self.code_lines("""\
+            > ```bash
+            > - ```
+            > drive
+            > ```
+            prose
+            """), [1, 2, 3, 4])
+        # four spaces of indentation inside a top-level fence is content too
+        self.assertEqual(self.code_lines("```\n    ```\ndrive\n```\nprose\n"), [1, 2, 3, 4])
+
+
 @unittest.skipUnless(platform.system() == "Darwin", "launchd is the macOS schedule")
 class MacScheduleTests(AutomationFixture):
     def test_scheduled_jobs_run_at_standard_priority_not_throttled_as_background(self):
@@ -1415,6 +1754,20 @@ class LinuxScheduleTests(AutomationFixture):
         self.assertIn(f"ExecStart=/bin/bash {AUTOMATION}/bin/weekly-gardener shop", service)
         self.assertIn("OnCalendar=Mon *-*-* 06:00:00", (units / "kitchen-shop-weekly-gardener.timer").read_text())
         self.assertIn("systemctl --user enable --now kitchen-shop-weekly-gardener.timer", self.calls_log())
+
+    def test_audit_gets_a_daily_timer_after_the_guard_without_catch_up(self):
+        self.configure([])
+
+        result, units = self.install("--audit", "shop")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(p.name for p in units.iterdir()), ["kitchen-shop-daily-audit.service", "kitchen-shop-daily-audit.timer"])
+        service = (units / "kitchen-shop-daily-audit.service").read_text()
+        self.assertIn("PrivateTmp=yes", service)
+        self.assertIn(f"ExecStart=/bin/bash {AUTOMATION}/bin/daily-audit shop", service)
+        timer = (units / "kitchen-shop-daily-audit.timer").read_text()
+        self.assertIn("OnCalendar=*-*-* 04:00:00", timer)
+        self.assertNotIn("Persistent", timer)  # a missed run waits for the next one
 
     def test_refuses_a_path_systemd_would_read_differently(self):
         self.configure([])

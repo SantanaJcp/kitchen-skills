@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Shared helpers for kitchen automation jobs. Usage: source common.sh <project> nightly|gardener (the job's own record)
+# Shared helpers for kitchen automation jobs. Usage: source common.sh <project> nightly|gardener|audit (the job's own record)
 # Config: ${KITCHEN_CONFIG:-~/.config/kitchen}/automation/<project>.env (private, never in this repo)
-# State:  ${KITCHEN_STATE:-~/.local/state/kitchen}/automation/<project>/, nightly/<project>.jsonl and gardener/<project>.jsonl
+# State:  ${KITCHEN_STATE:-~/.local/state/kitchen}/automation/<project>/, and nightly/, gardener/ and audit/<project>.jsonl
 set -euo pipefail
 # Jobs only ever work on their own clone; a GIT_DIR inherited from a git hook would redirect them.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX GIT_NAMESPACE
@@ -21,11 +21,13 @@ LOG_DIR="$STATE_DIR/logs"
 HISTORY_DIR="$STATE_DIR/history"
 NIGHTLY_RECORD="$STATE_ROOT/nightly/$PROJECT.jsonl"
 GARDENER_RECORD="$STATE_ROOT/gardener/$PROJECT.jsonl"
-mkdir -p "$LOG_DIR" "$HISTORY_DIR" "$(dirname "$NIGHTLY_RECORD")" "$(dirname "$GARDENER_RECORD")"
+AUDIT_RECORD="$STATE_ROOT/audit/$PROJECT.jsonl"
+mkdir -p "$LOG_DIR" "$HISTORY_DIR" "$(dirname "$NIGHTLY_RECORD")" "$(dirname "$GARDENER_RECORD")" "$(dirname "$AUDIT_RECORD")"
 case "${2:-}" in  # the record this job's run writes, where the supervisor marks its survivors
   nightly) JOB_RECORD="$NIGHTLY_RECORD" ;;
   gardener) JOB_RECORD="$GARDENER_RECORD" ;;
-  *) echo "common.sh: the job must name its record, nightly or gardener (got '${2:-}')" >&2; exit 2 ;;
+  audit) JOB_RECORD="$AUDIT_RECORD" ;;
+  *) echo "common.sh: the job must name its record, nightly, gardener or audit (got '${2:-}')" >&2; exit 2 ;;
 esac
 
 # launchd starts with a bare PATH. The shims go first so the gh wrapper wins;
@@ -160,24 +162,31 @@ record_gardener() { # status detail run_id log started [warning...]
   python3 "$KITCHEN_AUTOMATION/lib/record.py" "$GARDENER_RECORD" gardener "$@"
 }
 
+# The daily audit's history: one line per run, its outcome (clean, changed, findings, blocked, skipped) or refused /
+# incomplete (or running).
+record_audit() { # status detail sha baseline run_id log started [warning...]
+  python3 "$KITCHEN_AUTOMATION/lib/record.py" "$AUDIT_RECORD" audit "$@"
+}
+
 # Closes "running" lines left by runs that were killed; only called while holding the project lock.
 close_stale_records() { # current-run-id [record, default the nightly's]
   python3 "$KITCHEN_AUTOMATION/lib/record.py" "${2:-$NIGHTLY_RECORD}" close-stale "$1"
 }
 
-# Every job runs under lib/supervise.py: one job at a time per project (the guard and the gardener share
+# Every job runs under lib/supervise.py: one job at a time per project (the guard, the gardener and the audit share
 # the clone that sync_clone resets), in its own process group that is stopped as a whole before the lock
 # is released. The supervisor re-runs this script with KITCHEN_LOCK_STATE=held, or =busy when the lock
 # stayed taken for LOCK_WAIT_SECONDS (default 3600); the job then only logs the skip: no job writes its
 # record without holding the lock.
 # The supervisor also refuses to release the project while any process of the job still has files open in
-# the clone or the gardener's work dirs (see lib/supervise.py); such survivors mark this run's line in its own record
+# the clone or the agents' work dirs (see lib/supervise.py); such survivors mark this run's line in its own record
 # ($JOB_RECORD) incomplete.
 if [ -z "${KITCHEN_LOCK_STATE:-}" ]; then
   [ "${NEEDS_DOCKER:-0}" != 1 ] || start_docker
   export KITCHEN_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   exec python3 "$KITCHEN_AUTOMATION/lib/supervise.py" "$STATE_DIR/job.lock" "${LOCK_WAIT_SECONDS:-3600}" "${LOCK_POLL_SECONDS:-5}" \
-    --watch "$CLONE_DIR" --watch "$STATE_DIR/gardener" --watch "$STATE_DIR/gardener-job" --record "$JOB_RECORD" --run-id "$KITCHEN_RUN_ID" \
+    --watch "$CLONE_DIR" --watch "$STATE_DIR/gardener" --watch "$STATE_DIR/gardener-job" \
+    --watch "$STATE_DIR/audit" --watch "$STATE_DIR/audit-job" --record "$JOB_RECORD" --run-id "$KITCHEN_RUN_ID" \
     -- "$BASH" "$0" "$PROJECT"
 fi
 LOCK_STATE="$KITCHEN_LOCK_STATE"
