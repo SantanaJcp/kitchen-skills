@@ -186,6 +186,7 @@ class EnvironmentDoctorTests(unittest.TestCase):
         for name in ("kitchen-shop-nightly-guard.timer", "kitchen-shop-weekly-gardener.timer"):
             (units / name).write_text("[Timer]\n")
         self.fake("systemctl", '[ "$3" = kitchen-shop-nightly-guard.timer ] && { echo active; exit 0; }; echo inactive; exit 3')
+        self.fake("systemd-run", 'echo \'ssss "mako" "emersion" "1.9" "1.2"\'')
 
         with mock.patch.dict(os.environ, {"PATH": str(self.bin), "XDG_CONFIG_HOME": ""}):
             report = environment().schedules("Linux", self.root)
@@ -194,6 +195,49 @@ class EnvironmentDoctorTests(unittest.TestCase):
         warnings = [m for level, m in report if level == "WARN"]
         self.assertEqual(len(warnings), 1, report)
         self.assertIn("kitchen-shop-weekly-gardener.timer is present but inactive", warnings[0])
+
+    def linux_timer_report(self, systemd_run):
+        units = self.root / ".config" / "systemd" / "user"
+        units.mkdir(parents=True)
+        (units / "kitchen-shop-nightly-guard.timer").write_text("[Timer]\n")
+        self.fake("systemctl", "echo active")
+        if systemd_run is not None:
+            self.fake("systemd-run", systemd_run)
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin), "XDG_CONFIG_HOME": ""}):
+            return environment().schedules("Linux", self.root)
+
+    def test_timers_without_a_notification_server_on_their_bus_are_flagged(self):
+        # The text a busctl call prints when no client owns or can activate the name, measured on a host where the desktop
+        # session belongs to another user than the one running the timers.
+        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertEqual(len(warnings), 1, report)
+        self.assertIn("no notification server confirmed on the kitchen timers' session bus", warnings[0])
+        self.assertIn("(Call failed: The name is not activatable)", warnings[0])
+
+    def test_the_probe_asks_the_timers_bus_for_the_server_and_shows_nothing(self):
+        args = self.root / "args"
+        report = self.linux_timer_report(f'printf "%s\\n" "$@" > {args}; echo \'ssss "mako" "emersion" "1.9" "1.2"\'')
+
+        self.assertIn(("INFO", "notification server mako answers on the kitchen timers' session bus"), report)
+        self.assertEqual(args.read_text().split(), ["--user", "--wait", "--pipe", "--quiet", "busctl", "--user", "call",
+                                                    "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                                    "org.freedesktop.Notifications", "GetServerInformation"])
+
+    def test_a_probe_that_cannot_run_is_a_warning_not_a_pass(self):
+        report = self.linux_timer_report(None)
+
+        self.assertIn(("WARN", "notification server not checked: could not run systemd-run to ask the kitchen timers' session bus"),
+                      report)
+
+    def test_no_timers_no_probe(self):
+        probed = self.root / "probed"
+        self.fake("systemd-run", f": > {probed}; exit 1")
+
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin), "XDG_CONFIG_HOME": ""}):
+            self.assertEqual(environment().schedules("Linux", self.root), [])
+        self.assertFalse(probed.exists())
 
     def test_unreadable_launchctl_is_reported_not_skipped(self):
         agents = self.root / "Library" / "LaunchAgents"

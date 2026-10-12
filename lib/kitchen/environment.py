@@ -1,4 +1,4 @@
-"""What `kitchen doctor` checks outside the links: agent CLIs, the automation's tools and the scheduled jobs."""
+"""What `kitchen doctor` checks outside the links: agent CLIs, the automation's tools, the scheduled jobs and whether their notifications can reach a server."""
 from __future__ import annotations
 
 import os
@@ -96,4 +96,24 @@ def systemd(h: Path) -> list[tuple[str, str]]:
         else:
             report.append(("WARN", f"{timer} is present but {state}: start it with "
                                    f"`systemctl --user enable --now {timer.name}`, or move it to the Trash if the job runs elsewhere"))
-    return report
+    return report + [notification_server()]
+
+
+# Asked from a transient unit, so it reaches the session bus the timers get, not this shell's. Shows nothing on screen.
+NOTIFICATION_PROBE = ["systemd-run", "--user", "--wait", "--pipe", "--quiet", "busctl", "--user", "call",
+                      "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                      "org.freedesktop.Notifications", "GetServerInformation"]
+
+
+def notification_server() -> tuple[str, str]:
+    """Whether notify-send from a kitchen timer can reach a notification server: the timers run as this user, so their
+    notifications go to this user's session bus, and a desktop logged in as another user never receives them."""
+    probe = run(*NOTIFICATION_PROBE)
+    if probe is not None and probe.returncode == 0:
+        name = probe.stdout.split('"')[1] if probe.stdout.count('"') >= 2 else probe.stdout.strip()
+        return ("INFO", f"notification server {name} answers on the kitchen timers' session bus")
+    if probe is None:
+        return ("WARN", "notification server not checked: could not run systemd-run to ask the kitchen timers' session bus")
+    reason = (probe.stderr.strip().splitlines() or [f"exit {probe.returncode}"])[0]
+    return ("WARN", f"no notification server confirmed on the kitchen timers' session bus: asking it from a transient unit failed "
+                    f"({reason}); without one, exception runs record `not notified` (automation/README.md, Notifications)")
