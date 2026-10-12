@@ -407,6 +407,86 @@ class LogAndStatusTests(ProjectFixture):
                       " · overdue: last record 8d 1h ago, cadence weekly plus a day", late.stdout)
         self.assertEqual((remote.returncode, remote.stdout), (0, ""), remote.stdout + remote.stderr)
 
+    AUDIT_ENV = 'GUARD_STEPS=("tests|true")\nGARDENER_VERIFY_STEPS=("tests|true")\nAUDIT_GUARD_STEPS=(prove control)\n'
+
+    def audit_project(self, **record):
+        self.green_project()
+        env = self.configure_automation(text=self.AUDIT_ENV)
+        self.write_audit(**record)
+        return env
+
+    def write_audit(self, **record):
+        self.write_record("audit", [{"ts": ago(hours=2, minutes=5), "status": "clean", "detail": "report /r/report.md",
+                                     "sha": "ab12cd34" + "0" * 32, "baseline": "f" * 40, "warnings": [], **record}])
+
+    def test_status_shows_the_audits_last_outcome_and_only_the_good_ones_are_green(self):
+        self.audit_project()
+        for outcome in ("clean", "changed", "skipped"):
+            with self.subTest(outcome=outcome):
+                self.write_audit(status=outcome)
+
+                result = self.kitchen("status", "--exceptions")
+                out = self.kitchen("status").stdout
+
+                self.assertEqual((result.returncode, result.stdout), (0, ""), result.stdout + result.stderr)
+                self.assertIn(f"  audit      ✓ {outcome} on ab12cd34: report /r/report.md · 2h 5m ago\n", out)
+        for outcome in ("findings", "blocked", "refused", "incomplete", "running"):
+            with self.subTest(outcome=outcome):
+                self.write_audit(status=outcome, warnings=["not notified: see the log"])
+
+                result = self.kitchen("status", "--exceptions")
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [
+                    f"shop  audit      ✗ {outcome} on ab12cd34: report /r/report.md · 2h 5m ago · warnings: not notified: see the log"])
+
+    def test_a_refused_audit_without_a_sha_shows_its_reason(self):
+        self.audit_project(status="refused", sha=None, detail="no nightly guard run is recorded; the agent did not run")
+
+        result = self.kitchen("status", "--exceptions")
+
+        self.assertEqual(result.stdout.splitlines(),
+                         ["shop  audit      ✗ refused: no nightly guard run is recorded; the agent did not run · 2h 5m ago"])
+
+    def test_an_audit_record_older_than_two_days_or_with_an_unreadable_time_is_not_green(self):
+        self.audit_project(ts=ago(days=1, hours=23))
+        within = self.kitchen("status", "--exceptions")
+        within_json = json.loads(self.kitchen("status", "--json").stdout)["projects"][0]["audit"]
+        self.write_audit(ts=ago(days=2, hours=1))
+        late = self.kitchen("status", "--exceptions")
+        late_json = json.loads(self.kitchen("status", "--json").stdout)["projects"][0]["audit"]
+        self.write_audit(ts="yesterday")
+        unreadable = self.kitchen("status", "--exceptions")
+
+        self.assertEqual((within.returncode, within.stdout), (0, ""), within.stdout + within.stderr)
+        self.assertEqual((within_json["status"], within_json["overdue"]), ("clean", False))
+        self.assertEqual(late.returncode, 1, late.stdout + late.stderr)
+        self.assertEqual(late.stdout.splitlines(), ["shop  audit      ✗ clean on ab12cd34: report /r/report.md · 2d 1h ago"
+                                                    " · overdue: last record 2d 1h ago, cadence daily plus a day"])
+        self.assertEqual((late_json["status"], late_json["overdue"]), ("clean", True))
+        self.assertEqual(unreadable.stdout.splitlines(),
+                         ["shop  audit      ✗ clean on ab12cd34: report /r/report.md · unknown ago"])
+
+    def test_an_audit_is_configured_only_by_audit_guard_steps_and_then_needs_its_record(self):
+        env = self.audit_project(status="findings")
+        for text in (self.AUDIT_ENV.replace("AUDIT_GUARD_STEPS=(prove control)", "AUDIT_GUARD_STEPS=()"),
+                     self.AUDIT_ENV.replace("AUDIT_GUARD_STEPS=(prove control)", '# AUDIT_GUARD_STEPS=(prove control)')):
+            with self.subTest(text=text):
+                self.configure_automation(text=text)
+
+                result = self.kitchen("status", "--exceptions")
+                out = self.kitchen("status").stdout
+
+                self.assertEqual((result.returncode, result.stdout), (0, ""), result.stdout + result.stderr)
+                self.assertIn(f"  audit      not configured (AUDIT_GUARD_STEPS is empty or unset in {env})", out)
+        self.configure_automation(text=self.AUDIT_ENV)
+        (self.home / "state" / "audit" / "shop.jsonl").unlink()
+
+        missing = self.kitchen("status", "--exceptions")
+
+        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
+        self.assertEqual(missing.stdout.splitlines(), [f"shop  audit      ✗ no record (AUDIT_GUARD_STEPS in {env})"])
+
     def test_an_unconfigured_nightly_gardener_and_decisions_are_informational_never_green_and_never_exceptions(self):
         project = self.make_project("shop")
         self.fake("gh", "echo '[]'")
@@ -420,6 +500,7 @@ class LogAndStatusTests(ProjectFixture):
         self.assertIn(f"  nightly    not configured (no {automation / 'shop.env'})", out)
         self.assertIn(f"  gardener   not configured (no {automation / 'shop.env'}"
                       f" and no gardener in {self.home / 'config' / 'integrate.toml'})", out)
+        self.assertIn(f"  audit      not configured (no {automation / 'shop.env'})", out)
         self.assertIn(f"  decisions  not configured (no base for 'shop' in {self.home / 'config' / 'integrate.toml'})", out)
         self.assertNotIn("✓", out)
 
@@ -553,6 +634,7 @@ class LogAndStatusTests(ProjectFixture):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn(f"shop  nightly    unknown: cannot source {env}: bash exited", result.stdout)
                 self.assertIn(f"shop  gardener   unknown: cannot source {env}: bash exited", result.stdout)
+                self.assertIn(f"shop  audit      unknown: cannot source {env}: bash exited", result.stdout)
                 self.assertNotIn("not configured", result.stdout)
 
     def test_an_env_that_does_not_finish_sourcing_in_time_is_unknown_and_status_returns_promptly(self):
