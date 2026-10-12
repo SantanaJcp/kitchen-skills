@@ -213,7 +213,7 @@ class EnvironmentDoctorTests(unittest.TestCase):
 
         warnings = [m for level, m in report if level == "WARN"]
         self.assertEqual(len(warnings), 1, report)
-        self.assertIn("the kitchen timers cannot show notifications", warnings[0])
+        self.assertIn("no notification server confirmed on the kitchen timers' session bus", warnings[0])
         self.assertIn("(Call failed: The name is not activatable)", warnings[0])
 
     def test_the_probe_asks_the_timers_bus_for_the_server_and_shows_nothing(self):
@@ -228,15 +228,16 @@ class EnvironmentDoctorTests(unittest.TestCase):
     def test_a_probe_that_cannot_run_is_a_warning_not_a_pass(self):
         report = self.linux_timer_report(None)
 
-        self.assertIn(("WARN", "the kitchen timers cannot show notifications: no notification server answers on this user's "
-                               "session bus (could not run systemd-run); runs record `not notified` instead "
-                               "(automation/README.md, Notifications)"), report)
+        self.assertIn(("WARN", "notification server not checked: could not run systemd-run to ask the kitchen timers' session bus"),
+                      report)
 
     def test_no_timers_no_probe(self):
-        self.fake("systemd-run", "exit 1")
+        probed = self.root / "probed"
+        self.fake("systemd-run", f": > {probed}; exit 1")
 
         with mock.patch.dict(os.environ, {"PATH": str(self.bin), "XDG_CONFIG_HOME": ""}):
             self.assertEqual(environment().schedules("Linux", self.root), [])
+        self.assertFalse(probed.exists())
 
     def test_unreadable_launchctl_is_reported_not_skipped(self):
         agents = self.root / "Library" / "LaunchAgents"

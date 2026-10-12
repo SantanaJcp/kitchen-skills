@@ -112,6 +112,8 @@ def notification_server() -> tuple[str, str]:
     if probe is not None and probe.returncode == 0:
         name = probe.stdout.split('"')[1] if probe.stdout.count('"') >= 2 else probe.stdout.strip()
         return ("INFO", f"notification server {name} answers on the kitchen timers' session bus")
-    reason = "could not run systemd-run" if probe is None else (probe.stderr.strip().splitlines() or [f"exit {probe.returncode}"])[0]
-    return ("WARN", f"the kitchen timers cannot show notifications: no notification server answers on this user's session bus "
-                    f"({reason}); runs record `not notified` instead (automation/README.md, Notifications)")
+    if probe is None:
+        return ("WARN", "notification server not checked: could not run systemd-run to ask the kitchen timers' session bus")
+    reason = (probe.stderr.strip().splitlines() or [f"exit {probe.returncode}"])[0]
+    return ("WARN", f"no notification server confirmed on the kitchen timers' session bus: asking it from a transient unit failed "
+                    f"({reason}); without one, exception runs record `not notified` (automation/README.md, Notifications)")
