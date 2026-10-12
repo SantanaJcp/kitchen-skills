@@ -12,7 +12,7 @@ A feature map starts to rot the moment the app changes, and a verifier that cann
 
 Say which one:
 
-- **clean**: every feature in scope covered from source and live; nothing to change.
+- **clean**: a full pass covered every feature from source and live; nothing to change. A churn pass that covers its whole scope says **clean (churn)** and lists its features; it claims nothing about the rest.
 - **changed**: one PR with proven corrections to the verify skill.
 - **findings**: the audit found drift or gaps, but fixing them was not authorized; report them with evidence and change nothing.
 - **blocked**: coverage could not finish or a fix could not ship safely; say exactly why.
@@ -20,7 +20,7 @@ Say which one:
 
 ## Scope
 
-A **full** pass covers every feature file. A **churn** pass (the daily run) covers only the features whose code, or whose map file, changed since the last audit's SHA, plus the churn sweep in step 1. The last audit is the latest `audit-verification` entry in `kitchen status --since 30d`; with none, run a full pass. Say which scope ran.
+A **full** pass covers every feature file. A **churn** pass (the daily run) covers only the features whose code, or whose map file, changed since the last audit's SHA, plus the churn sweep in step 1. The baseline is the latest `audit-verification` entry in the `journal` list of `kitchen status --json --since 30d <repo>` (the text view shows only five entries) whose outcome is clean, clean (churn), changed or skipped. A blocked or findings audit never moves the baseline: what it left uncovered stays in scope. With no baseline, run a full pass. Say which scope ran and from which baseline.
 
 ## Edit scope
 
@@ -39,7 +39,7 @@ A feature can be in the inventory, driven, and still asserted by nothing. Report
 0. **Locate** `.agents/skills/verify-*/`. None: stop and point to the template in the chef-mode skill, `../chef-mode/playbooks/init/verify/`, and to its init playbook. State the audited profile: environment, build or commit SHA, data set, account or role, and which verifier commands or flags. Every result below holds only for that profile.
 1. **Inventory**: the map's README against its files; fix missing, extra, duplicate or dead entries. Sweep the churn since the last audit's SHA (`git log <sha>..HEAD`) for user-facing surfaces missing from the map; require a concrete path before calling one missing.
 2. **Source wave**: one read-only worker per feature file in scope, all launched at once. Each answers "how does this feature work for a user?" from source and returns: a summary, the source entry points, likely drift with `file:line` (or none), and one live recipe. Workers never drive the app and never edit. Reconcile: every feature in scope has a summary; spot-check the cited drift; merge the recipes into as few app states as practical.
-3. **Drives**: every feature in scope is exercised at least once. If the project's scheduled proof already ran on this exact SHA, cite its record (command, time, result) instead of rerunning it, and drive live only what that proof does not cover; a red record makes the outcome **blocked**. With no record on this SHA, run the full proof yourself. Hold three invariants for the whole pass, whatever fails:
+3. **Drives**: every feature in scope is exercised at least once. If the project's scheduled proof already ran on this exact SHA with the audited profile (same environment, data set, account and verifier flags), cite its record (command, time, result) and its coverage evidence (for example, the ledger of the calls that ran) instead of rerunning it, and drive live only what that proof does not cover; a red record makes the outcome **blocked**. With no such record, or a different profile, run the full proof yourself. Hold three invariants for the whole pass, whatever fails:
    - never drive an instance you have not health-checked since it last surprised you: doctor before the first drive and after any failed drive; where doctor cannot see the fault (a wedged state on a healthy process), reset or relaunch;
    - evidence captured so far survives every cleanup; check it at its named location, do not assume it;
    - nothing a drive started outlives it; clean a failed attempt's residue, and tear down after the last drive, re-proofs included.
@@ -51,7 +51,7 @@ A feature can be in the inventory, driven, and still asserted by nothing. Report
    Red on both, or green on both, means the verifier is not measuring the feature. If it stays green under the fault, that is the most important finding of the audit.
 6. **Triage**: doc drift, fix it; harness gap, fix it and drive it again live before it ships; product gap, report it outside the PR. Without authorization to fix, all of them are findings.
    Never turn a known product defect into a green expectation. If the verifier must keep running past it, mark it as an explicit expected failure (XFAIL) that stays visible in every run and goes red the day it starts passing, with the defect's reference.
-7. **Ship or stop**: for **changed**, re-read every changed file, then open one PR. Otherwise no branch. Either way, run `kitchen log "audit-verification <outcome> <full|churn> at <audited sha>"` from the project (add `--status blocked` when blocked) so the next churn pass knows where to start. Keep run notes in scratch; never commit them.
+7. **Ship or stop**: for **changed**, re-read every changed file, then open one PR. Otherwise no branch. Either way, run `kitchen log "audit-verification <outcome> <full|churn> at <audited full sha>"` from the project (add `--status blocked` when blocked) so the next churn pass knows where to start. Keep run notes in scratch; never commit them.
 
 ## Reply
 
