@@ -183,10 +183,9 @@ def gardener(name: str, entry: dict, error: str | None, env: dict) -> dict:
     return {**runs[-1], "age_seconds": age, "overdue": UNKNOWN if age is None else age > GARDENER_DUE.total_seconds()}
 
 
-def audit(name: str, error: str | None, env: dict) -> dict:
-    """The daily audit's last run as recorded on this machine, or that it is not configured for this project."""
-    if error:
-        return {"setting_error": error}
+def audit(name: str, env: dict) -> dict:
+    """The daily audit's last run as recorded on this machine, or that it is not configured for this project. Only the
+    automation env configures it: integrate.toml has no audit key."""
     if not env["exists"]:
         return {"not_configured": f"no {env['path']}"}
     if env["error"]:
@@ -348,7 +347,7 @@ def project(repo: Path, since) -> dict:
         "pull_requests": pull_requests(repo),
         "nightly": nightly_state(env, run, head, up, repo, base, entry, config_error),
         "gardener": gardener(name, entry, config_error, env),
-        "audit": audit(name, config_error, env),
+        "audit": audit(name, env),
         "journal": journal.read(since=since, project=common_dir, repo=toplevel),
         "decisions": decisions(repo, base),
     }

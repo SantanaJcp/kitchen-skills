@@ -416,8 +416,11 @@ class LogAndStatusTests(ProjectFixture):
         return env
 
     def write_audit(self, **record):
-        self.write_record("audit", [{"ts": ago(hours=2, minutes=5), "status": "clean", "detail": "report /r/report.md",
-                                     "sha": "ab12cd34" + "0" * 32, "baseline": "f" * 40, "warnings": [], **record}])
+        """An older run of the other kind first: status reads the last line, never an earlier one."""
+        older = {"ts": ago(days=1, hours=2), "status": "findings" if record.get("status", "clean") in ("clean", "changed", "skipped") else "clean",
+                 "detail": "report /old/report.md", "sha": "0" * 40, "baseline": "f" * 40, "warnings": []}
+        self.write_record("audit", [older, {"ts": ago(hours=2, minutes=5), "status": "clean", "detail": "report /r/report.md",
+                                            "sha": "ab12cd34" + "0" * 32, "baseline": "f" * 40, "warnings": [], **record}])
 
     def test_status_shows_the_audits_last_outcome_and_only_the_good_ones_are_green(self):
         self.audit_project()
@@ -486,6 +489,17 @@ class LogAndStatusTests(ProjectFixture):
 
         self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
         self.assertEqual(missing.stdout.splitlines(), [f"shop  audit      ✗ no record (AUDIT_GUARD_STEPS in {env})"])
+
+    def test_an_unreadable_integrate_toml_does_not_hide_or_invent_the_audit(self):
+        env = self.audit_project(status="findings")
+        (self.home / "config" / "integrate.toml").write_text("[projects.shop\n")
+
+        configured = self.kitchen("status", "--exceptions")
+        self.configure_automation(text=self.AUDIT_ENV.replace("AUDIT_GUARD_STEPS=(prove control)", "AUDIT_GUARD_STEPS=()"))
+        unconfigured = self.kitchen("status").stdout
+
+        self.assertIn("shop  audit      ✗ findings on ab12cd34: report /r/report.md · 2h 5m ago\n", configured.stdout)
+        self.assertIn(f"  audit      not configured (AUDIT_GUARD_STEPS is empty or unset in {env})", unconfigured)
 
     def test_an_unconfigured_nightly_gardener_and_decisions_are_informational_never_green_and_never_exceptions(self):
         project = self.make_project("shop")
