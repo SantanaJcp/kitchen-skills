@@ -1653,6 +1653,44 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
         self.assertFalse((self.state / "audit" / "shop.jsonl").exists())
 
 
+class ProseOnlyTests(unittest.TestCase):
+    """Which lines of a Markdown file the audit's prose gate keeps as code: every line a fence may hold."""
+
+    def code_lines(self, text):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("prose_only", AUTOMATION / "lib" / "prose_only.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return sorted(module.code_lines(textwrap.dedent(text)))
+
+    def test_fences_count_at_the_top_level_and_nested_in_quotes_and_lists(self):
+        self.assertEqual(self.code_lines("""\
+            prose
+            ```bash
+            drive
+            ```
+            > ```
+            > drive
+            > ```
+            - ```
+              drive
+              ```
+            prose
+            """), [2, 3, 4, 5, 6, 7, 8, 9, 10])
+
+    def test_a_line_that_only_looks_like_a_closing_fence_keeps_the_block_open(self):
+        # inside a quoted fence, "> - ```" is content, not the quote's closing fence (round 2 of the review)
+        self.assertEqual(self.code_lines("""\
+            > ```bash
+            > - ```
+            > drive
+            > ```
+            prose
+            """), [1, 2, 3, 4])
+        # four spaces of indentation inside a top-level fence is content too
+        self.assertEqual(self.code_lines("```\n    ```\ndrive\n```\nprose\n"), [1, 2, 3, 4])
+
+
 @unittest.skipUnless(platform.system() == "Darwin", "launchd is the macOS schedule")
 class MacScheduleTests(AutomationFixture):
     def test_scheduled_jobs_run_at_standard_priority_not_throttled_as_background(self):

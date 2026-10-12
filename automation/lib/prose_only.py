@@ -24,18 +24,26 @@ def git(git_dir: str, *args: str) -> bytes:
     return subprocess.run(["git", f"--git-dir={git_dir}", *args], check=True, capture_output=True).stdout
 
 
+def container(prefix: str) -> str:
+    """A fence's prefix with list markers turned into the spaces they take up: a list item's fence closes indented."""
+    return re.sub(r"[-*+]|\d+[.)]", lambda marker: " " * len(marker.group(0)), prefix)
+
+
 def code_lines(text: str) -> set[int]:
-    """1-based numbers of the lines inside fenced code blocks, fences included (CommonMark: a fence closes with the
-    same character, at least as long, and nothing after it; an unclosed fence runs to the end)."""
-    inside, opener, numbers = False, "", set()
+    """1-based numbers of the lines inside fenced code blocks, fences included. A fence closes with the same
+    character, at least as long, nothing after it and exactly the opener's container prefix; anything else stays
+    inside, and an unclosed fence runs to the end. Stricter than CommonMark on purpose: it only ever keeps more lines
+    inside."""
+    inside, opener, prefix, numbers = False, "", "", set()
     for number, line in enumerate(text.splitlines(), start=1):
         match = FENCE.match(line)
         if not inside and match:
-            inside, opener = True, match.group(1)
+            inside, opener, prefix = True, match.group(1), container(line[:match.start(1)])
             numbers.add(number)
         elif inside:
             numbers.add(number)
-            if match and match.group(1)[0] == opener[0] and len(match.group(1)) >= len(opener) and not line[match.end():].strip():
+            if (match and match.group(1)[0] == opener[0] and len(match.group(1)) >= len(opener)
+                    and not line[match.end():].strip() and container(line[:match.start(1)]) == prefix):
                 inside = False
     return numbers
 
