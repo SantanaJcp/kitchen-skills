@@ -104,7 +104,7 @@ One JSON line per run in `~/.local/state/kitchen/gardener/<project>.jsonl`: `ts`
 
 ## Audit record
 
-One JSON line per run in `~/.local/state/kitchen/audit/<project>.jsonl`: `ts`, `started`, `status`, `detail`, `sha` (the audited SHA, the guard's), `baseline`, `warnings`, `run_id`, `log`, written as `running` when the run holds the lock and replaced when it ends; the same result is the run's one `AUDIT-RESULT` log line. `kitchen status` does not read it yet; the pass's journal line shows there.
+One JSON line per run in `~/.local/state/kitchen/audit/<project>.jsonl`: `ts`, `started`, `status`, `detail`, `sha` (the audited SHA, the guard's), `baseline`, `warnings`, `run_id`, `log`, written as `running` when the run holds the lock and replaced when it ends; the same result is the run's one `AUDIT-RESULT` log line. `kitchen status` shows the last line as `audit`: green for `clean`, `changed` or `skipped`, an exception for any other status, and `overdue` past two days (daily, with no catch-up, plus a day of grace: the time is the run's end, which moves with its length and the lock wait). The audit counts as configured when the env leaves at least one `AUDIT_GUARD_STEPS` step, which the job requires; then a missing record is an exception, `no record`. A host that does not run the audit sets `AUDIT_GUARD_STEPS=()` or leaves it unset: the line says `not configured`, never green and never an exception.
 
 | `status` | Meaning |
 |---|---|

@@ -1,16 +1,19 @@
-"""`kitchen status`: where every project stands, read from git, gh, the nightly guard, the gardener's record and the
-journal. A fact it cannot read is `unknown`, never zero or none.
+"""`kitchen status`: where every project stands, read from git, gh, the nightly guard, the gardener's and the daily
+audit's records and the journal. A fact it cannot read is `unknown`, never zero or none.
 Principles: `truthful-state`, `owner-attention` (--exceptions), `handoff` (owed decisions, checkpoints).
 
 `--exceptions` keeps only the lines that are not green: a project it cannot read, a nightly that is not green or is
-overdue, a gardener run that was refused, incomplete, overdue or not recorded on this machine, PRs or decisions it
+overdue, a gardener run that was refused, incomplete, overdue or not recorded on this machine, a daily audit that
+ended findings, blocked, refused or incomplete, is overdue or has no record, PRs or decisions it
 could not read, owed decisions, and checkpoints that wait on the owner (blocked, decision), unattached ones included.
 
-Each of nightly, gardener and decisions is configured only by explicit config, never guessed from the records:
+Each of nightly, gardener, audit and decisions is configured only by explicit config, never guessed from the records:
 - the nightly, by at least one `GUARD_STEPS` step in the project's automation env, `<config>/automation/<project>.env`
   (a gardener-only host sets `GUARD_STEPS=()`);
 - the gardener, by at least one `GARDENER_VERIFY_STEPS` step in that env, or a `gardener` key in the project's
   integrate.toml entry;
+- the audit, by at least one `AUDIT_GUARD_STEPS` step in that env, which the job requires (a host that does not run it
+  sets `AUDIT_GUARD_STEPS=()`);
 - decisions, by a `base` in that entry.
 One that is not configured shows an informational `not configured` line: never green, never an exception. One that is
 configured and lacks its record is an exception; a config that cannot be read is `unknown`, also an exception.
@@ -47,12 +50,16 @@ GARDENER_DUE = datetime.timedelta(days=8)  # install-schedule runs the gardener 
 # A night runs from noon to noon, local time: a manual run at 23:00 and the scheduled 02:00 run are one night.
 NOON = datetime.timedelta(hours=12)
 GARDENER_GREEN = ("published", "none")
+# install-schedule --audit runs it daily with no catch-up, plus a day of grace as for the gardener: its record's time
+# is the run's end, which moves by up to its timeout and the lock wait, and one missed 04:00 waits a whole day.
+AUDIT_DUE = datetime.timedelta(days=2)
+AUDIT_GREEN = ("clean", "changed", "skipped")  # the pass's good outcomes; findings, blocked, refused, incomplete are not
 REMOTE = re.compile(r"remote:(\S+)")
 
 # What the jobs see of the env: they source it under these options (automation/lib/common.sh). Its own output is
 # discarded so that only the counts reach stdout; an unset array counts 0.
 ENV_PROBE = ('set -euo pipefail\nsource "$1" >/dev/null 2>&1\nset +u\n'
-             'printf "%s %s\\n" "${#GUARD_STEPS[@]}" "${#GARDENER_VERIFY_STEPS[@]}"\n')
+             'printf "%s %s %s\\n" "${#GUARD_STEPS[@]}" "${#GARDENER_VERIFY_STEPS[@]}" "${#AUDIT_GUARD_STEPS[@]}"\n')
 ENV_PATH = "/usr/bin:/bin"  # launchd's default PATH, where the scheduled jobs find bash
 
 def gh_timeout() -> int:
@@ -81,11 +88,12 @@ def night(run: dict) -> datetime.date | None:
 
 
 def automation_env(name: str) -> dict:
-    """The project's automation env, as the jobs find and source it (automation/lib/common.sh): how many guard and
-    gardener verify steps it leaves, or why it could not be read. No file means no automation configured."""
+    """The project's automation env, as the jobs find and source it (automation/lib/common.sh): how many guard,
+    gardener verify and audit guard steps it leaves, or why it could not be read. No file means no automation
+    configured."""
     path = config_dir() / "automation" / f"{name}.env"
     if not path.exists():
-        return {"path": path, "exists": False, "guard": 0, "gardener": 0, "error": None}
+        return {"path": path, "exists": False, "guard": 0, "gardener": 0, "audit": 0, "error": None}
     try:
         path.read_bytes()
     except OSError as error:
@@ -93,11 +101,12 @@ def automation_env(name: str) -> dict:
     counts, error = source_env(path)
     if error:
         return {"path": path, "exists": True, "error": error}
-    return {"path": path, "exists": True, "guard": counts[0], "gardener": counts[1], "error": None}
+    return {"path": path, "exists": True, "guard": counts[0], "gardener": counts[1], "audit": counts[2], "error": None}
 
 
-def source_env(path: Path) -> tuple[tuple[int, int] | None, str | None]:
-    """Source the env in bash as the jobs do and return its GUARD_STEPS and GARDENER_VERIFY_STEPS counts, or why not."""
+def source_env(path: Path) -> tuple[tuple[int, int, int] | None, str | None]:
+    """Source the env in bash as the jobs do and return its GUARD_STEPS, GARDENER_VERIFY_STEPS and AUDIT_GUARD_STEPS
+    counts, or why not."""
     timeout = env_timeout()
     env = {"HOME": str(home()), "PATH": ENV_PATH, **{k: os.environ[k] for k in ("USER", "LOGNAME", "TMPDIR") if k in os.environ}}
     with tempfile.TemporaryFile() as out:  # a file, not a pipe: a child the env left behind cannot block the read
@@ -120,10 +129,10 @@ def source_env(path: Path) -> tuple[tuple[int, int] | None, str | None]:
         printed = out.read().decode("utf-8", errors="replace")
     if code != 0:
         return None, f"cannot source {path}: bash exited {code}"
-    counts = re.fullmatch(r"(\d+) (\d+)\n", printed)
+    counts = re.fullmatch(r"(\d+) (\d+) (\d+)\n", printed)
     if not counts:
         return None, f"sourcing {path} printed {printed!r}, not the step counts"
-    return (int(counts.group(1)), int(counts.group(2))), None
+    return (int(counts.group(1)), int(counts.group(2)), int(counts.group(3))), None
 
 
 def nightly(name: str) -> dict | None:
@@ -172,6 +181,22 @@ def gardener(name: str, entry: dict, error: str | None, env: dict) -> dict:
         return {"no_record": f"GARDENER_VERIFY_STEPS in {env['path']}"}
     age = age_seconds(runs[-1])
     return {**runs[-1], "age_seconds": age, "overdue": UNKNOWN if age is None else age > GARDENER_DUE.total_seconds()}
+
+
+def audit(name: str, env: dict) -> dict:
+    """The daily audit's last run as recorded on this machine, or that it is not configured for this project. Only the
+    automation env configures it: integrate.toml has no audit key."""
+    if not env["exists"]:
+        return {"not_configured": f"no {env['path']}"}
+    if env["error"]:
+        return {"setting_error": env["error"]}
+    if not env["audit"]:
+        return {"not_configured": f"AUDIT_GUARD_STEPS is empty or unset in {env['path']}"}
+    runs = history("audit", name)
+    if not runs:
+        return {"no_record": f"AUDIT_GUARD_STEPS in {env['path']}"}
+    age = age_seconds(runs[-1])
+    return {**runs[-1], "age_seconds": age, "overdue": UNKNOWN if age is None else age > AUDIT_DUE.total_seconds()}
 
 
 def pull_requests(repo: Path) -> dict:
@@ -322,6 +347,7 @@ def project(repo: Path, since) -> dict:
         "pull_requests": pull_requests(repo),
         "nightly": nightly_state(env, run, head, up, repo, base, entry, config_error),
         "gardener": gardener(name, entry, config_error, env),
+        "audit": audit(name, env),
         "journal": journal.read(since=since, project=common_dir, repo=toplevel),
         "decisions": decisions(repo, base),
     }
@@ -439,6 +465,31 @@ def gardener_exception(run: dict) -> bool:
     return not gardener_green(run) and "remote" not in run and "not_configured" not in run
 
 
+def audit_line(run: dict) -> str:
+    if "not_configured" in run:
+        return f"audit      not configured ({run['not_configured']})"
+    if "no_record" in run:
+        return f"audit      ✗ no record ({run['no_record']})"
+    if "setting_error" in run:
+        return f"audit      {UNKNOWN}: {run['setting_error']}"
+    mark = "✓" if audit_green(run) else "✗"
+    on = f" on {run['sha'][:8]}" if run.get("sha") else ""
+    detail = f": {run['detail']}" if run.get("detail") else ""
+    warnings = f" · warnings: {'; '.join(map(str, run['warnings']))}" if run.get("warnings") else ""
+    overdue = f" · overdue: last record {duration(run['age_seconds'])} ago, cadence daily plus a day" if run["overdue"] is True else ""
+    return f"audit      {mark} {run.get('status')}{on}{detail} · {duration(run['age_seconds'])} ago{overdue}{warnings}"
+
+
+def audit_green(run: dict) -> bool:
+    """Green only for a good outcome whose time is known and that is not overdue (an unknown time shows as `unknown ago`)."""
+    return run.get("status") in AUDIT_GREEN and run.get("overdue") is False
+
+
+def audit_exception(run: dict) -> bool:
+    """An audit that is not configured is not read: neither green nor an exception."""
+    return not audit_green(run) and "not_configured" not in run
+
+
 def prs_line(prs: dict) -> str:
     if "error" in prs:
         return f"PRs        {UNKNOWN}: {prs['error']}"
@@ -487,7 +538,7 @@ def render(report: dict, window: str) -> str:
         out.append(header(p))
         if "error" in p:
             continue
-        for line in (nightly_line(p["nightly"]), gardener_line(p["gardener"]), prs_line(p["pull_requests"])):
+        for line in (nightly_line(p["nightly"]), gardener_line(p["gardener"]), audit_line(p["audit"]), prs_line(p["pull_requests"])):
             out.append(f"  {line}")
         count, *entries = journal_lines("journal    ", p["journal"])
         out += [f"  {count}", *entries]
@@ -507,6 +558,7 @@ def exceptions(report: dict) -> list[str]:
             continue
         for line, exception in ((nightly_line(p["nightly"]), nightly_exception(p["nightly"])),
                                 (gardener_line(p["gardener"]), gardener_exception(p["gardener"])),
+                                (audit_line(p["audit"]), audit_exception(p["audit"])),
                                 (prs_line(p["pull_requests"]), "error" in p["pull_requests"]),
                                 (decisions_line(p["decisions"]), decisions_exception(p["decisions"]))):
             if exception:

@@ -68,7 +68,7 @@ They read through `VAR=x` prefixes, `command`, `env`, `sudo`, `xargs`, `find -ex
 ## Daily use
 
 ```bash
-kitchen status              # every project: branch, upstream, PRs, nightly guard, gardener, agent checkpoints, owed decisions
+kitchen status              # every project: branch, upstream, PRs, nightly guard, gardener, daily audit, agent checkpoints, owed decisions
 kitchen status --exceptions # only the lines that are not green; exits 1 when there are any
 kitchen log "msg" --status done   # agents leave checkpoints during autonomous runs (done, blocked, decision or note)
 kitchen inventory           # skills, rule files and Codex automations the agents can see, and where copies drift
