@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""The nightly and gardener histories `kitchen status` reads: one JSON line per run, rewritten in place by run_id.
+"""The nightly, gardener and audit histories (`kitchen status` reads the first two): one JSON line per run, rewritten in
+place by run_id.
 
   record.py <file> write <status> <failed_step> <cleanup> <metrics> <sha> <run_id> <log> <started> [warning...]
   record.py <file> gardener <status> <detail> <run_id> <log> <started> [warning...]
+  record.py <file> audit <status> <detail> <sha> <baseline> <run_id> <log> <started> [warning...]
   record.py <file> close-stale <current-run-id>
   record.py <file> mark-survivors <run-id> <pids>
 
@@ -65,6 +67,10 @@ def main() -> int:
         status, detail, run_id, log, started, *warnings = args
         entry = {"ts": now, "started": started, "status": status, "detail": detail or None, "warnings": warnings,
                  "run_id": run_id, "log": log}
+    elif action == "audit":
+        status, detail, sha, baseline, run_id, log, started, *warnings = args
+        entry = {"ts": now, "started": started, "status": status, "detail": detail or None, "sha": sha or None,
+                 "baseline": baseline or None, "warnings": warnings, "run_id": run_id, "log": log}
     else:
         status, failed, cleanup, metrics, sha, run_id, log, started, *warnings = args
         entry = {"ts": now, "started": started, "sha": sha or None, "status": status, "failed_step": failed or None,

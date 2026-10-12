@@ -16,7 +16,7 @@ Done means you saw the observable result: the app, the command output, the recor
   - *Prove It Works*: check the real artifact; script the check and keep its output so anyone can rerun it.
   - *Test Behavior, Not Implementation*: would the test still pass if every function it imports returned `undefined`? Then it tests nothing. Watch for weak assertions, mock-only tests, self-referential expectations, pinned constants and fixtures asserting fixtures.
   - *Sequence Work into Verifiable Units*: small units, each ending in a check; do not start the next until it is green.
-- **Enforced by:** the init playbook (every `bin/check` command run and seen to pass, the commit tier green twice and red on a planted defect in a file it runs); `kitchen integrate`; the nightly guard; the gardener reruns its verify steps before publishing; the `audit-verification` skill; the Skeptic lens of `second-opinion`.
+- **Enforced by:** the init playbook (every `bin/check` command run and seen to pass, the commit tier green twice and red on a planted defect in a file it runs); `kitchen integrate`; the nightly guard; the gardener reruns its verify steps before publishing; the `audit-verification` skill, and the daily audit that runs it only on a green guard and never ships a fix nobody drove live; the Skeptic lens of `second-opinion`.
 
 ## 2. Unknown is never green (`truthful-state`)
 

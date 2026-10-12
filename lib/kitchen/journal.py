@@ -46,6 +46,11 @@ def write(message: str, status: str, cwd: Path) -> dict:
         "status": status,
         "message": message,
     }
+    return append(entry)
+
+
+def append(entry: dict) -> dict:
+    """One entry at the end of the journal; also for jobs that log on a project's behalf (automation/bin/daily-audit)."""
     journal_path().parent.mkdir(parents=True, exist_ok=True)
     with journal_path().open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")

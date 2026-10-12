@@ -6,11 +6,12 @@ Scheduled jobs that keep a project honest without anyone asking.
 |---|---|---|
 | `bin/nightly-guard <project>` | daily 02:00 | Runs the project's steps on a dedicated clone of the shared branch. One GitHub issue while it is red, closed when green; a local notification when red or incomplete. Every run that holds the project lock lands exactly once in `~/.local/state/kitchen/nightly/<project>.jsonl` for `kitchen status`. |
 | `bin/weekly-gardener <project>` | Monday 06:00 | One unattended Claude Code run that commits at most one small, verified change on a local branch; the job then publishes it as a PR if it passes its own checks. Skips while the last one is still open. Every run that holds the project lock lands once in `~/.local/state/kitchen/gardener/<project>.jsonl`; a local notification when refused or incomplete. |
+| `bin/daily-audit <project>` | daily 04:00 | A churn pass of the `audit-verification` skill on the SHA the nightly guard just proved green, by a sealed Claude Code run like the gardener's. The job hands it the baseline from the kitchen journal and the guard's record, step logs and evidence, then logs the outcome in the journal and publishes at most one PR of prose fixes. Every run that holds the project lock lands once in `~/.local/state/kitchen/audit/<project>.jsonl`. |
 | `bin/weekly-retro` | Monday 07:00 | Runs the `retro` skill over the week's transcripts and writes a report of proposals. Applies nothing. |
 
-Schedule them with `bin/install-schedule <project>` and `bin/install-schedule --retro`: launchd on macOS, systemd user timers on Linux. `bin/install-schedule --gardener <project>` schedules the gardener alone, for a machine that runs only it. `bin/install-schedule --guard <project>` schedules the nightly guard alone, for a machine whose gardener runs elsewhere.
+Schedule them with `bin/install-schedule <project>` and `bin/install-schedule --retro`: launchd on macOS, systemd user timers on Linux. `bin/install-schedule --gardener <project>` schedules the gardener alone, for a machine that runs only it. `bin/install-schedule --guard <project>` schedules the nightly guard alone, for a machine whose gardener runs elsewhere. `bin/install-schedule --audit <project> [hour]` schedules the daily audit, on the guard's machine. It has no catch-up: a missed run waits for the next night.
 
-On Linux the gardener needs:
+On Linux the gardener and the audit need:
 
 - **A private `/tmp`.** .NET's named mutexes and MSBuild create directories straight in `/tmp`, so the sandboxes must write it. The job refuses to start unless `/tmp` is its own: its systemd unit sets `PrivateTmp=yes`. For a manual run, use `systemd-run --user -p PrivateTmp=yes --wait --pipe bin/weekly-gardener <project>`.
 - **An HTTPS `REPO_URL`.** In a user unit, `PrivateTmp` implies a user namespace where root-owned files show as `nobody`, and ssh then refuses its own config ("Bad owner or permissions"). Use an HTTPS URL with a git credential helper such as `gh auth setup-git`.
@@ -60,6 +61,18 @@ GARDENER_PREPARE_CMD="make restore"   # optional; refreshes the caches the sandb
                                        # code, as the nightly runs), never on the agent's tree; a failure stops the run
 GARDENER_SANDBOX_UNIX_SOCKETS=()       # optional; e.g. the Docker socket. Docker can mount any host path, so
                                        # allowing it reopens what the sandbox closes
+GARDENER_MODEL="opus"                  # optional; claude --model for the gardener (unset: Claude Code's default)
+GARDENER_EFFORT="high"                 # optional; claude --effort (low, medium, high, xhigh, max)
+AUDIT_GUARD_STEPS=(prove control)      # required for the audit; guard steps that drove the app, which the sealed pass cites.
+                                       # The latest guard run must be green and have run each of them
+AUDIT_EVIDENCE_PATHS=(".verify/evidence") # optional; paths in the guard's clone copied for the agent; each must exist
+AUDIT_EDIT_PATHS=(".agents/skills/verify-*/*") # optional; with AUDIT_VERIFY_STEPS, authorizes prose fixes in these paths
+AUDIT_VERIFY_STEPS=("coverage|make coverage") # optional; rerun by the job on a fix before publishing, as GARDENER_VERIFY_STEPS
+AUDIT_LABEL="audit-verification"       # optional; the audit PR's label
+AUDIT_MAX_CHANGED_LINES=200            # optional; larger audit fixes are not published
+AUDIT_TIMEOUT_SECONDS=3600             # optional; deadline for the agent; past it the run is incomplete
+AUDIT_MODEL="sonnet"                   # optional; claude --model for the audit (unset: Claude Code's default)
+AUDIT_EFFORT="medium"                  # optional; claude --effort
 GH_TIMEOUT_SECONDS=120                 # optional; deadline for every gh call
 NET_TIMEOUT_SECONDS=600                # optional; deadline for clone, fetch and push
 ```
@@ -89,9 +102,21 @@ One JSON line per run in `~/.local/state/kitchen/gardener/<project>.jsonl`: `ts`
 
 `kitchen status` reads only this machine's record. The gardener counts as configured when the project's env leaves at least one `GARDENER_VERIFY_STEPS` step (or `integrate.toml` has a `gardener` key); then a missing record is an exception, `no record on this host`. Without either, the line says `not configured`, never green and never an exception. The same holds for the nightly, configured by at least one `GUARD_STEPS` step; a host that runs only the gardener sets `GUARD_STEPS=()`. `kitchen status` counts them by sourcing the env as the jobs do (bash, `set -euo pipefail`, `PATH=/usr/bin:/bin`, no stdin, `KITCHEN_ENV_TIMEOUT_SECONDS`, default 5), so the env runs there too. An env that fails to source or misses the deadline is `unknown`, never `not configured`. Where the gardener or the nightly runs on another host, set `gardener = "remote:<host-label>"` or `nightly = "remote:<host-label>"` in the project's `integrate.toml` entry: that line then says `remote (<host-label>): not read here`, never green and never an exception, and `kitchen integrate` ignores the key.
 
+## Audit record
+
+One JSON line per run in `~/.local/state/kitchen/audit/<project>.jsonl`: `ts`, `started`, `status`, `detail`, `sha` (the audited SHA, the guard's), `baseline`, `warnings`, `run_id`, `log`, written as `running` when the run holds the lock and replaced when it ends; the same result is the run's one `AUDIT-RESULT` log line. `kitchen status` does not read it yet; the pass's journal line shows there.
+
+| `status` | Meaning |
+|---|---|
+| `clean`, `changed`, `findings`, `blocked`, `skipped` | The pass's outcome, as the skill defines it. `changed` carries the PR's URL, the others the report's path. A red or incomplete latest guard run is `blocked` and the agent does not run; an audited SHA equal to the baseline is `skipped`, also without the agent. Each outcome the agent reached is also logged in the kitchen journal as `audit-verification <outcome> churn at <sha>`, on the project's behalf, where the next churn pass finds its baseline. |
+| `refused` | The job refused an input or the publication: no baseline in the journal (run a full pass by hand), a guard run without one of `AUDIT_GUARD_STEPS`, a guard clone no longer at the guard's SHA or missing an evidence path, or a fix the publication refused. A refused fix, or `changed` without authorization, is logged in the journal as `findings`, so the drift stays in the next pass's scope. |
+| `incomplete` | Claude failed or outlived `AUDIT_TIMEOUT_SECONDS`, wrote no valid outcome or no report, a prerequisite failed, or the run was aborted or killed. Nothing is logged in the journal. |
+
+The boundary is the gardener's. The agent runs in the same sandbox (`lib/sealed.sh`, the `GARDENER_SANDBOX_*` and `GARDENER_ENV_PASS` settings), in its own clone at the audited SHA, with the Agent tool for the skill's source wave. It has no Docker: running the agent's harness code live would need Docker outside the sandbox, which can mount any host path. So the job never drives a fix live. It publishes only Markdown prose outside fenced code blocks (`lib/prose_only.py`) within `AUDIT_EDIT_PATHS`, after the gardener's checks (branch name `audit/<date>-<slug>`, size, `.github/*`, secret scan) and `AUDIT_VERIFY_STEPS` rerun under srt; a fix to a drive block, an assertion or the verifier is a finding. The guard's evidence lives in its clone until the next job syncs it, so schedule the audit after the guard and before the gardener.
+
 ## Notifications
 
-`lib/notify.py` (wrapping `lib/kitchen/notify.py`) shows a local notification for exceptions only: a red or incomplete nightly, a refused or incomplete gardener run, and `kitchen log --status blocked|decision`. Green runs stay silent. macOS uses `osascript` (`display notification`); Linux uses `notify-send` when it is installed. Without a notifier it logs `no notifier available` and the run records the warning `not notified`: the absence shows, and nothing is sent anywhere else. The text is redacted with the patterns `kitchen retro` uses. There is no external webhook.
+`lib/notify.py` (wrapping `lib/kitchen/notify.py`) shows a local notification for exceptions only: a red or incomplete nightly, a refused or incomplete gardener run, an audit that ends findings, blocked, refused or incomplete, and `kitchen log --status blocked|decision`. Green runs stay silent. macOS uses `osascript` (`display notification`); Linux uses `notify-send` when it is installed. Without a notifier it logs `no notifier available` and the run records the warning `not notified`: the absence shows, and nothing is sent anywhere else. The text is redacted with the patterns `kitchen retro` uses. There is no external webhook.
 
 ## Guarantees
 

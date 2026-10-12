@@ -4,6 +4,7 @@
 #   install-schedule <project> [guard-hour] [gardener-weekday] [gardener-hour]   defaults: 02:00 daily, Monday 06:00
 #   install-schedule --gardener <project> [weekday] [hour]                       the gardener alone; default Monday 06:00
 #   install-schedule --guard <project> [hour]                                     the nightly guard alone; default 02:00 daily
+#   install-schedule --audit <project> [hour]                                     the daily audit; default 04:00, after the guard
 #   install-schedule --retro [weekday] [hour]                                    default: Monday 07:00
 # Weekdays are numbered as launchd does: 0 or 7 Sunday, 1 Monday ... 6 Saturday.
 set -euo pipefail
@@ -115,6 +116,13 @@ case "${1:-}" in
     needs_config "$PROJECT"
     schedule "$PROJECT.nightly-guard" "$STATE_ROOT/automation/$PROJECT/logs" "" "${3:-2}" \
       /bin/bash "$AUTOMATION/bin/nightly-guard" "$PROJECT" ;;
+  --audit)
+    # No catch-up of a missed run (no Persistent=): it waits for the next one, after the next guard (owner, 2026-10-12).
+    PROJECT="${2:?usage: install-schedule --audit <project> [hour]}"
+    needs_config "$PROJECT"
+    install_srt
+    schedule "$PROJECT.daily-audit" "$STATE_ROOT/automation/$PROJECT/logs" "" "${3:-4}" \
+      /bin/bash "$AUTOMATION/bin/daily-audit" "$PROJECT" ;;
   --gardener)
     PROJECT="${2:?usage: install-schedule --gardener <project> [weekday] [hour]}"
     needs_config "$PROJECT"
@@ -122,7 +130,7 @@ case "${1:-}" in
     schedule "$PROJECT.weekly-gardener" "$STATE_ROOT/automation/$PROJECT/logs" "${3:-1}" "${4:-6}" \
       /bin/bash "$AUTOMATION/bin/weekly-gardener" "$PROJECT" ;;
   *)
-    PROJECT="${1:?usage: install-schedule <project> | --guard <project> | --gardener <project> | --retro}"
+    PROJECT="${1:?usage: install-schedule <project> | --guard <project> | --gardener <project> | --audit <project> | --retro}"
     needs_config "$PROJECT"
     install_srt
     schedule "$PROJECT.nightly-guard" "$STATE_ROOT/automation/$PROJECT/logs" "" "${2:-2}" \

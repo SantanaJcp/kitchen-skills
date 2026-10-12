@@ -14,7 +14,7 @@ My personal agent kitchen: small, owned skills plus the tooling that keeps them 
 | `skills/<name>/` | One skill per folder: a short `SKILL.md`, plus scripts when a step is mechanical; all manual-only, reached through chef-mode or by name |
 | `bin/kitchen` | The CLI: install, doctor, check, status, guards and the rest |
 | `hooks/` | Agent guards, copied into each project that wants them and run before every shell command there |
-| `automation/` | Scheduled jobs (nightly guard, weekly gardener, weekly retro) |
+| `automation/` | Scheduled jobs (nightly guard, weekly gardener, daily audit, weekly retro) |
 | `bin/check`, `.agents/skills/verify-kitchen-skills/` | This repo's own check contract and verify skill |
 | `tests/` | The repo verifies itself |
 
@@ -89,7 +89,7 @@ kitchen guards ../some-repo # put the kitchen's guards in that repo only; --chec
 
 `models` is each person's own setup, in `~/.config/kitchen/models.toml`. One role today, `reviewer`, set per author family (`--author claude` means the work is Claude's, so the reviewer runs on Codex), with provider, model (`default` for the tool's own), effort and tier; another role is added when a workflow reads it. An unset role fails with the command that sets it; a reviewer on the author's own provider is refused; `get --command` prints the `codex exec` or `claude -p` call. `second-opinion` takes its reviewer from here: through `delegate_task` in T3 Code, the other CLI elsewhere, BLOCKED where the other provider cannot be reached.
 
-Scheduled jobs are installed per machine with `automation/bin/install-schedule`: `<project>` (nightly guard and weekly gardener), `--guard <project>` (the nightly guard alone), `--gardener <project>` (the gardener alone, for a machine that runs only it) or `--retro` (the weekly retro). launchd on macOS, systemd user timers on Linux; details in `automation/README.md`.
+Scheduled jobs are installed per machine with `automation/bin/install-schedule`: `<project>` (nightly guard and weekly gardener), `--guard <project>` (the nightly guard alone), `--gardener <project>` (the gardener alone, for a machine that runs only it), `--audit <project>` (the daily verification audit, after the guard) or `--retro` (the weekly retro). launchd on macOS, systemd user timers on Linux; details in `automation/README.md`.
 
 Per-machine config lives outside the repo, in `~/.config/kitchen/`: `projects.txt` (one project path per line), `integrate.toml`, `models.toml`, `denylist.txt`, `shared-branches.txt` (optional) and `automation/<project>.env` for the scheduled jobs. State (journal, nightly history, integrate records, retro reports) lives in `~/.local/state/kitchen/`.
 
