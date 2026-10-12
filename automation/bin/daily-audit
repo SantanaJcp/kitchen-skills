@@ -10,7 +10,7 @@
 #      pass cites lives there (AUDIT_EVIDENCE_PATHS); otherwise the job refuses. The baseline is the newest
 #      audit-verification entry of the last 30 days in the kitchen journal whose outcome moves it (the skill's
 #      rule); with none, the job refuses: a full pass is run by hand. Audited SHA equal to the baseline: skipped.
-#   2. The agent runs sealed exactly like the gardener's (lib/sealed.sh): its own clone at the audited SHA, no
+#   2. The agent runs sealed like the gardener's (lib/sealed.sh), minus its domains and sockets: its own clone, no
 #      network, no Docker, no gh, no git credentials, so it cannot drive the app. It gets the skill, the guard's
 #      record, step logs and evidence copies, and writes a report and a one-word outcome. AUDIT_TIMEOUT_SECONDS
 #      (default 3600) bounds it; AUDIT_MODEL and AUDIT_EFFORT pass as --model and --effort when set.
@@ -62,6 +62,11 @@ RESULT_TAG=AUDIT-RESULT
 AGENT_ENV=(AUDIT_BRANCH_PREFIX="audit/$RUN_DATE-" AUDIT_SUMMARY_FILE="$SUMMARY_FILE" AUDIT_REPORT_FILE="$REPORT_FILE"
   AUDIT_OUTCOME_FILE="$OUTCOME_FILE")
 AGENT_DIRS=()
+# The audit's boundary is stricter than the gardener's: whatever domains or sockets the project grants the gardener
+# (a package feed, the Docker socket), the audit's agent and its verification get none. Docker would let the agent
+# run its own harness code with any host path mounted, and the pass must not drive the app.
+GARDENER_SANDBOX_DOMAINS=()
+GARDENER_SANDBOX_UNIX_SOCKETS=()
 STARTED=0
 
 result() { RESULT="$1"; RESULT_DETAIL="$2"; log "AUDIT-RESULT: $1 - $2"; }
@@ -143,6 +148,9 @@ if ! baseline="$(python3 "$KITCHEN_AUTOMATION/lib/audit_state.py" baseline "$PRO
 fi
 { read -r BASELINE || true; read -r baseline_line || true; } <<< "$baseline"
 if [ "$BASELINE" = "$SHA" ]; then
+  # Nothing to audit, so no evidence is needed. Logged like any skipped pass: the checkpoint keeps the baseline
+  # inside the 30-day window while the branch stands still.
+  journal_outcome skipped
   result skipped "no change since the last audit at ${SHA:0:12}"
   exit 0
 fi
@@ -217,7 +225,16 @@ esac
 
 if [ "$OUTCOME" != changed ]; then
   branches="$(git --git-dir="$AGENT_CLONE/.git" for-each-ref --format='%(refname:short)' refs/heads/audit/ | tr '\n' ' ')"
-  [ -z "${branches// /}" ] || warn "not published: the agent committed ${branches% } but its outcome is $OUTCOME"
+  if [ -n "${branches// /}" ]; then
+    # A pass that fixed something found drift: it cannot be clean or skipped, and the baseline must not move.
+    case "$OUTCOME" in
+      clean|skipped)
+        journal_outcome findings
+        refuse "outcome $OUTCOME, but the agent committed ${branches% }: logged as findings, nothing published, report $REPORT_FILE"
+        exit 1 ;;
+    esac
+    warn "not published: the agent committed ${branches% } but its outcome is $OUTCOME"
+  fi
   journal_outcome "$OUTCOME"
   result "$OUTCOME" "report $REPORT_FILE"
   exit 0

@@ -1457,7 +1457,9 @@ class DailyAuditTests(AutomationFixture):
         self.assertEqual(self.audits()[-1]["status"], "skipped")
         self.assertNotIn("claude", self.calls_log())
         self.assertEqual(self.notifications(), [])
-        self.assertEqual(len(self.journal()), 1)
+        sha = self.git(self.origin, "rev-parse", "dev")  # the checkpoint keeps the baseline inside the journal window
+        self.assertEqual([e["message"] for e in self.journal()], [f"audit-verification changed full at {sha}",
+                                                                  f"audit-verification skipped churn at {sha}"])
 
     def test_a_guard_run_without_a_cited_step_is_refused(self):
         self.churn()
@@ -1486,7 +1488,8 @@ class DailyAuditTests(AutomationFixture):
         tmp = Path(self.tmp.name)
         sha = self.churn()
         baseline = self.git(self.origin, "rev-parse", "dev~1")
-        self.audit_config(extra='AUDIT_MODEL="sonnet"\nAUDIT_EFFORT="low"\n')
+        self.audit_config(extra='AUDIT_MODEL="sonnet"\nAUDIT_EFFORT="low"\nGARDENER_SANDBOX_DOMAINS=("nuget.org")\n'
+                                'GARDENER_SANDBOX_UNIX_SOCKETS=("/var/run/docker.sock")\n')
         self.agent(script=f"""printf "%s\\n" "$@" > {tmp}/args; printf '%s' "$2" > {tmp}/prompt
 work=$(dirname "$AUDIT_REPORT_FILE")
 cat "$work/guard/evidence/.verify/evidence/ledger.jsonl" > {tmp}/ledger
@@ -1505,6 +1508,8 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
         settings = json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
         self.assertEqual((settings["sandbox"]["enabled"], settings["sandbox"]["allowUnsandboxedCommands"]), (True, False))
         self.assertIn("~/", settings["sandbox"]["filesystem"]["denyRead"])
+        # stricter than the gardener's: no package feed, no Docker socket, whatever the project grants the gardener
+        self.assertEqual((settings["sandbox"]["network"]["allowedDomains"], settings["sandbox"]["network"]["allowUnixSockets"]), ([], []))
         self.assertIn(f"audited SHA (your clone's HEAD): {sha}", prompt)
         self.assertIn(f"churn from the baseline {baseline}", prompt)
         self.assertIn("fixes authorized: no: AUDIT_EDIT_PATHS is empty", prompt)
@@ -1586,6 +1591,8 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
         for name, script, reason in (
                 ("inside a drive block", self.fix_script("$V api GET /readers --expect 204", "$V api GET /readers --expect 200"),
                  "changes more than prose: docs/map.md:6: inside a fenced code block"),
+                ("inside a blockquoted drive block", self.fix_script("> ```bash\n> $V api GET /readers --expect 204\n> ```"),
+                 "changes more than prose: docs/map.md:3: inside a fenced code block"),
                 ("outside the edit paths", self.fix_script() + "echo note > notes.md && git add notes.md && git commit -qm more\n",
                  "touches notes.md, outside the paths it may edit"),
                 ("a planted token", self.fix_script() + f"echo 'key {token}' >> docs/map.md && git commit -qam more\n",
@@ -1604,6 +1611,18 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
                 self.assertEqual([b for b in self.origin_branches() if b.startswith("audit/")], [])
                 self.assertNotIn("gh pr create", self.calls_log())
                 self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+    def test_a_clean_outcome_with_a_committed_fix_is_refused_and_logged_as_findings(self):
+        sha = self.churn()
+        self.audit_config(extra=self.FIXES)
+        self.agent("clean", self.fix_script())
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("outcome clean, but the agent committed audit/", result.stdout)
+        self.assertNotIn("gh pr create", self.calls_log())
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
 
     def test_changed_without_authorization_is_refused_and_logged_as_findings(self):
         for name, extra, env in (("no edit paths", "", {}), ("an audit PR still open", self.FIXES, {"OPEN_PRS": "1"})):

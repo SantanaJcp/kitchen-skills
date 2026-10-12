@@ -4,16 +4,19 @@
   prose_only.py <git-dir> <base> <tree-ish>
 
 Every changed file must be Markdown (`.md`), and no changed line, removed or added, may sit inside a fenced code
-block (``` or ~~~, the fence lines included) of the old or the new file. Drive blocks, scripts and the verifier's
-code change what runs; such a fix needs a live re-drive before it ships, which a sealed pass cannot do (see the
-audit-verification skill and bin/daily-audit). Indented code blocks count as prose.
+block (``` or ~~~, the fence lines included) of the old or the new file. A fence nested in a blockquote or a list
+item counts too: any prefix of `>`, list markers and whitespace before it, which refuses more rather than less.
+Drive blocks, scripts and the verifier's code change what runs; such a fix needs a live re-drive before it ships,
+which a sealed pass cannot do (see the audit-verification skill and bin/daily-audit). An indented block without a
+fence counts as prose.
 Prints one line per finding (file and line) and exits 1 when anything matched.
+Principles: `prove` (a fix nobody drove live never ships from a sealed pass).
 """
 import re
 import subprocess
 import sys
 
-FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+FENCE = re.compile(r"^(?:[\s>]|[-*+]\s|\d+[.)]\s)*(`{3,}|~{3,})")
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -32,7 +35,7 @@ def code_lines(text: str) -> set[int]:
             numbers.add(number)
         elif inside:
             numbers.add(number)
-            if match and match.group(1)[0] == opener[0] and len(match.group(1)) >= len(opener) and not line.strip()[len(match.group(1)):].strip():
+            if match and match.group(1)[0] == opener[0] and len(match.group(1)) >= len(opener) and not line[match.end():].strip():
                 inside = False
     return numbers
 
