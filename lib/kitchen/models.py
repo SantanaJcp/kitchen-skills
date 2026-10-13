@@ -94,7 +94,9 @@ def validate(role: str, author: str | None, entry: dict) -> dict:
 
 
 def raw(data: dict, role: str, author: str) -> list:
-    node = data.get(role, {}).get(author) if isinstance(data.get(role), dict) else None
+    if not isinstance(data.get(role, {}), dict):
+        raise ModelsError(f"{path()}: {role} is not a table; fix it or rerun `{set_command(role, author)}`")
+    node = data.get(role, {}).get(author)
     if node is None:
         return []
     if isinstance(node, dict):  # one table, as files were written before a role held several models

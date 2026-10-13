@@ -1001,8 +1001,9 @@ class ModelsTests(KitchenFixture):
 
         self.assertEqual(added.returncode, 0, added.stderr)
         self.assertEqual([(e["provider"], e["model"]) for e in json.loads(got.stdout)], [("codex", "gpt-x"), ("pi", "openai-codex/gpt-x")])
-        self.assertEqual(calls.stdout.splitlines()[1], "pi -p --no-session --no-mcp --tools read,grep,find,ls "
-                                                       "--model openai-codex/gpt-x --thinking high")
+        self.assertEqual(calls.stdout.splitlines(), [
+            "codex exec --skip-git-repo-check -s read-only -m gpt-x -c 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"'",
+            "pi -p --no-session --no-mcp --tools read,grep,find,ls --model openai-codex/gpt-x --thinking high"])
         self.assertIn("reviewer for claude work codex gpt-x · effort high · tier standard\n"
                       "                           pi openai-codex/gpt-x · effort high · tier standard", listing)
 
@@ -1094,7 +1095,8 @@ class ModelsTests(KitchenFixture):
     def test_a_write_refuses_a_file_it_would_lose_part_of(self):
         config = self.home / "config" / "models.toml"
         config.parent.mkdir(parents=True)
-        for body, error in (('[reviewer]\ncodex = "bad"\n', "reviewer.codex is neither a table nor a list"),
+        for body, error in (('reviewer = "bad"\n', "reviewer is not a table"),
+                            ('[reviewer]\ncodex = "bad"\n', "reviewer.codex is neither a table nor a list"),
                             ('[[reviewer.codex]]\nprovider = "claude"\n', "reviewer for codex: missing model, effort, tier"),
                             ('[reviewer.gemini]\nprovider = "claude"\n', "tables kitchen does not read (reviewer.gemini)")):
             with self.subTest(body=body):
