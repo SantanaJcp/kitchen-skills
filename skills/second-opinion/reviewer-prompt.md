@@ -10,6 +10,7 @@ Originating request: <issue text, message or spec, quoted>
 Repo: <repo path>
 Pinned: base <full SHA>, head <full SHA>; review `git diff <base>...<head>`.
   (Design review: commit <full SHA>; scope <exact files or folders>. Design+diff: both.)
+  (A reviewer with no shell, such as the pi CLI: read the diff in <DIR>/diff.patch and the code in the checkout below.)
 Checkout: read the code at the pinned head only, in <worktree path or `git show <sha>:<path>`>. Do not switch branches in a shared checkout.
 Forbidden: any command that writes: edits, commits, checkout or switch, reset, stash, push, merge, installs, deploys, migrations, network calls that change state.
 Authorized tests: <exact commands you may run, or "none">. Report anything else you would run instead of running it.

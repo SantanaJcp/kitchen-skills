@@ -1,6 +1,6 @@
 ---
 name: second-opinion
-description: "Cross-model review of a diff before merge, or of a whole setup in design-review mode: reviewers run on the other model (your `kitchen models` reviewer, through T3's delegate_task or the other CLI), on two separate axes (standards and the request), and the lead triages every finding into act on, consider, noted or dismissed. Use before merging or opening a PR, when I ask for a review, and always when a change touches auth, tenant scope, sync, data or migrations."
+description: "Cross-model review of a diff before merge, or of a whole setup in design-review mode: reviewers run on the other model (every reviewer you set in `kitchen models`, in parallel, through T3's delegate_task or their CLI), on two separate axes (standards and the request), and the lead triages every finding into act on, consider, noted or dismissed. Use before merging or opening a PR, when I ask for a review, and always when a change touches auth, tenant scope, sync, data or migrations."
 disable-model-invocation: true
 ---
 
@@ -13,7 +13,7 @@ The value is a model other than the author looking at the final work. The lead's
 Identify the authoring model before anything else: `Co-Authored-By` trailers in `git log <base>..<head>`, the brief that produced the work, or the delegator's message. Say it in one line.
 
 - You are a different model from the author: review directly. Skip step 3 entirely: launch no panel and no other CLI; apply the lenses from step 2 yourself, one pass per lens, on the same axes. Never send it back to the author's model, and do not recurse into another reviewer.
-- You are the author's model: run the reviewers on the other model's CLI (step 3).
+- You are the author's model: run the reviewers from `kitchen models` (step 3).
 - Author unknown: say so and treat it as written by your own model.
 
 ## 1. Pin it
@@ -34,21 +34,21 @@ State the intent in two lines and name the originating request: issue, my messag
 | Up to 200 lines, up to 5 files | Skeptic, Architect |
 | Larger, or any design or design+diff review | Skeptic, Architect, Minimalist |
 
-Auth, tenant scope, sync, data and migrations always get the Skeptic, whatever the size, on the other model: the reviewer from `kitchen models`, with its effort and tier.
+Auth, tenant scope, sync, data and migrations always get the Skeptic, whatever the size, on the other model: the reviewers from `kitchen models`, with their effort and tier.
 
 ## 3. Run on the other model
 
-Never use a same-model subagent as a reviewer; that defeats the purpose. The reviewer model is the person's own setup: `kitchen models get reviewer --author <claude|codex>` (the author's family). Not configured, refused or unreachable: stop BLOCKED with that error. No other model stands in.
+Never use a same-model subagent as a reviewer; that defeats the purpose. The reviewers are the person's own setup: `kitchen models get reviewer --author <claude|codex>` (the author's family) prints one per line. Run every lens on every reviewer, all in parallel, and save each to `$DIR/<lens>-<n>.md`, n being the reviewer's line. Not configured, refused, or any one reviewer unreachable: stop BLOCKED with that error. No other model stands in, and no configured reviewer is skipped.
 
-- **T3 Code** (`delegate_task` is available): one async `delegate_task` per lens, role `review`, a distinct `clientRequestId` each. Target: the instance in `orchestrator_capabilities` whose `driverKind` is the provider (`codex`, or `claudeAgent` for claude); the model id (omit it for `default`); the effort option (`reasoningEffort` on Codex, `effort` on Claude); the tier (`serviceTier` `default` or `priority` on Codex; `fastMode` on Claude). Save each result to `$DIR/<lens>.md`.
-- **Claude Code or Codex CLI**: `$(kitchen models get reviewer --author <a> --command) "<prompt>"`, adding `-o "$DIR/<lens>.md"` for codex or `> "$DIR/<lens>.md"` for claude.
-- **Anywhere the other provider cannot be reached** (a cloud session without it): BLOCKED; say which provider was missing.
+- **T3 Code** (`delegate_task` is available): one async `delegate_task` per lens and reviewer, role `review`, a distinct `clientRequestId` each. Target: the instance in `orchestrator_capabilities` whose `driverKind` is the provider (`codex`, `pi`, or `claudeAgent` for claude); the model id (omit it for `default`); the effort option (`reasoningEffort` on Codex, `effort` on Claude, `thinking` on Pi); the tier (`serviceTier` `default` or `priority` on Codex; `fastMode` on Claude; Pi has none).
+- **Claude Code or Codex CLI**: `kitchen models get reviewer --author <a> --command` prints each reviewer's call, in the same order; append `"<prompt>"`, then `-o "$DIR/<lens>-<n>.md"` for codex or `> "$DIR/<lens>-<n>.md"` for claude and pi. The pi call has read tools only, no shell: write the diff to `$DIR/diff.patch`, give it a checkout at the pinned head, and authorize no tests.
+- **Anywhere a reviewer's provider cannot be reached** (a cloud session without it): BLOCKED; say which provider was missing.
 
 Build each prompt from [reviewer-prompt.md](reviewer-prompt.md). Before reading, confirm every output file exists and is not empty. A missing review is a gap, not a pass.
 
 ## 4. Lead judgment
 
-You hold the full context; the reviewers saw a diff or a file list. For every finding, trace the code: a hypothetical input the callers can never pass is not a finding. Every finding you keep carries:
+You hold the full context; the reviewers saw a diff or a file list. Merge each lens's reports first: a finding two reviewers both report is one finding, marked as agreed. For every finding, trace the code: a hypothetical input the callers can never pass is not a finding. Every finding you keep carries:
 
 - its **axis**: Standards, Request or (design and design+diff reviews) Design;
 - its **evidence**: measured (the command you ran and what came out) or inferred (the `file:line` you read);
