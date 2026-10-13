@@ -66,8 +66,8 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 - Let machine gates handle reversible verification and integration. Resolve technical exceptions within the authorized scope; do not turn them into owner checkboxes.
 - A batch of parallel work is PASS only after `kitchen integrate` passes on the exact sibling SHAs.
 - Review has a budget of two rounds per PR: one open review, then one pass that only reruns the previous round's repros against the fixes. Only P0/P1 findings block a merge; P2 and lower become corpus or test cases.
-- Reviews of risky diffs run on the other model: the reviewer, its effort and its tier are what the owner set in `kitchen models`. For any other delegation, when the interface lets you set a service tier, set it explicitly: Standard unless the owner asks for Fast.
-- A worker that edits files gets its own worktree: in T3 Code `t3_thread_launch` with a worktree `workspaceStrategy` and an explicit `baseRef`; elsewhere `git worktree add`. Reviews and probes go through T3's `delegate_task` with provider, model, effort and tier set; elsewhere the other model's CLI (`kitchen models get reviewer --author <you> --command`).
+- Reviews of risky diffs run on the other model: the reviewers, their effort and their tier are what the owner set in `kitchen models`. For any other delegation, when the interface lets you set a service tier, set it explicitly: Standard unless the owner asks for Fast.
+- A worker that edits files gets its own worktree: in T3 Code `t3_thread_launch` with a worktree `workspaceStrategy` and an explicit `baseRef`; elsewhere `git worktree add`. Reviews and probes go through T3's `delegate_task` with provider, model, effort and tier set; elsewhere each reviewer's CLI (`kitchen models get reviewer --author <you> --command`).
 - After opening a PR, watch it instead of polling: in T3 Code `link_pull_request` and `watch_pull_request`, then end the turn; elsewhere read `gh pr checks` when the work resumes.
 
 ## Verification

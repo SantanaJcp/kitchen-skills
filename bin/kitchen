@@ -175,11 +175,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             failures.append(f"stale link {link}: its source is no longer an installable skill; run `bin/kitchen install`")
 
     failures += legacy.doctor(h, REPO, common.config_dir())
-    for author in models.PROVIDERS:
+    for author in models.AUTHORS:
         try:
-            models.get("reviewer", author)
+            reviewers = models.get("reviewer", author)
         except models.ModelsError as error:
             warnings.append(f"second-opinion on {author}'s work will stop BLOCKED: {error}")
+            continue
+        if any(e["provider"] == "pi" for e in reviewers) and not environment.on_path("pi"):
+            warnings.append(f"`pi` is not on PATH: a reviewer for {author} work runs on it, so second-opinion outside T3 will stop BLOCKED")
 
     on_path = shutil.which("kitchen", path=os.environ.get("PATH", ""))
     if not on_path or Path(on_path).resolve() != (REPO / "bin" / "kitchen").resolve():
@@ -443,16 +446,20 @@ def cmd_guards(args: argparse.Namespace) -> int:
 
 def cmd_models(args: argparse.Namespace) -> int:
     try:
-        if args.action == "set":
-            models.put(args.role, args.author, {"provider": args.provider, "model": args.model, "effort": args.effort, "tier": args.tier})
-            print(f"set        {args.role}{' for ' + args.author + ' work' if args.author else ''} in {models.path()}")
+        if args.action in ("set", "add", "remove"):
+            if args.action == "remove":
+                models.remove(args.role, args.author, args.provider, args.model)
+            else:
+                entry = {"provider": args.provider, "model": args.model, "effort": args.effort, "tier": args.tier}
+                models.put(args.role, args.author, [entry] if args.action == "set" else models.current(args.role, args.author) + [entry])
+            print(f"{args.action:<11}{args.role} for {args.author} work in {models.path()}")
             return 0
         if args.action == "get":
-            entry = models.get(args.role, args.author)
+            entries = models.get(args.role, args.author)
             if args.command:
-                print(models.shell(models.command(entry)))
+                print("\n".join(models.shell(models.command(e)) for e in entries))
             else:
-                print(json.dumps(entry) if args.json else f"{entry['provider']} {entry['model']} · effort {entry['effort']} · tier {entry['tier']}")
+                print(json.dumps(entries) if args.json else "\n".join(models.describe(e) for e in entries))
             return 0
         print(models.render())
         return 0
@@ -532,19 +539,24 @@ def main() -> int:
     guards_cmd.add_argument("--check", action="store_true", help="write nothing; fail while the repo's guards differ from this kitchen's")
     guards_cmd.set_defaults(func=cmd_guards)
 
-    mod = sub.add_parser("models", help="which model reviews each author's work (the reviewer second-opinion uses), in your own setup")
+    mod = sub.add_parser("models", help="which models review each author's work (the reviewers second-opinion runs), in your own setup")
     mod_sub = mod.add_subparsers(dest="action")
-    mod_get = mod_sub.add_parser("get", help="print one role's model; fails, with the command that sets it, when it is not configured")
-    mod_set = mod_sub.add_parser("set", help="set one role's model")
-    for p_role in (mod_get, mod_set):
+    mod_get = mod_sub.add_parser("get", help="print one role's models, one per line; fails, with the command that sets it, when none is configured")
+    mod_set = mod_sub.add_parser("set", help="set one role to one model, replacing any others")
+    mod_add = mod_sub.add_parser("add", help="add a model to one role; second-opinion runs each, in parallel")
+    mod_remove = mod_sub.add_parser("remove", help="remove one model from one role")
+    for p_role in (mod_get, mod_set, mod_add, mod_remove):
         p_role.add_argument("role", choices=models.ROLES)
-        p_role.add_argument("--author", required=True, choices=models.PROVIDERS, help="who wrote the work; the role runs on the other provider")
+        p_role.add_argument("--author", required=True, choices=models.AUTHORS, help="who wrote the work; the role runs another family's model")
     mod_get.add_argument("--json", action="store_true")
-    mod_get.add_argument("--command", action="store_true", help="print the CLI call for this role (codex exec or claude -p); the prompt goes last")
-    mod_set.add_argument("--provider", required=True, choices=models.PROVIDERS)
-    mod_set.add_argument("--model", required=True, help="a model id, or `default` for that tool's own default")
-    mod_set.add_argument("--effort", required=True, choices=models.EFFORTS)
-    mod_set.add_argument("--tier", required=True, choices=models.TIERS)
+    mod_get.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
+    for p_entry in (mod_set, mod_add):
+        p_entry.add_argument("--provider", required=True, choices=models.PROVIDERS)
+        p_entry.add_argument("--model", required=True, help="a model id (`<provider>/<id>` for pi), or `default` for that tool's own default")
+        p_entry.add_argument("--effort", required=True, choices=models.EFFORTS)
+        p_entry.add_argument("--tier", required=True, choices=models.TIERS)
+    mod_remove.add_argument("--provider", required=True, choices=models.PROVIDERS)
+    mod_remove.add_argument("--model", help="which one, when more than one runs on that provider")
     mod.set_defaults(func=cmd_models, action=None)
 
     retro = sub.add_parser("retro", help="my prompts from Claude Code and Codex transcripts")

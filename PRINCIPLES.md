@@ -117,9 +117,9 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 
 The author's model does not review its own work. Risky diffs (auth, tenant scope, sync, data, migrations) always go to the other model. Which model, at what effort and tier, is each person's setup in `kitchen models`, never written here. Two rounds per PR: one open review, then one pass that only reruns the first round's repros. Only P0/P1 block; the rest becomes test or corpus cases. Never upgrade ISSUES, BLOCKED or missing evidence to PASS.
 
-- **Why:** a different model sees what the author is blind to ("the other model reviews", the deck). The budget is the owner's call (PR #22): open-ended rounds kept finding new blockers instead of converging. Three-model panels at maximum effort cost too much for small and medium work (the deck), so one reviewer, configured once in `kitchen models`.
+- **Why:** a different model sees what the author is blind to ("the other model reviews", the deck). The budget is the owner's call (PR #22): open-ended rounds kept finding new blockers instead of converging. Three-model panels at maximum effort cost too much for small and medium work (the deck), so the reviewers are configured once in `kitchen models`: one unless the owner adds more, and each added one runs every lens (owner, 2026-10-12).
 - **When:** before merge, and whenever a worker reports back.
-- **Enforced by:** the `second-opinion` skill, with the reviewer taken from each person's `kitchen models` setup; it stops BLOCKED when no other model is reachable. Budget and effort: rule only.
+- **Enforced by:** the `second-opinion` skill, with the reviewers taken from each person's `kitchen models` setup; it stops BLOCKED when any of them cannot be reached; `kitchen models` refuses a reviewer whose model is the author's family. Budget and effort: rule only.
 
 ## 12. Write it where the next agent will find it (`handoff`)
 

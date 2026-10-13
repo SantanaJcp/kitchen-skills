@@ -926,7 +926,7 @@ class ModelsTests(KitchenFixture):
         got = self.kitchen("models", "get", "reviewer", "--author", "claude", "--json")
         call = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command")
 
-        self.assertEqual(json.loads(got.stdout), {"provider": "codex", "model": "gpt-x", "effort": "low", "tier": "standard"})
+        self.assertEqual(json.loads(got.stdout), [{"provider": "codex", "model": "gpt-x", "effort": "low", "tier": "standard"}])
         self.assertEqual(call.stdout.strip(), "codex exec --skip-git-repo-check -s read-only -m gpt-x "
                                               "-c 'model_reasoning_effort=\"low\"' -c 'service_tier=\"default\"'")
 
@@ -974,6 +974,147 @@ class ModelsTests(KitchenFixture):
         self.assertEqual(result.returncode, 1)
         self.assertIn("tables kitchen does not read (worker)", result.stderr)
         self.assertIn("[worker]", config.read_text())
+
+    def reviewer(self, action, author, provider, model, tier="standard"):
+        return self.kitchen("models", action, "reviewer", "--author", author, "--provider", provider, "--model", model,
+                            "--effort", "high", "--tier", tier)
+
+    def pi_listing(self, *rows):
+        """A stand-in `pi` on PATH whose `--list-models` prints these provider/model rows in pi's own table."""
+        bin_dir = self.home / "pi-bin"
+        bin_dir.mkdir(exist_ok=True)
+        table = "provider       model                context  max-out  thinking  images\n" + "".join(
+            f"{r.split('/')[0]:<15}{r.split('/')[1]:<21}272K     128K     yes       yes\n" for r in rows)
+        pi = bin_dir / "pi"
+        pi.write_text(f"#!/bin/sh\n[ \"$1\" = --list-models ] && printf '%s' '{table}'\n")
+        pi.chmod(0o755)
+        return {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    def test_add_keeps_the_first_reviewer_and_get_gives_both_calls(self):
+        self.reviewer("set", "claude", "codex", "gpt-x")
+
+        added = self.reviewer("add", "claude", "pi", "openai-codex/gpt-x")
+        got = self.kitchen("models", "get", "reviewer", "--author", "claude", "--json")
+        calls = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command",
+                             env_extra=self.pi_listing("openai-codex/gpt-x"))
+        listing = self.kitchen("models").stdout
+
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertEqual([(e["provider"], e["model"]) for e in json.loads(got.stdout)], [("codex", "gpt-x"), ("pi", "openai-codex/gpt-x")])
+        self.assertEqual(calls.stdout.splitlines(), [
+            "codex exec --skip-git-repo-check -s read-only -m gpt-x -c 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"'",
+            "pi -p --no-session --no-mcp --tools read,grep,find,ls --model openai-codex/gpt-x --thinking high"])
+        self.assertIn("reviewer for claude work codex gpt-x · effort high · tier standard\n"
+                      "                           pi openai-codex/gpt-x · effort high · tier standard", listing)
+
+    def test_set_replaces_every_reviewer_with_one(self):
+        self.reviewer("set", "claude", "codex", "gpt-x")
+        self.reviewer("add", "claude", "pi", "openai-codex/gpt-x")
+
+        self.reviewer("set", "claude", "codex", "gpt-y")
+
+        got = self.kitchen("models", "get", "reviewer", "--author", "claude").stdout
+        self.assertEqual(got, "codex gpt-y · effort high · tier standard\n")
+
+    def test_a_pi_reviewer_is_judged_by_its_models_family_not_by_pi(self):
+        gpt_on_codex = self.reviewer("add", "codex", "pi", "openai-codex/gpt-x")
+        claude_on_codex = self.reviewer("add", "codex", "pi", "claude-bridge/claude-x")
+
+        self.assertEqual(gpt_on_codex.returncode, 1)
+        self.assertIn("the author's model does not check its own work", gpt_on_codex.stderr)
+        self.assertEqual(claude_on_codex.returncode, 0, claude_on_codex.stderr)
+
+    def test_a_pi_model_whose_family_kitchen_cannot_tell_is_refused(self):
+        for model in ("default", "gpt-x", "openrouter/gpt-x"):
+            with self.subTest(model=model):
+                result = self.reviewer("add", "claude", "pi", model)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("so it can tell whose model reviews", result.stderr)
+        self.assertFalse((self.home / "config" / "models.toml").exists())
+
+    def test_pi_takes_no_fast_tier(self):
+        result = self.reviewer("add", "claude", "pi", "openai-codex/gpt-x", tier="fast")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pi has no service tier", result.stderr)
+
+    def test_the_same_reviewer_twice_is_refused(self):
+        self.reviewer("set", "claude", "codex", "gpt-x")
+
+        result = self.reviewer("add", "claude", "codex", "gpt-x")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already runs that provider and model", result.stderr)
+
+    def test_remove_takes_one_reviewer_out_and_asks_which_when_two_share_a_provider(self):
+        self.reviewer("set", "claude", "codex", "gpt-x")
+        self.reviewer("add", "claude", "codex", "gpt-y")
+        self.reviewer("add", "claude", "pi", "openai-codex/gpt-x")
+
+        ambiguous = self.kitchen("models", "remove", "reviewer", "--author", "claude", "--provider", "codex")
+        by_model = self.kitchen("models", "remove", "reviewer", "--author", "claude", "--provider", "codex", "--model", "gpt-x")
+        by_provider = self.kitchen("models", "remove", "reviewer", "--author", "claude", "--provider", "pi")
+
+        self.assertEqual(ambiguous.returncode, 1)
+        self.assertIn("pass --model", ambiguous.stderr)
+        self.assertEqual((by_model.returncode, by_provider.returncode), (0, 0), by_model.stderr + by_provider.stderr)
+        got = self.kitchen("models", "get", "reviewer", "--author", "claude").stdout
+        self.assertEqual(got, "codex gpt-y · effort high · tier standard\n")
+
+    def test_a_file_from_before_lists_is_read_and_add_keeps_its_reviewer(self):
+        config = self.home / "config" / "models.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text('[reviewer.claude]\nprovider = "codex"\nmodel = "gpt-x"\neffort = "high"\ntier = "standard"\n\n'
+                          '[reviewer.codex]\nprovider = "claude"\nmodel = "default"\neffort = "high"\ntier = "standard"\n')
+
+        before = self.kitchen("models", "get", "reviewer", "--author", "claude").stdout
+        self.reviewer("add", "claude", "pi", "openai-codex/gpt-x")
+
+        self.assertEqual(before, "codex gpt-x · effort high · tier standard\n")
+        got = self.kitchen("models", "get", "reviewer", "--author", "claude", "--json")
+        self.assertEqual([e["provider"] for e in json.loads(got.stdout)], ["codex", "pi"])
+        self.assertEqual(self.kitchen("models", "get", "reviewer", "--author", "codex").stdout, "claude default · effort high · tier standard\n")
+
+    def test_a_pi_reviewer_runs_only_on_an_id_pi_lists_exactly(self):
+        self.reviewer("set", "claude", "pi", "openai-codex/gpt-x")
+
+        near = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command",
+                            env_extra=self.pi_listing("openai-codex/gpt-x-sol", "claude-bridge/gpt-x"))
+        exact = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command",
+                             env_extra=self.pi_listing("openai-codex/gpt-x-sol", "openai-codex/gpt-x"))
+        no_pi = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command", env_extra={"PATH": "/usr/bin:/bin"})
+
+        self.assertEqual(near.returncode, 1)
+        self.assertIn("does not list openai-codex/gpt-x, and pi would run the nearest model", near.stderr)
+        self.assertEqual(exact.returncode, 0, exact.stderr)
+        self.assertIn("--model openai-codex/gpt-x --thinking high", exact.stdout)
+        self.assertEqual(no_pi.returncode, 1)
+        self.assertIn("cannot list pi's models", no_pi.stderr)
+
+    def test_a_write_refuses_a_file_it_would_lose_part_of(self):
+        config = self.home / "config" / "models.toml"
+        config.parent.mkdir(parents=True)
+        for body, error in (('reviewer = "bad"\n', "reviewer is not a table"),
+                            ('[reviewer]\ncodex = "bad"\n', "reviewer.codex is neither a table nor a list"),
+                            ('[[reviewer.codex]]\nprovider = "claude"\n', "reviewer for codex: missing model, effort, tier"),
+                            ('[reviewer.gemini]\nprovider = "claude"\n', "tables kitchen does not read (reviewer.gemini)")):
+            with self.subTest(body=body):
+                config.write_text(body)
+
+                result = self.reviewer("set", "claude", "codex", "gpt-x")
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(error, result.stderr)
+                self.assertEqual(config.read_text(), body)
+
+    def test_doctor_warns_when_a_pi_reviewer_has_no_pi_on_path(self):
+        self.reviewer("set", "claude", "pi", "openai-codex/gpt-x")
+        env = {"PATH": "/usr/bin:/bin"}
+
+        out = self.kitchen("doctor", env_extra=env).stdout
+
+        self.assertIn("`pi` is not on PATH: a reviewer for claude work runs on it", out)
 
 
 class InventoryTests(ProjectFixture):
