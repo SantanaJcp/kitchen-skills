@@ -8,13 +8,15 @@ that name), model (`default` = that tool's own default), effort and service tier
 
 A role nobody set is an error with the command that sets it, never a default model; a reviewer running the author's
 own family is refused, and so is a pi model whose family kitchen cannot tell. Whether the model exists is learned when
-it is used: the tool's error is shown as it is.
+it is used: the tool's error is shown as it is. pi alone has no such error (it runs the nearest model it knows), so its
+call is refused unless `pi --list-models` lists the id exactly.
 Principles: `cross-review` (another model reviews), `no-fallbacks` (no stand-in model), `owner-attention` (set once).
 """
 from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -93,9 +95,13 @@ def validate(role: str, author: str | None, entry: dict) -> dict:
 
 def raw(data: dict, role: str, author: str) -> list:
     node = data.get(role, {}).get(author) if isinstance(data.get(role), dict) else None
+    if node is None:
+        return []
     if isinstance(node, dict):  # one table, as files were written before a role held several models
         return [node]
-    return node if isinstance(node, list) else []
+    if not isinstance(node, list):
+        raise ModelsError(f"{path()}: {role}.{author} is neither a table nor a list of tables; fix it or rerun `{set_command(role, author)}`")
+    return node
 
 
 def current(role: str, author: str | None) -> list[dict]:
@@ -115,10 +121,10 @@ def put(role: str, author: str | None, entries: list[dict]) -> None:
     if len(set(pairs)) < len(pairs):
         raise ModelsError(f"{role} for {author} work already runs that provider and model; `kitchen models remove` it first to change it")
     data = load()
-    unknown = sorted(set(data) - set(ROLES))
+    unknown = sorted(set(data) - set(ROLES)) + sorted(f"{r}.{a}" for r in ROLES if isinstance(data.get(r), dict) for a in set(data[r]) - set(AUTHORS))
     if unknown:  # rewriting the file would drop them silently
         raise ModelsError(f"{path()} has tables kitchen does not read ({', '.join(unknown)}); remove them by hand, then rerun")
-    lists = {(r, a): raw(data, r, a) for r in ROLES for a in AUTHORS}
+    lists = {(r, a): [validate(r, a, e) for e in raw(data, r, a)] for r in ROLES for a in AUTHORS}
     lists[key(role, author)] = clean
     lines = ["# kitchen models: which models do each role. Written by `kitchen models set|add|remove`; each person sets their own.", ""]
     for (role_name, a), values in lists.items():
@@ -141,6 +147,18 @@ def remove(role: str, author: str | None, provider: str, model: str | None) -> N
     put(role, author, [e for e in entries if e is not matches[0]])
 
 
+def pi_lists(model: str) -> None:
+    """pi runs the nearest model it knows for an id it does not list, so a pi reviewer runs only on an id pi lists exactly."""
+    try:
+        listed = subprocess.run(["pi", "--list-models"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ModelsError(f"cannot list pi's models ({error}), so the pi reviewer cannot run") from error
+    rows = {tuple(line.split()[:2]) for line in listed.stdout.splitlines()}
+    if listed.returncode != 0 or tuple(model.split("/", 1)) not in rows:
+        raise ModelsError(f"`pi --list-models` does not list {model}, and pi would run the nearest model it knows instead; "
+                          f"set an id it lists exactly")
+
+
 def command(entry: dict) -> list[str]:
     """The non-interactive CLI call for a role outside T3: `codex exec`, `claude -p` or `pi -p`. The prompt goes last."""
     if entry["provider"] == "codex":
@@ -150,6 +168,7 @@ def command(entry: dict) -> list[str]:
         return argv + ["-c", f'model_reasoning_effort="{entry["effort"]}"',
                        "-c", f'service_tier="{"priority" if entry["tier"] == "fast" else "default"}"']
     if entry["provider"] == "pi":  # pi has no sandbox: read-only is its read tools alone, no shell and no MCP
+        pi_lists(entry["model"])
         return ["pi", "-p", "--no-session", "--no-mcp", "--tools", PI_READ_ONLY, "--model", entry["model"], "--thinking", entry["effort"]]
     if entry["tier"] == "fast":
         raise ModelsError("the claude CLI has no flag for the fast tier; set --tier standard, or run the role where the tier can be set (T3's delegate_task)")

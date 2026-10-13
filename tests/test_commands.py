@@ -979,12 +979,24 @@ class ModelsTests(KitchenFixture):
         return self.kitchen("models", action, "reviewer", "--author", author, "--provider", provider, "--model", model,
                             "--effort", "high", "--tier", tier)
 
-    def test_a_second_reviewer_runs_alongside_the_first(self):
+    def pi_listing(self, *rows):
+        """A stand-in `pi` on PATH whose `--list-models` prints these provider/model rows in pi's own table."""
+        bin_dir = self.home / "pi-bin"
+        bin_dir.mkdir(exist_ok=True)
+        table = "provider       model                context  max-out  thinking  images\n" + "".join(
+            f"{r.split('/')[0]:<15}{r.split('/')[1]:<21}272K     128K     yes       yes\n" for r in rows)
+        pi = bin_dir / "pi"
+        pi.write_text(f"#!/bin/sh\n[ \"$1\" = --list-models ] && printf '%s' '{table}'\n")
+        pi.chmod(0o755)
+        return {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    def test_add_keeps_the_first_reviewer_and_get_gives_both_calls(self):
         self.reviewer("set", "claude", "codex", "gpt-x")
 
         added = self.reviewer("add", "claude", "pi", "openai-codex/gpt-x")
         got = self.kitchen("models", "get", "reviewer", "--author", "claude", "--json")
-        calls = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command")
+        calls = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command",
+                             env_extra=self.pi_listing("openai-codex/gpt-x"))
         listing = self.kitchen("models").stdout
 
         self.assertEqual(added.returncode, 0, added.stderr)
@@ -1062,6 +1074,37 @@ class ModelsTests(KitchenFixture):
         got = self.kitchen("models", "get", "reviewer", "--author", "claude", "--json")
         self.assertEqual([e["provider"] for e in json.loads(got.stdout)], ["codex", "pi"])
         self.assertEqual(self.kitchen("models", "get", "reviewer", "--author", "codex").stdout, "claude default · effort high · tier standard\n")
+
+    def test_a_pi_reviewer_runs_only_on_an_id_pi_lists_exactly(self):
+        self.reviewer("set", "claude", "pi", "openai-codex/gpt-x")
+
+        near = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command",
+                            env_extra=self.pi_listing("openai-codex/gpt-x-sol", "claude-bridge/gpt-x"))
+        exact = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command",
+                             env_extra=self.pi_listing("openai-codex/gpt-x-sol", "openai-codex/gpt-x"))
+        no_pi = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command", env_extra={"PATH": "/usr/bin:/bin"})
+
+        self.assertEqual(near.returncode, 1)
+        self.assertIn("does not list openai-codex/gpt-x, and pi would run the nearest model", near.stderr)
+        self.assertEqual(exact.returncode, 0, exact.stderr)
+        self.assertIn("--model openai-codex/gpt-x --thinking high", exact.stdout)
+        self.assertEqual(no_pi.returncode, 1)
+        self.assertIn("cannot list pi's models", no_pi.stderr)
+
+    def test_a_write_refuses_a_file_it_would_lose_part_of(self):
+        config = self.home / "config" / "models.toml"
+        config.parent.mkdir(parents=True)
+        for body, error in (('[reviewer]\ncodex = "bad"\n', "reviewer.codex is neither a table nor a list"),
+                            ('[[reviewer.codex]]\nprovider = "claude"\n', "reviewer for codex: missing model, effort, tier"),
+                            ('[reviewer.gemini]\nprovider = "claude"\n', "tables kitchen does not read (reviewer.gemini)")):
+            with self.subTest(body=body):
+                config.write_text(body)
+
+                result = self.reviewer("set", "claude", "codex", "gpt-x")
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(error, result.stderr)
+                self.assertEqual(config.read_text(), body)
 
     def test_doctor_warns_when_a_pi_reviewer_has_no_pi_on_path(self):
         self.reviewer("set", "claude", "pi", "openai-codex/gpt-x")

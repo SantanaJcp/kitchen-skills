@@ -12,8 +12,9 @@ The value is a model other than the author looking at the final work. The lead's
 
 Identify the authoring model before anything else: `Co-Authored-By` trailers in `git log <base>..<head>`, the brief that produced the work, or the delegator's message. Say it in one line.
 
-- You are a different model from the author: review directly. Skip step 3 entirely: launch no panel and no other CLI; apply the lenses from step 2 yourself, one pass per lens, on the same axes. Never send it back to the author's model, and do not recurse into another reviewer.
+- You are a different model from the author: you are one reviewer. Apply the lenses from step 2 yourself, one pass per lens, on the same axes, and in step 3 run only the reviewers from `kitchen models` that are not you (another provider or another model); none configured, review alone. Never send it back to the author's model.
 - You are the author's model: run the reviewers from `kitchen models` (step 3).
+- You were launched as a reviewer by another lead: review and return; launch no reviewers of your own.
 - Author unknown: say so and treat it as written by your own model.
 
 ## 1. Pin it
@@ -38,9 +39,9 @@ Auth, tenant scope, sync, data and migrations always get the Skeptic, whatever t
 
 ## 3. Run on the other model
 
-Never use a same-model subagent as a reviewer; that defeats the purpose. The reviewers are the person's own setup: `kitchen models get reviewer --author <claude|codex>` (the author's family) prints one per line. Run every lens on every reviewer, all in parallel, and save each to `$DIR/<lens>-<n>.md`, n being the reviewer's line. Not configured, refused, or any one reviewer unreachable: stop BLOCKED with that error. No other model stands in, and no configured reviewer is skipped.
+Never use a same-model subagent as a reviewer; that defeats the purpose. The reviewers are the person's own setup: `kitchen models get reviewer --author <claude|codex>` (the author's family) prints one per line. Run every lens on every reviewer, all in parallel, and save each to `$DIR/<lens>-<n>.md`, n being the reviewer's line. Not configured (unless you review as another model, step 0), refused, or any one reviewer unreachable: stop BLOCKED with that error. No other model stands in, and no configured reviewer is skipped.
 
-- **T3 Code** (`delegate_task` is available): one async `delegate_task` per lens and reviewer, role `review`, a distinct `clientRequestId` each. Target: the instance in `orchestrator_capabilities` whose `driverKind` is the provider (`codex`, `pi`, or `claudeAgent` for claude); the model id (omit it for `default`); the effort option (`reasoningEffort` on Codex, `effort` on Claude, `thinking` on Pi); the tier (`serviceTier` `default` or `priority` on Codex; `fastMode` on Claude; Pi has none).
+- **T3 Code** (`delegate_task` is available): one async `delegate_task` per lens and reviewer, role `review`, a distinct `clientRequestId` each. Target: the instance in `orchestrator_capabilities` whose `driverKind` is the provider (`codex`, `pi`, or `claudeAgent` for claude); the model id exactly as that instance lists it (omit it for `default`; an id it does not list is BLOCKED, since Pi runs the nearest model instead); the effort option (`reasoningEffort` on Codex, `effort` on Claude, `thinking` on Pi); the tier (`serviceTier` `default` or `priority` on Codex; `fastMode` on Claude; Pi has none).
 - **Claude Code or Codex CLI**: `kitchen models get reviewer --author <a> --command` prints each reviewer's call, in the same order; append `"<prompt>"`, then `-o "$DIR/<lens>-<n>.md"` for codex or `> "$DIR/<lens>-<n>.md"` for claude and pi. The pi call has read tools only, no shell: write the diff to `$DIR/diff.patch`, give it a checkout at the pinned head, and authorize no tests.
 - **Anywhere a reviewer's provider cannot be reached** (a cloud session without it): BLOCKED; say which provider was missing.
 
@@ -73,6 +74,6 @@ For permissions, publication, migrations, or verification changes, test the crit
 
 ## Reply
 
-Verdict in one line; author model and review route (direct, or reviewers on which CLI); Act on; Consider; Noted; Dismissed; Merge danger; reviewers run (route: delegate_task or CLI; provider, model, effort, tier; output files). Change no code during the review unless I asked you to resolve the findings.
+Verdict in one line; author model and review route (direct, reviewers on which CLI, or both); Act on; Consider; Noted; Dismissed; Merge danger; reviewers run (route: delegate_task or CLI; provider, model, effort, tier; output files). Change no code during the review unless I asked you to resolve the findings.
 
 Principles (the kitchen's PRINCIPLES.md): `cross-review`, `evidence`, `no-fallbacks`.
