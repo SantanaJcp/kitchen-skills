@@ -33,8 +33,10 @@ HARNESS = (
     "Context handoff (",  # T3 Code injects these when it moves context between threads
 )
 DELEGATED = re.compile(r"^Act as the [\w -]+ sub-agent for this task\.")  # T3 Code wraps delegated tasks this way
-# T3 Code's own notices: finished delegations, a watched pull request's update, background work a server restart cancelled
+# T3 Code's own notices: a delegated task's state or result (its machine id leads), a watched pull request's update,
+# background work a server restart cancelled
 T3_NOTICE = re.compile(r"^(?:Delegated tasks? \S.*? reached (?:a )?terminal states?\."
+                       r"|Delegated task node:delegated-task:\S+ "
                        r"|Update on pull request #\d+ \(\S+\), which T3 Code is watching for you:"
                        r"|Note: the T3 server restarted, and this background work was cancelled)")
 CODEX_REQUEST = re.compile(r"## My request(?: for Codex)?:\s*\n(.*)", re.S)
@@ -219,11 +221,12 @@ def claude_prompts(since, launches: list[str]) -> list[dict]:
             if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "tool_result" for p in content):
                 continue
             origin = event.get("origin") if isinstance(event.get("origin"), dict) else {}
+            marked_human = origin.get("kind") == "human" or event.get("promptSource") == "typed"
             for raw in _text_of(content):
                 text = prompt_text(raw)
                 if not text:
                     continue
-                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or T3_NOTICE.match(text):
+                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or (T3_NOTICE.match(text) and not marked_human):
                     reason = "notification"
                 elif text.startswith(HARNESS):
                     reason = "harness"
@@ -294,6 +297,8 @@ def codex_prompts(since) -> list[dict]:
                         reason = "automation"  # a Codex heartbeat automation posting into this thread
                     elif DELEGATED.match(text):
                         reason = "subagent"
+                    elif T3_NOTICE.match(text):
+                        reason = "notification"  # T3 posts these into Codex threads with the same fields as a typed prompt
                     elif any(prompt in text for prompt in automation_prompts):
                         reason = "automation"
                     else:

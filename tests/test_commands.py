@@ -1203,7 +1203,7 @@ class RetroTests(ProjectFixture):
             self.claude_event("dale, sigue"),
             self.claude_event("Background task finished", origin={"kind": "task-notification"}, promptSource="system"),
             self.claude_event("You are the weekly gardener. Run unattended.", entrypoint="sdk-cli", origin=None),
-            self.claude_event("Delegated task node:delegated-task:abc reached a terminal state. Use task_status."),
+            self.claude_event("Delegated task node:delegated-task:abc reached a terminal state. Use task_status.", origin=None),
             self.claude_event("replayed prompt", uuid="u-replay"),
             {"type": "assistant", "uuid": "a-replay", "parentUuid": "u-replay", "requestId": "req_syn_0001", "message": {"content": []}},
         ])
@@ -1293,7 +1293,7 @@ class RetroTests(ProjectFixture):
 
         self.assertEqual(self.texts("--tool", "claude"), ["dale, sigue"])
 
-    def test_t3_pull_request_and_restart_notices_are_notifications(self):
+    def test_t3_result_question_pull_request_and_restart_notices_are_notifications(self):
         # both arrive with no origin and promptSource "sdk", exactly like a prompt typed in T3 (measured in real transcripts)
         typed = {"entrypoint": "sdk-ts", "origin": None, "promptSource": "sdk"}
         self.write_claude([
@@ -1301,13 +1301,38 @@ class RetroTests(ProjectFixture):
                               "- All 1 required check passed on 8a08209.\n\nLook into each item and act on it as your task requires.", **typed),
             self.claude_event("Note: the T3 server restarted, and this background work was cancelled before it finished. "
                               "It will not report back:\n- shell: Wait for integrate", **typed, ts="2099-01-01T10:01:00Z"),
+            self.claude_event("Delegated task node:delegated-task:command%3Amcp%3Aab%3Adelegate-task%3Apr1-review-r1 (Review PR #1 (round 1)) [completed]:\n"
+                              "Reviewed it. Two findings.", **typed, ts="2099-01-01T10:01:10Z"),
+            self.claude_event("Delegated task node:delegated-task:dd72 asked a question and is still working. Read it with t3_pending_request_read.",
+                              **typed, ts="2099-01-01T10:01:20Z"),
             self.claude_event("Update on pull request #62: ¿ya pasó el check?", **typed, ts="2099-01-01T10:02:00Z"),
         ])
 
         result = self.kitchen("retro", "--since", "1d", "--tool", "claude", cwd=self.home)
 
         self.assertEqual(self.texts("--tool", "claude"), ["Update on pull request #62: ¿ya pasó el check?"])
-        self.assertIn("excluded (notification 2)", result.stdout.splitlines()[-1])
+        self.assertIn("excluded (notification 4)", result.stdout.splitlines()[-1])
+
+    def test_a_t3_notice_the_owner_quotes_by_hand_stays_a_prompt(self):
+        # explicit human provenance beats the wording: the owner pasted the notice to contradict it
+        quoted = "Note: the T3 server restarted, and this background work was cancelled\nEso es falso; el proceso sigue vivo."
+        self.write_claude([self.claude_event(quoted, origin={"kind": "human"})])
+
+        self.assertEqual(self.texts("--tool", "claude"), [quoted])
+
+    def test_codex_excludes_t3_notices(self):
+        # in Codex a T3 notice and a prompt typed in T3 carry the same fields (no client_id either way), so only the prefix tells them apart
+        self.write_codex("thread", "vscode", [
+            ("Delegated task node:delegated-task:abc reached a terminal state. Use task_status.", False),
+            ("Update on pull request #7 (https://github.com/o/r/pull/7), which T3 Code is watching for you:\n- Checks failed on 1a2b3c4.", False),
+            ("Note: the T3 server restarted, and this background work was cancelled before it finished.", False),
+            ("sigue con el PR", False),
+        ])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "codex", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "codex"), ["sigue con el PR"])
+        self.assertIn("excluded (notification 3)", result.stdout.splitlines()[-1])
 
     def test_codex_unwraps_requests_and_drops_delegated_and_guardian_sessions(self):
         self.write_codex("human", "vscode", ["## Context:\nfiles\n## My request for Codex:\nsube a dev", "Act as the review sub-agent for this task. Review it"])

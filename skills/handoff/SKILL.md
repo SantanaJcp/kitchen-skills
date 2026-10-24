@@ -25,7 +25,7 @@ Reference specs, PRs, commits and logs by path or URL instead of copying them. R
 
 When I ask where things stand instead of asking for a handoff, write no file. Reply with a capsule built from live state, never from memory:
 
-- One line per open thread, tagged from what you measured now: `[open PR #N]`, `[merged #N]`, `[red since <date>]`, `[blocked since <date>]`, `[decision owed]`, `[running]`. Sources: `git status` and `git log` in each repo involved, `gh pr list --author @me`, `kitchen status`, and `decisions.md` on the base branch.
+- One line per open thread, tagged from what you measured now: `[open PR #N]`, `[merged #N]`, `[red since <date>]`, `[blocked since <date>]`, `[decision owed]`, `[running]`. Sources: `git fetch`, then `git status` and `git log` in each repo involved; `gh pr list --author @me --state all --limit 20`, so a pull request merged or closed since we last spoke still shows; `kitchen status`; and `decisions.md` on the base branch.
 - A thread you could not check says `[unknown: <what failed>]`; never drop it or guess its tag.
 - End with the next step, runnable without asking me anything.
 
