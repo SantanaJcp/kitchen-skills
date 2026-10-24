@@ -8,7 +8,7 @@ Signals come from the transcript formats themselves, not from guessing at wordin
           launched through `claude -p` or a T3 Code launch tool (found in that agent's own tool calls).
   Codex   session_meta originator/source/thread_source (exec, subagents, guardian reviews), and user
           items without a client_id that carry the <heartbeat> envelope of a Codex automation.
-A few envelopes have no structured marker (harness injections, T3 Code delegation notices); those
+A few envelopes have no structured marker (harness injections, T3 Code notices); those
 are matched by their fixed machine-written prefix.
 """
 from __future__ import annotations
@@ -33,7 +33,10 @@ HARNESS = (
     "Context handoff (",  # T3 Code injects these when it moves context between threads
 )
 DELEGATED = re.compile(r"^Act as the [\w -]+ sub-agent for this task\.")  # T3 Code wraps delegated tasks this way
-DELEGATION_NOTICE = re.compile(r"^Delegated tasks? \S.*? reached (?:a )?terminal states?\.")  # T3 Code reports finished delegations
+# T3 Code's own notices: finished delegations, a watched pull request's update, background work a server restart cancelled
+T3_NOTICE = re.compile(r"^(?:Delegated tasks? \S.*? reached (?:a )?terminal states?\."
+                       r"|Update on pull request #\d+ \(\S+\), which T3 Code is watching for you:"
+                       r"|Note: the T3 server restarted, and this background work was cancelled)")
 CODEX_REQUEST = re.compile(r"## My request(?: for Codex)?:\s*\n(.*)", re.S)
 SLASH_COMMAND = re.compile(r"^<command-(?:name|message)>")  # Claude Code's envelope for a slash command I typed
 COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
@@ -220,7 +223,7 @@ def claude_prompts(since, launches: list[str]) -> list[dict]:
                 text = prompt_text(raw)
                 if not text:
                     continue
-                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or DELEGATION_NOTICE.match(text):
+                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or T3_NOTICE.match(text):
                     reason = "notification"
                 elif text.startswith(HARNESS):
                     reason = "harness"

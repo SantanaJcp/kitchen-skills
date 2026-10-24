@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: "Write a handoff so another agent, tool or session (Claude, Codex, another machine) can continue this work without the conversation. Use when I ask for a handoff or to pass the work on."
+description: "Write a handoff so another agent, tool or session (Claude, Codex, another machine) can continue this work without the conversation, or answer \"where did we leave it?\" from live state. Use when I ask for a handoff, to pass the work on, or where things stand."
 disable-model-invocation: true
 ---
 
@@ -21,8 +21,16 @@ Write it to `${TMPDIR:-/tmp}/handoff-<repo>-<yyyymmdd-hhmm>.md`, never inside th
 
 Reference specs, PRs, commits and logs by path or URL instead of copying them. Redact every secret.
 
+## Resume mode: "where did we leave it?"
+
+When I ask where things stand instead of asking for a handoff, write no file. Reply with a capsule built from live state, never from memory:
+
+- One line per open thread, tagged from what you measured now: `[open PR #N]`, `[merged #N]`, `[red since <date>]`, `[blocked since <date>]`, `[decision owed]`, `[running]`. Sources: `git status` and `git log` in each repo involved, `gh pr list --author @me`, `kitchen status`, and `decisions.md` on the base branch.
+- A thread you could not check says `[unknown: <what failed>]`; never drop it or guess its tag.
+- End with the next step, runnable without asking me anything.
+
 ## For the receiving agent
 
 Before trusting the handoff, re-measure the state block: `git rev-parse HEAD`, `git status`, the PR list. Report any difference before continuing.
 
-Principles (the kitchen's PRINCIPLES.md): `handoff`, `evidence`.
+Principles (the kitchen's PRINCIPLES.md): `handoff`, `evidence`, `truthful-state`.

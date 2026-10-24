@@ -1293,6 +1293,22 @@ class RetroTests(ProjectFixture):
 
         self.assertEqual(self.texts("--tool", "claude"), ["dale, sigue"])
 
+    def test_t3_pull_request_and_restart_notices_are_notifications(self):
+        # both arrive with no origin and promptSource "sdk", exactly like a prompt typed in T3 (measured in real transcripts)
+        typed = {"entrypoint": "sdk-ts", "origin": None, "promptSource": "sdk"}
+        self.write_claude([
+            self.claude_event("Update on pull request #62 (https://github.com/o/r/pull/62), which T3 Code is watching for you:\n"
+                              "- All 1 required check passed on 8a08209.\n\nLook into each item and act on it as your task requires.", **typed),
+            self.claude_event("Note: the T3 server restarted, and this background work was cancelled before it finished. "
+                              "It will not report back:\n- shell: Wait for integrate", **typed, ts="2099-01-01T10:01:00Z"),
+            self.claude_event("Update on pull request #62: ¿ya pasó el check?", **typed, ts="2099-01-01T10:02:00Z"),
+        ])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "claude", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "claude"), ["Update on pull request #62: ¿ya pasó el check?"])
+        self.assertIn("excluded (notification 2)", result.stdout.splitlines()[-1])
+
     def test_codex_unwraps_requests_and_drops_delegated_and_guardian_sessions(self):
         self.write_codex("human", "vscode", ["## Context:\nfiles\n## My request for Codex:\nsube a dev", "Act as the review sub-agent for this task. Review it"])
         self.write_codex("guardian", {"subagent": {"other": "guardian"}}, ["approve this command?"], thread_source="guardian_review")

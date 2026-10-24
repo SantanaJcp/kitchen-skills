@@ -8,9 +8,9 @@ Each principle has an id in backticks; a control that enforces one names that id
 
 ## 1. Prove it on the real thing (`prove`)
 
-Done means you saw the observable result: the app, the command output, the record. "It compiles", a green proxy or a worker's summary is not proof. A test must fail without the change; its expected values come from an independent source, never recomputed the way the code does. No test beats a tautological one.
+Done means you saw the observable result: the app, the command output, the record. "It compiles", a green proxy or a worker's summary is not proof. A test must fail without the change; its expected values come from an independent source, never recomputed the way the code does. No test beats a tautological one. Prove a change with the fewest tests that fail without it, in the module's existing test file, and a purely visual change with before and after captures; a test injects the clock and waits on a signal, never the real clock or a sleep.
 
-- **Why:** a wrong "done" costs more than the check, and a test that cannot fail catches nothing. Verification is what turns a prompt into a loop (the video); agents love tautological tests (the video). The kitchen's own review found controls reporting success they had not earned (PR #22).
+- **Why:** a wrong "done" costs more than the check, and a test that cannot fail catches nothing. Verification is what turns a prompt into a loop (the video); agents love tautological tests (the video). The kitchen's own review found controls reporting success they had not earned (PR #22). A project's nightly went red seven nights running on a test that compared a real-clock timestamp with the one Postgres stored, and nobody noticed; T3 Code, whose tests are written by agents too, deleted 43% of its suite in one pull request (pingdotgg/t3code#22557) and grew it 2.6% in the next two days, so the lever is what gets written, not the pruning.
 - **When:** before you claim anything is done, fixed or safe.
 - **Includes (pstack):**
   - *Prove It Works*: check the real artifact; script the check and keep its output so anyone can rerun it.
@@ -26,7 +26,7 @@ Never invent counts, freshness, progress or success. A read that failed is `unkn
 - **When:** every report, every status line, every automation you write.
 - **Includes (pstack):**
   - *Explain the Number*: before trusting a measured number, name what limits it and what else it could be measuring. Ask "why not double?" Keep run count and spread next to it.
-- **Enforced by:** `status` prints `unknown`, never `0` or `none`; the nightly records `incomplete` and is never green without steps; `integrate --recorded` reuses a PASS only on the same SHAs and check digest; `retro` prints its coverage line; `second-opinion` treats a missing review as a gap.
+- **Enforced by:** `status` prints `unknown`, never `0` or `none`; the nightly records `incomplete` and is never green without steps; `integrate --recorded` reuses a PASS only on the same SHAs and check digest; `retro` prints its coverage line; `second-opinion` treats a missing review as a gap; the `handoff` resume capsule tags a thread it could not check `unknown`.
 
 ## 3. No fallbacks; fail loud (`no-fallbacks`)
 
@@ -63,9 +63,9 @@ If the owner has to say it twice, the environment is wrong, not the session. Fix
 
 ## 6. Spend the owner's attention only on decisions (`owner-attention`)
 
-The owner's attention is the scarcest resource in the kitchen. On reversible work, do it and show the result; do not ask. Controls run and read themselves and surface only exceptions, in one line. When you need the owner, lead with the decision, number it, and give your recommendation so they can reply "1 yes, 2 B".
+The owner's attention is the scarcest resource in the kitchen. On reversible work, do it and show the result; do not ask. Controls run and read themselves and surface only exceptions, in one line. When you need the owner, lead with the decision, number it, and give your recommendation so they can reply "1 yes, 2 B"; each one must be decidable from the reply alone.
 
-- **Why:** the owner was the bottleneck: dozens of "how is it going?" and "push it to dev" in one week (the deck), 18 merges approved by hand. "Where am I the bottleneck?" and "sample instead of block" (the video). A control the owner has to read is a cost, not a safeguard: a control must buy autonomy (PR #22).
+- **Why:** the owner was the bottleneck: dozens of "how is it going?" and "push it to dev" in one week (the deck), 18 merges approved by hand. "Where am I the bottleneck?" and "sample instead of block" (the video). A control the owner has to read is a cost, not a safeguard: a control must buy autonomy (PR #22). In one week the owner could not follow a decision or an explanation nine times (retro, 2026-10-20).
 - **When:** planning, reporting, designing any check or automation.
 - **Includes (pstack):**
   - *Never Block on the Human*: proceed on reversible work and let the owner correct afterwards. pstack lets external actions proceed; the kitchen does not: one-way doors (`doors`) and anything sent to people or published still wait for the owner's explicit request.
@@ -115,9 +115,9 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
 
-The author's model does not review its own work. Risky diffs (auth, tenant scope, sync, data, migrations) always go to the other model. Which model, at what effort and tier, is each person's setup in `kitchen models`, never written here. Two rounds per PR: one open review, then one pass that only reruns the first round's repros. Only P0/P1 block; the rest becomes test or corpus cases. Never upgrade ISSUES, BLOCKED or missing evidence to PASS.
+The author's model does not review its own work. Risky diffs (auth, tenant scope, sync, data, migrations) always go to the other model. Which model, at what effort and tier, is each person's setup in `kitchen models`, never written here. Two rounds per PR, or one where the project's AGENTS.md says `Review: one round`: one open review, then one pass that only reruns the first round's repros. Only P0/P1 block; the rest becomes test or corpus cases. Never upgrade ISSUES, BLOCKED or missing evidence to PASS.
 
-- **Why:** a different model sees what the author is blind to ("the other model reviews", the deck). The budget is the owner's call (PR #22): open-ended rounds kept finding new blockers instead of converging. Three-model panels at maximum effort cost too much for small and medium work (the deck), so the reviewers are configured once in `kitchen models`: one unless the owner adds more, and each added one runs every lens (owner, 2026-10-12).
+- **Why:** a different model sees what the author is blind to ("the other model reviews", the deck). The budget is the owner's call (PR #22): open-ended rounds kept finding new blockers instead of converging. The owner cut one project to one round, and the agent kept asking which budget held until the project could say so (retro, 2026-10-20). Three-model panels at maximum effort cost too much for small and medium work (the deck), so the reviewers are configured once in `kitchen models`: one unless the owner adds more, and each added one runs every lens (owner, 2026-10-12).
 - **When:** before merge, and whenever a worker reports back.
 - **Enforced by:** the `second-opinion` skill, with the reviewers taken from each person's `kitchen models` setup; it stops BLOCKED when any of them cannot be reached; `kitchen models` refuses a reviewer whose model is the author's family. Budget and effort: rule only.
 
