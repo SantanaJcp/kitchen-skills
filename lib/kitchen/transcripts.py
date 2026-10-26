@@ -16,6 +16,9 @@ Sources: every Claude config dir in HOME (one per account: ~/.claude, ~/.claude-
 ~/.config/kitchen/retro-sources.txt: a local path, or `ssh <host> [user]`. A remote source runs `kitchen retro` on its
 own host, so it classifies where its transcripts live and only the prompts cross. A source that cannot be read is in
 the coverage line as unreachable or unknown, never left out.
+
+Scheduled prompts are mapped to creation time; duplicate UUID/text pairs count once.
+Explicit human evidence wins over text rules.
 """
 from __future__ import annotations
 
@@ -25,8 +28,10 @@ import os
 import re
 import shlex
 import subprocess
+import sqlite3
 import sys
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 import importlib.util
@@ -37,17 +42,29 @@ from .credentials import redact
 T3_CONTEXT = re.compile(r"<t3_context.*?</t3_context>", re.S)
 HARNESS = (
     "<task-notification", "<local-command", "<system-reminder",
-    "This session is being continued", "[Request interrupted",
+    "This session is being continued",  # Claude Code's compaction summary
+    "[Request interrupted",
     "Context handoff (",  # T3 Code injects these when it moves context between threads
-    "<artifact-content-authored-by-others/>",  # leads a compaction summary that restates artifacts others wrote
 )
+# Text rules: in Claude they yield to explicit human evidence (see claude_prompts).
+ARTIFACT_SUMMARY = "<artifact-content-authored-by-others/>"  # the compaction summary, when the conversation held Artifact content by others
+CRASH_TEMPLATE = "A process crashed on this Omarchy machine and I want to know why."  # desktop crash notification
+BACKGROUND_NOTICE = re.compile(r"^Background command completed \(exit \d+\):")  # Codex background command result
+RESUME = "Continue where you left off."  # T3 Code's CONTINUE_PROMPT, sent to resume a thread
 DELEGATED = re.compile(r"^Act as the [\w -]+ sub-agent for this task\.")  # T3 Code wraps delegated tasks this way
 # T3 Code's own notices: a delegated task's state or result (its machine id leads), a watched pull request's update,
 # background work a server restart cancelled
 T3_NOTICE = re.compile(r"^(?:Delegated tasks? \S.*? reached (?:a )?terminal states?\."
                        r"|Delegated task node:delegated-task:\S+ "
                        r"|Update on pull request #\d+ \(\S+\), which T3 Code is watching for you:"
+                       r"|T3 Code stopped watching pull request #\d+ \("
                        r"|Note: the T3 server restarted, and this background work was cancelled)")
+REVIEW_BRIEF = re.compile(
+    r"^You are a reviewer for a code or documentation change\b"  # a review script an agent runs through Bash writes it into each session it opens; no T3 or `claude -p` call is visible for it
+    r"|^You are the [\w+ -]+ reviewer for a (?:code change|design review|design\+diff review)\. Review only; do not edit files\."  # the kitchen's reviewer brief, one per lens (skills/second-opinion/reviewer-prompt.md)
+)
+SCHEDULE_TOOL = re.compile(r"mcp__t3[-_]code__(?:schedule_task|update_scheduled_task)")  # the agent's call that gives T3 Code a prompt to run on a schedule; matched against a tool name
+DELEGATED_RESULT = re.compile(r"^Delegated task \S+ (?:\(.*\) )?\[[a-z_-]+\]:\n")
 CODEX_REQUEST = re.compile(r"## My request(?: for Codex)?:\s*\n(.*)", re.S)
 SLASH_COMMAND = re.compile(r"^<command-(?:name|message)>")  # Claude Code's envelope for a slash command I typed
 COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
@@ -61,7 +78,7 @@ T3_TEXT_KEYS = ("message", "task", "prompt")
 CODEX_NOT_HUMAN_THREADS = {"subagent", "guardian_review", "security_scan"}
 
 # Reasons a message is not counted as mine. Order is the order of the coverage line.
-REASONS = ("notification", "harness", "subagent", "automation", "agent-launched", "non-interactive", "replayed")
+REASONS = ("notification", "harness", "subagent", "automation", "agent-launched", "non-interactive", "replayed", "duplicate")
 UNKNOWN = "unknown"  # not counted as mine nor as excluded: the evidence is missing
 SSH_TIMEOUT = 300  # seconds for a remote source's whole run
 REMOTE_SOURCES = re.compile(r" · sources: (.*)$")
@@ -151,8 +168,10 @@ def agent_launches(since, claude_roots: list[Path]) -> list[dict]:
                 ts = parse_ts(event.get("timestamp") or "")
                 if T3_LAUNCH.search(json.dumps({"name": part.get("name")}, separators=(",", ":"))):
                     # the new thread's directory is chosen by T3 (often a fresh worktree), so it cannot be matched
+                    # by directory; a cwd or thread the call does name is checked by codex_launch
+                    target = t3_target(part.get("input"))
                     for text in t3_texts(part.get("input")):
-                        launches.append({"command": " ".join(text.split()), "dir": None, "ts": ts, "any_dir": True})
+                        launches.append({"command": " ".join(text.split()), "dir": None, "ts": ts, "any_dir": True, **target})
                     continue
                 command = str((part.get("input") or {}).get("command", ""))
                 if LAUNCH.search(command):
@@ -201,7 +220,202 @@ def t3_sent(text: str, ts, launches: list[dict]) -> bool:
                              and prefix_key(launch["command"]) == key for launch in launches)
 
 
-def claude_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
+def t3_target(value) -> dict:
+    """Where a T3 launch call sends its message, when the call names it: a `cwd` or a `threadId` at its top level."""
+    if not isinstance(value, dict):
+        return {}
+    target = {}
+    if isinstance(value.get("cwd"), str):
+        target["cwd"] = os.path.realpath(value["cwd"])
+    if isinstance(value.get("threadId"), str):
+        target["thread"] = value["threadId"]
+    return target
+
+
+def codex_launch(text: str, ts, cwd: str | None, session: str | None, launches: list[dict]) -> str | None:
+    """How a T3 launch call relates to this Codex message. "linked": a call sent exactly this text just before it
+    arrived, into the directory and thread that call named (when it named one). "unlinked": a call sent exactly this
+    text, but into another directory or thread. None: no call sent this text. Codex text is never matched by prefix:
+    two messages of different projects can share their first 60 characters."""
+    norm = " ".join(text.split())
+    sent = [launch for launch in launches if launch.get("any_dir") and launch["command"] == norm
+            and launch["ts"] and ts and launch["ts"] <= ts <= launch["ts"] + LAUNCH_WINDOW]
+    if not sent:
+        return None
+    here = os.path.realpath(cwd) if cwd else None
+    for launch in sent:
+        if ("cwd" not in launch or launch["cwd"] == here) and ("thread" not in launch or launch["thread"] == session):
+            return "linked"
+    return "unlinked"
+
+
+class TranscriptsError(Exception):
+    """A source `kitchen retro` cannot read. It fails loudly: a count made without that source would be a fake count."""
+
+
+def _json_line(line: str | bytes) -> dict | None:
+    try:
+        event = json.loads(line)  # a line that is not JSON, or not UTF-8 (JSONDecodeError and UnicodeDecodeError are ValueErrors)
+    except ValueError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def _content(event: dict | None, kind: str) -> list[dict]:
+    """The dict parts of a Claude transcript event's message content, for events of one type."""
+    if not event or event.get("type") != kind:
+        return []
+    content = (event.get("message") or {}).get("content")
+    return [part for part in content if isinstance(part, dict)] if isinstance(content, list) else []
+
+
+def t3_scheduled_rows() -> list[tuple[str, datetime.datetime]]:
+    """Each scheduled_tasks row of T3's state database, with its creation time. Read only when the database exists;
+    a database without that table or column is an error, not an empty list."""
+    state = home() / ".t3" / "userdata" / "statev2.sqlite"
+    if not state.exists():
+        return []
+    try:
+        with closing(sqlite3.connect(f"{state.as_uri()}?mode=ro", uri=True)) as db:
+            rows = db.execute("SELECT prompt, created_at FROM scheduled_tasks").fetchall()
+    except sqlite3.Error as error:
+        raise _unreadable_t3(state, str(error)) from error
+    out = []
+    for prompt, created in rows:
+        when = parse_ts(created) if isinstance(created, str) else None
+        if when is None:
+            raise _unreadable_t3(state, f"created_at {created!r} is not an ISO timestamp")
+        out.append((prompt, when))
+    return out
+
+
+def _unreadable_t3(path: Path, detail: str) -> TranscriptsError:
+    return TranscriptsError(f"retro: cannot read T3's scheduled tasks from {path}: {detail}; "
+                            "without them scheduled prompts cannot be told from yours")
+
+
+def schedules_a_task(answer) -> bool:
+    """True when a scheduling tool's answer names the task it saved: T3 answers schedule_task and update_scheduled_task
+    with the task as JSON, `scheduledTaskId` included, as a string or inside text parts. An error text, a refusal or an
+    empty answer names none, so it is no evidence that anything was scheduled."""
+    if isinstance(answer, str):
+        try:
+            answer = json.loads(answer)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if isinstance(answer, list):
+        return any(schedules_a_task(part) for part in answer)
+    if isinstance(answer, dict):
+        if isinstance(answer.get("scheduledTaskId"), str) and answer["scheduledTaskId"]:
+            return True
+        return any(schedules_a_task(answer.get(key)) for key in ("text", "content", "output"))
+    return False
+
+
+def claude_schedule_calls(transcript: Path) -> list[tuple[str, datetime.datetime]]:
+    """(prompt, time) of this transcript's schedule_task / update_scheduled_task calls whose result names the task saved
+    (schedules_a_task). The result is found by tool_use_id; a result with is_error, or one that names no task, scheduled
+    nothing, and a call with no result is no evidence."""
+    calls = {}  # tool_use id -> (prompt, time)
+    with transcript.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if "schedule" not in line or '"tool_use"' not in line:
+                continue
+            event = _json_line(line)
+            ts = parse_ts((event or {}).get("timestamp") or "")
+            for part in _content(event, "assistant"):
+                if part.get("type") == "tool_use" and isinstance(part.get("id"), str) and ts \
+                        and SCHEDULE_TOOL.fullmatch(str(part.get("name", ""))):
+                    calls[part["id"]] = ((part.get("input") or {}).get("prompt"), ts)
+    if not calls:
+        return []
+    saved = {}  # tool_use id -> whether its result names the task saved
+    with transcript.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if '"tool_result"' not in line or not any(call_id in line for call_id in calls):
+                continue
+            for part in _content(_json_line(line), "user"):
+                if part.get("type") == "tool_result" and part.get("tool_use_id") in calls:
+                    saved[part["tool_use_id"]] = not part.get("is_error") and schedules_a_task(part.get("content"))
+    return [calls[call_id] for call_id in calls if saved.get(call_id)]
+
+
+def codex_rollouts() -> list[Path]:
+    root = home() / ".codex"
+    return list((root / "sessions").glob("*/*/*/rollout-*.jsonl")) + list((root / "archived_sessions").glob("rollout-*.jsonl"))
+
+
+def codex_schedule_calls(rollout: Path) -> list[tuple[str, datetime.datetime]]:
+    """(prompt, time) of this rollout's schedule_task / update_scheduled_task calls whose output names the task saved
+    (schedules_a_task). Codex records no error flag on a tool output, so the answer itself must show the task; an error
+    text, or a call with no output, is no evidence."""
+    calls = {}  # call_id -> (prompt, time)
+    with rollout.open("rb") as handle:
+        for raw in handle:
+            if b"schedule" not in raw or b'"function_call"' not in raw:
+                continue
+            event = _json_line(raw)
+            payload = (event or {}).get("payload") or {}
+            if payload.get("type") != "function_call" or not isinstance(payload.get("call_id"), str) \
+                    or not SCHEDULE_TOOL.fullmatch(str(payload.get("name", ""))):
+                continue
+            ts = parse_ts(event.get("timestamp") or "")
+            try:
+                arguments = json.loads(payload.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if ts and isinstance(arguments, dict):
+                calls[payload["call_id"]] = (arguments.get("prompt"), ts)
+    if not calls:
+        return []
+    answered = set()
+    with rollout.open("rb") as handle:
+        for raw in handle:
+            if b"function_call_output" not in raw or not any(call_id.encode() in raw for call_id in calls):
+                continue
+            payload = (_json_line(raw) or {}).get("payload") or {}
+            if payload.get("type") == "function_call_output" and payload.get("call_id") in calls \
+                    and schedules_a_task(payload.get("output")):
+                answered.add(payload["call_id"])
+    return [calls[call_id] for call_id in answered]
+
+
+def scheduled_prompts(listed: list[dict]) -> dict[str, datetime.datetime]:
+    """Prompts an agent gave T3 Code's scheduler, whitespace-normalized, each with the earliest time it was scheduled.
+    T3 posts each one verbatim, so a message is automated only when it equals one and arrives at or after that time.
+    Three sources: the scheduled_tasks rows of T3's state database (creation time), and the schedule_task /
+    update_scheduled_task calls that succeeded, in Claude and in Codex transcripts (call time). A deleted task leaves no
+    row behind, so the calls are the only record of it."""
+    found = {}
+
+    def note(prompt, when):
+        if isinstance(prompt, str) and when is not None:
+            norm = " ".join(prompt.split())
+            if norm and (norm not in found or when < found[norm]):
+                found[norm] = when
+
+    for prompt, when in t3_scheduled_rows():
+        note(prompt, when)
+    for source in listed:
+        root = source.get("path")
+        if source["kind"] == "claude":
+            for transcript in sorted((root / "projects").glob("*/*.jsonl")):
+                for prompt, when in claude_schedule_calls(transcript):
+                    note(prompt, when)
+        elif source["kind"] == "codex":
+            for rollout in list((root / "sessions").glob("*/*/*/rollout-*.jsonl")) + list((root / "archived_sessions").glob("rollout-*.jsonl")):
+                for prompt, when in codex_schedule_calls(rollout):
+                    note(prompt, when)
+    return found
+
+
+def scheduled_at(norm: str, ts, scheduled: dict[str, datetime.datetime]) -> bool:
+    """Whether an agent had scheduled this exact prompt by the time this message arrived."""
+    when = scheduled.get(norm)
+    return when is not None and ts is not None and ts >= when
+
+
+def claude_prompts(root: Path, since, launches: list[dict], scheduled: dict[str, datetime.datetime]) -> list[dict]:
     prompts = []
     for transcript in sorted((root / "projects").glob("*/*.jsonl")):  # main sessions only; subagent transcripts live deeper
         if transcript.stat().st_mtime < since.timestamp():
@@ -224,6 +438,7 @@ def claude_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
         session_cwd = next((e.get("cwd") for e in events if e.get("type") == "user" and e.get("cwd")), None)
         started = next((ts for e in events if e.get("type") in ("user", "queue-operation") for ts in [parse_ts(e.get("timestamp") or "")] if ts), None)
         launch = launch_evidence(first_prompt, session_cwd, started, launches)
+        seen = set()  # (uuid, text) already in this transcript: a history rewritten on resume repeats a message under its uuid
         for event in events:
             if event.get("type") != "user" or event.get("isMeta"):
                 continue
@@ -235,11 +450,17 @@ def claude_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
                 continue
             origin = event.get("origin") if isinstance(event.get("origin"), dict) else {}
             marked_human = origin.get("kind") == "human" or event.get("promptSource") == "typed"
+            uuid = event.get("uuid")
             for raw in _text_of(content):
                 text = prompt_text(raw)
                 if not text:
                     continue
-                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or (T3_NOTICE.match(text) and not marked_human):
+                norm = " ".join(text.split())
+                copy = bool(uuid) and (uuid, norm) in seen
+                seen.add((uuid, norm))
+                if copy:
+                    reason = "duplicate"
+                elif origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or (T3_NOTICE.match(text) and not marked_human):
                     reason = "notification"
                 elif text.startswith(HARNESS):
                     reason = "harness"
@@ -252,7 +473,15 @@ def claude_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
                 elif event.get("uuid") in synthetic_parents:
                     reason = "replayed"
                 elif origin.get("kind") == "human" or event.get("promptSource") == "typed":
-                    reason = None  # the harness recorded a human turn in this session
+                    reason = None  # the harness recorded a human turn in this session: it outranks the text rules below
+                elif T3_NOTICE.match(text) or DELEGATED_RESULT.match(text):
+                    reason = "notification"
+                elif text.startswith((ARTIFACT_SUMMARY, CRASH_TEMPLATE)) or text == RESUME:
+                    reason = "harness"
+                elif REVIEW_BRIEF.match(text):
+                    reason = "agent-launched"
+                elif scheduled_at(norm, ts, scheduled):
+                    reason = "automation"
                 elif launch == "linked":
                     reason = "agent-launched"
                 elif launch == "unlinked" and prefix_key(text) == prefix_key(first_prompt or ""):
@@ -272,7 +501,7 @@ def codex_session_reason(meta: dict) -> str | None:
     return None
 
 
-def codex_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
+def codex_prompts(root: Path, since, launches: list[dict], scheduled: dict[str, datetime.datetime]) -> list[dict]:
     files = list((root / "sessions").glob("*/*/*/rollout-*.jsonl")) + list((root / "archived_sessions").glob("rollout-*.jsonl"))
     automation_prompts = []
     for manifest in (root / "automations").glob("*/automation.toml"):
@@ -303,18 +532,27 @@ def codex_prompts(root: Path, since, launches: list[dict]) -> list[dict]:
                     text = (request.group(1) if request else text).strip()
                     if not text:
                         continue
+                    # measured: every message a T3 launch sent into Codex lacks a client_id, and no message with one
+                    # matched a launch, so an item with a client_id is never agent-launched
+                    link = None if "client_id" in item else codex_launch(text, ts, cwd, session, launches)
                     if session_reason:
                         reason = session_reason
+                    elif "client_id" not in item and (DELEGATED_RESULT.match(text) or T3_NOTICE.match(text) or BACKGROUND_NOTICE.match(text)):
+                        reason = "notification"  # T3 Code writes these into the thread it runs, as in Claude
                     elif "client_id" not in item and HEARTBEAT.match(text):
                         reason = "automation"  # a Codex heartbeat automation posting into this thread
                     elif DELEGATED.match(text):
                         reason = "subagent"
-                    elif "client_id" not in item and T3_NOTICE.match(text):
-                        reason = "notification"  # T3 posts these with no client_id, like a prompt typed in T3; one typed in Codex has it
-                    elif "client_id" not in item and t3_sent(text, ts, launches):
-                        reason = "agent-launched"  # a lead in another session sent it with t3_thread_send
+                    elif "client_id" not in item and (text.startswith(HARNESS + (ARTIFACT_SUMMARY, CRASH_TEMPLATE)) or text == RESUME):
+                        reason = "harness"
+                    elif link == "linked" or ("client_id" not in item and REVIEW_BRIEF.match(text)):
+                        reason = "agent-launched"  # an agent sent it through a T3 launch tool (see launch evidence in Claude)
+                    elif scheduled_at(" ".join(text.split()), ts, scheduled):
+                        reason = "automation"
                     elif any(prompt in text for prompt in automation_prompts):
                         reason = "automation"
+                    elif link == "unlinked":
+                        reason = UNKNOWN  # an agent sent this exact text into another directory or thread: nothing here settles it
                     else:
                         reason = None
                     prompts.append({"ts": ts.isoformat(timespec="seconds"), "tool": "codex", "project": cwd, "session": session,
@@ -425,12 +663,13 @@ def collect(window: str, tool: str, pattern: str | None, include_automated: bool
     found, states = [], []
     listed = sources(home_only)
     launches = agent_launches(since, [s["path"] for s in listed if s["kind"] == "claude"])
+    scheduled = scheduled_prompts(listed)
     readers = {"claude": claude_prompts, "codex": codex_prompts}
     for source in listed:
         if source["kind"] in readers and tool in ("all", source["kind"]):
             name = label(source["kind"], source["path"])
             try:
-                prompts, state = readers[source["kind"]](source["path"], since, launches), "ok"
+                prompts, state = readers[source["kind"]](source["path"], since, launches, scheduled), "ok"
             except OSError as error:
                 prompts, state = [], f"unknown ({error.strerror or error})"
             found += [{**p, "source": name} for p in prompts]

@@ -536,7 +536,11 @@ def worker_get(args: argparse.Namespace) -> int:
 
 
 def cmd_retro(args: argparse.Namespace) -> int:
-    prompts, coverage = transcripts.collect(args.since, args.tool, args.match, args.include_automated, args.home_only)
+    try:
+        prompts, coverage = transcripts.collect(args.since, args.tool, args.match, args.include_automated, args.home_only)
+    except transcripts.TranscriptsError as error:
+        print(error, file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(prompts, indent=2, ensure_ascii=False))
         print(transcripts.coverage_line(coverage), file=sys.stderr)  # keeps stdout parseable
