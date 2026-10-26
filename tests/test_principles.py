@@ -67,6 +67,11 @@ class Principles(unittest.TestCase):
         self.assertTrue(link.is_symlink(), "a copy would drift: link it to the repo's PRINCIPLES.md")
         self.assertEqual(link.resolve(), (REPO / "PRINCIPLES.md").resolve())
 
+    def test_the_review_round_budget_is_a_control_that_names_cross_review(self):
+        # the machine check on the review budget must stay in the suite's list of controls, under its own principle
+        names = {str(p.relative_to(REPO)): declared(p) for p in CONTROLS}
+        self.assertIn("cross-review", names.get("lib/kitchen/reviews.py", []))
+
     def test_every_principle_is_enforced_or_says_rule_only(self):
         text = (REPO / "PRINCIPLES.md").read_text(encoding="utf-8")
         sections = dict(zip(self.ids, re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]))

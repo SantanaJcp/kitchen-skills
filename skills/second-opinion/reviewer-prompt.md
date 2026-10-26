@@ -14,6 +14,7 @@ Pinned: base <full SHA>, head <full SHA>; review `git diff <base>...<head>`.
 Checkout: read the code at the pinned head only, in <worktree path or `git show <sha>:<path>`>. Do not switch branches in a shared checkout.
 Forbidden: any command that writes: edits, commits, checkout or switch, reset, stash, push, merge, installs, deploys, migrations, network calls that change state.
 Authorized tests: <exact commands you may run, or "none">. Report anything else you would run instead of running it.
+Environment: every command you run uses a throwaway `HOME` and the tool's config and state variables (`KITCHEN_CONFIG`, `KITCHEN_STATE`, `KITCHEN_REPO`); never import the code under test into a script that runs with the real `HOME`.
 Project rules: <repo>/AGENTS.md and any guard tests it names.
 
 Your lens: <LENS DEFINITION>

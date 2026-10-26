@@ -1117,6 +1117,338 @@ class ModelsTests(KitchenFixture):
         self.assertIn("`pi` is not on PATH: a reviewer for claude work runs on it", out)
 
 
+RERUN = "rerun only the previous round's repros against the fixes; P2 and lower become tests, not another round"
+
+
+class ReviewRoundTests(ProjectFixture):
+    def record_file(self):
+        files = sorted((self.home / "state" / "reviews").glob("*.json"))
+        self.assertEqual(len(files), 1, files)
+        return files[0]
+
+    def record(self):
+        return json.loads(self.record_file().read_text())
+
+    def records(self):
+        return [json.loads(p.read_text()) for p in sorted((self.home / "state" / "reviews").glob("*.json"))]
+
+    def review(self, *args, cwd):
+        return self.kitchen("review-round", *args, cwd=cwd)
+
+    def short(self, project, ref="HEAD"):
+        return self.rev(project, ref)[:7]
+
+    def test_round_one_is_an_open_review(self):
+        project = self.make_project()
+
+        result = self.review(cwd=project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"round 1 of 2 on main ({self.short(project)}): open review")
+        self.assertEqual([r["head"] for r in self.record()["rounds"]], [self.rev(project, "HEAD")])
+
+    def test_the_same_head_again_is_a_retry_that_counts_nothing(self):
+        project = self.make_project()
+        first = self.review(cwd=project)
+        before = self.record_file().read_bytes()
+
+        again = self.review(cwd=project)
+
+        self.assertEqual((again.returncode, again.stdout), (0, first.stdout))
+        self.assertEqual(self.record_file().read_bytes(), before)
+
+    def test_a_new_head_is_round_two_and_reruns_only_the_repros(self):
+        project = self.make_project()
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "fixed\n", "fix the repro")
+
+        result = self.review(cwd=project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"round 2 of 2 on main ({self.short(project)}): {RERUN}")
+
+    def test_a_third_head_is_blocked_on_stderr_and_leaves_the_state_unchanged(self):
+        project = self.make_project()
+        self.review(cwd=project)
+        first = self.short(project)
+        self.commit(project, "fix.txt", "one\n")
+        self.review(cwd=project)
+        second = self.short(project)
+        self.commit(project, "fix.txt", "two\n")
+        before = self.record_file().read_bytes()
+
+        result = self.review(cwd=project)
+
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertTrue(result.stderr.startswith(
+            f"BLOCKED: review budget spent on main: 2 rounds ({first}, {second}). "
+            "Decision for the owner: one more round on main? yes runs one rerun-only round; "), result.stderr)
+        self.assertEqual(self.record_file().read_bytes(), before)
+
+    def test_owner_approved_yes_allows_exactly_one_more_round(self):
+        project = self.make_project()
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "one\n")
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "two\n")
+        self.assertEqual(self.review(cwd=project).returncode, 1)  # the budget is spent
+
+        granted = self.review("--owner-approved", "yes", cwd=project)
+
+        self.assertEqual(granted.returncode, 0, granted.stderr)
+        self.assertEqual(granted.stdout.strip(), f"round 3 of 3 on main ({self.short(project)}): {RERUN}")
+        self.assertEqual([g["text"] for g in self.record()["grants"]], ["yes"])
+        self.commit(project, "fix.txt", "three\n")
+        fourth = self.review(cwd=project)
+        self.assertEqual(fourth.returncode, 1)
+        self.assertIn("BLOCKED: review budget spent on main: 3 rounds", fourth.stderr)
+
+    def test_a_retried_owner_approval_on_the_same_head_grants_nothing_more(self):
+        project = self.make_project()
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "one\n")
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "two\n")
+        self.assertEqual(self.review("--owner-approved", "yes", cwd=project).returncode, 0)
+
+        retried = self.review("--owner-approved", "yes", cwd=project)  # e.g. a reviewer was unreachable
+
+        self.assertEqual(retried.stdout.strip(), f"round 3 of 3 on main ({self.short(project)}): {RERUN}")
+        self.assertEqual(len(self.record()["grants"]), 1)
+        self.commit(project, "fix.txt", "three\n")
+        self.assertEqual(self.review(cwd=project).returncode, 1)
+
+    def test_an_empty_owner_approval_is_refused_and_records_nothing(self):
+        project = self.make_project()
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "one\n")
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "two\n")
+        before = self.record_file().read_bytes()
+
+        for text in ("", "   "):
+            with self.subTest(text=text):
+                result = self.review("--owner-approved", text, cwd=project)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("owner's own words", result.stderr)
+                self.assertEqual(self.record_file().read_bytes(), before)
+
+    def test_two_branches_keep_separate_counters(self):
+        project = self.make_project()
+        git(project, "checkout", "-q", "-b", "feature")
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "one\n")
+        self.review(cwd=project)
+        git(project, "checkout", "-q", "main")
+
+        result = self.review(cwd=project)
+
+        self.assertEqual(result.stdout.strip(), f"round 1 of 2 on main ({self.short(project)}): open review")
+        self.assertEqual({r["branch"]: len(r["rounds"]) for r in self.records()}, {"feature": 2, "main": 1})
+
+    def test_a_second_worktree_of_the_same_repo_shares_the_counter(self):
+        project = self.make_project("shop")
+        worktree = self.home / "work" / "shop-feature"
+        git(project, "worktree", "add", "-q", "-b", "feature", str(worktree))
+        self.commit(worktree, "fix.txt", "one\n")
+        one = self.short(worktree)
+        first = self.review(cwd=worktree)
+        self.commit(worktree, "fix.txt", "two\n")
+        two = self.short(worktree)
+        second = self.review("--branch", "feature", cwd=project)  # from the main worktree
+        self.commit(worktree, "fix.txt", "three\n")
+        third = self.review(cwd=worktree)
+
+        self.assertEqual(first.stdout.strip(), f"round 1 of 2 on feature ({one}): open review")
+        self.assertEqual(second.stdout.strip(), f"round 2 of 2 on feature ({two}): {RERUN}")
+        self.assertEqual((third.returncode, third.stdout), (1, ""))
+        self.assertIn(f"BLOCKED: review budget spent on feature: 2 rounds ({one}, {two}).", third.stderr)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_detached_head_without_branch_is_an_error(self):
+        project = self.make_project()
+        git(project, "checkout", "-q", "--detach")
+
+        result = self.review(cwd=project)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--branch", result.stderr)
+        self.assertFalse((self.home / "state" / "reviews").exists())
+        named = self.review("--branch", "main", cwd=project)
+        self.assertEqual(named.stdout.strip(), f"round 1 of 2 on main ({self.short(project)}): open review")
+
+    def test_show_prints_the_record_and_changes_nothing(self):
+        project = self.make_project()
+
+        fresh = self.review("--show", cwd=project)
+
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        self.assertFalse((self.home / "state" / "reviews").exists())
+        self.review(cwd=project)
+        before = self.record_file().read_bytes()
+
+        shown = self.review("--show", cwd=project)
+
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("1 of 2 rounds used (2 base + 0 owner grants)", shown.stdout)
+        self.assertIn(f"round 1  {self.short(project)}", shown.stdout)
+        self.assertEqual(self.record_file().read_bytes(), before)
+        refused = self.review("--show", "--owner-approved", "yes", cwd=project)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(self.record_file().read_bytes(), before)
+
+    def test_outside_a_git_repository_it_is_an_error(self):
+        plain = self.home / "plain"
+        plain.mkdir()
+
+        result = self.review(cwd=plain)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not inside a git repository", result.stderr)
+
+    def start(self, *args, cwd, env_extra=None):
+        return subprocess.Popen([sys.executable, str(KITCHEN), *args], env=self.kitchen_env(env_extra=env_extra), cwd=cwd,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def test_two_reviews_at_once_admit_one_round_two_and_block_the_other(self):
+        project = self.make_project()
+        first = self.rev(project, "HEAD")
+        self.review(cwd=project)  # round 1
+        second = self.commit(project, "fix.txt", "one\n")
+        third = self.commit(project, "fix.txt", "two\n")
+        # both checks run before either save: without the lock, both see one round and both are admitted
+        hold = {"KITCHEN_REVIEW_HOLD": "2"}
+        runs = [self.start("review-round", "--head", head, cwd=project, env_extra=hold) for head in (second, third)]
+
+        results = []
+        for run in runs:
+            out, err = run.communicate(timeout=120)
+            results.append((run.returncode, out, err))
+
+        self.assertEqual(sorted(code for code, _, _ in results), [0, 1], results)
+        admitted = next(out for code, out, _ in results if code == 0)
+        self.assertIn(admitted.strip(), {f"round 2 of 2 on main ({second[:7]}): {RERUN}", f"round 2 of 2 on main ({third[:7]}): {RERUN}"})
+        blocked = next(err for code, _, err in results if code == 1)
+        self.assertIn("BLOCKED: review budget spent on main: 2 rounds", blocked)
+        heads = [r["head"] for r in self.record()["rounds"]]
+        self.assertEqual(heads[0], first)
+        self.assertEqual(len(heads), 2, heads)
+        self.assertIn(heads[1], (second, third))
+        name = self.record_file().name
+        self.assertEqual(sorted(p.name for p in (self.home / "state" / "reviews").iterdir()), [name, name + ".lock"])
+
+    def test_a_grant_whose_round_was_never_recorded_is_reused_not_stacked(self):
+        project = self.make_project()
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "one\n")
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "two\n")
+        record = self.record()
+        # written by hand: a grant an earlier run saved, whose round was never recorded
+        record["grants"] = [{"ts": "2026-10-26T10:00:00+00:00", "text": "yes"}]
+        self.record_file().write_text(json.dumps(record))
+
+        result = self.review("--owner-approved", "yes", cwd=project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"round 3 of 3 on main ({self.short(project)}): {RERUN}")
+        self.assertEqual((len(self.record()["rounds"]), len(self.record()["grants"])), (3, 1))
+        self.commit(project, "fix.txt", "three\n")
+        fourth = self.review(cwd=project)
+        self.assertEqual(fourth.returncode, 1)  # the one grant allowed one round, not two
+        self.assertIn("BLOCKED: review budget spent on main: 3 rounds", fourth.stderr)
+
+    def test_a_damaged_record_is_refused_and_never_counted(self):
+        project = self.make_project()
+        self.review(cwd=project)
+        intact = self.record()
+        damaged = {
+            "a null grant": {**intact, "grants": [None]},
+            "a round without head": {**intact, "rounds": [{"ts": "2026-10-26T10:00:00+00:00"}]},
+        }
+        for name, record in damaged.items():
+            with self.subTest(name):
+                self.record_file().write_text(json.dumps(record))
+                before = self.record_file().read_bytes()
+                self.commit(project, "fix.txt", f"{name}\n")
+
+                result = self.review(cwd=project)
+                shown = self.review("--show", cwd=project)
+
+                self.assertEqual((result.returncode, result.stdout), (1, ""), result.stderr)
+                self.assertIn("fix it by hand", result.stderr)
+                self.assertEqual(shown.returncode, 1, shown.stdout)
+                self.assertEqual(self.record_file().read_bytes(), before)
+
+    def test_a_head_an_earlier_round_reviewed_is_a_retry_that_records_nothing(self):
+        project = self.make_project()
+        first = self.rev(project, "HEAD")
+        self.review(cwd=project)
+        self.commit(project, "fix.txt", "one\n")
+        self.review(cwd=project)
+        git(project, "reset", "-q", "--hard", first)  # back to the first head, as after a force-push
+        before = self.record_file().read_bytes()
+
+        result = self.review(cwd=project)
+
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, f"round 1 of 2 on main ({first[:7]}): open review"))
+        self.assertEqual(self.record_file().read_bytes(), before)
+
+    def test_two_clones_of_one_origin_share_one_counter(self):
+        origin = self.home / "origin.git"
+        git(self.home, "init", "-q", "--bare", "-b", "main", str(origin))
+        project = self.make_project("shop")
+        git(project, "remote", "add", "origin", f"file://{origin}")
+        git(project, "push", "-q", "origin", "main")
+        self.review(cwd=project)
+        clone = self.home / "shop-clone"
+        git(self.home, "clone", "-q", f"file://{origin}", str(clone))
+        second = self.commit(clone, "fix.txt", "one\n")
+
+        result = self.review(cwd=clone)
+
+        self.assertEqual(result.stdout.strip(), f"round 2 of 2 on main ({second[:7]}): {RERUN}")
+        self.assertEqual(self.record()["project"], str(self.home / "origin"))
+        self.commit(project, "fix.txt", "two\n")
+        blocked = self.review(cwd=project)
+        self.assertEqual(blocked.returncode, 1)
+        self.assertIn("BLOCKED: review budget spent on main: 2 rounds", blocked.stderr)
+
+    def test_origin_urls_that_name_one_repository_share_one_counter(self):
+        project = self.make_project("shop")
+        git(project, "remote", "add", "origin", "git@example.test:owner/repo.git")
+        other = self.make_project("shop-mirror")
+        git(other, "remote", "add", "origin", "https://reviewer@example.test/owner/repo/")
+        self.review(cwd=project)
+        second = self.commit(other, "fix.txt", "one\n")
+
+        result = self.review(cwd=other)
+
+        self.assertEqual(result.stdout.strip(), f"round 2 of 2 on main ({second[:7]}): {RERUN}")
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(self.record()["project"], "example.test/owner/repo")
+        self.assertNotIn("reviewer", self.record_file().read_text())
+
+    def test_a_repo_without_origin_is_identified_by_its_main_worktree(self):
+        project = self.make_project()
+
+        result = self.review(cwd=project)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.record()["project"], str(project.resolve()))
+
+    def test_second_opinion_passes_the_pinned_head_to_review_round(self):
+        text = (KITCHEN.parent.parent / "skills" / "second-opinion" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("kitchen review-round --branch <head branch> --head <pinned head SHA>", text)
+        self.assertIn("Any non-zero result stops the review", text)
+
+    def test_the_reviewer_prompt_keeps_every_command_off_the_real_home(self):
+        text = (KITCHEN.parent.parent / "skills" / "second-opinion" / "reviewer-prompt.md").read_text(encoding="utf-8")
+        self.assertIn("throwaway `HOME`", text)
+        self.assertIn("never import the code under test", text)
+        self.assertIn("real `HOME`", text)
+
+
 class InventoryTests(ProjectFixture):
     def add_user_skill(self, base, name, body):
         folder = self.home / base / name
