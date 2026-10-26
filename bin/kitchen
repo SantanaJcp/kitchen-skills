@@ -23,7 +23,7 @@ REPO = Path(os.environ.get("KITCHEN_REPO") or Path(__file__).resolve().parent.pa
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from kitchen import common, credentials, integrate, inventory, journal, status, transcripts  # noqa: E402
-from kitchen import checkplan, environment, legacy, models  # noqa: E402
+from kitchen import checkplan, environment, legacy, models, reviews  # noqa: E402
 MAX_SKILL_LINES = 150
 MAX_DESCRIPTION_CHARS = 1024
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -495,6 +495,16 @@ def cmd_integrate(args: argparse.Namespace) -> int:
     return 0 if record["status"] == "PASS" else 1
 
 
+def cmd_review_round(args: argparse.Namespace) -> int:
+    try:
+        ok, text = reviews.run(Path(args.repo).resolve(), args.branch, args.head, args.owner_approved, args.show)
+    except reviews.ReviewError as error:
+        print(f"FAIL  {error}", file=sys.stderr)
+        return 1
+    print(text, file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="kitchen", description=__doc__, epilog=EXAMPLES,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -558,6 +568,15 @@ def main() -> int:
     mod_remove.add_argument("--provider", required=True, choices=models.PROVIDERS)
     mod_remove.add_argument("--model", help="which one, when more than one runs on that provider")
     mod.set_defaults(func=cmd_models, action=None)
+
+    review = sub.add_parser("review-round", help="count a branch's review rounds (two, then the owner's grant); refuse a third unless the owner granted it")
+    review.add_argument("--repo", default=".", help="repository (default: the current directory); its worktrees and clones of the same origin share the count")
+    review.add_argument("--branch", help="branch the review is for (default: the current branch; required when HEAD is detached)")
+    review.add_argument("--head", help="revision reviewed (default: the branch; a detached delegate passes the pinned SHA)")
+    review_action = review.add_mutually_exclusive_group()
+    review_action.add_argument("--owner-approved", metavar="TEXT", help="the owner's own words granting one more round; each grant allows one more")
+    review_action.add_argument("--show", action="store_true", help="print the rounds, the grants and the allowed count; change nothing")
+    review.set_defaults(func=cmd_review_round)
 
     retro = sub.add_parser("retro", help="my prompts from Claude Code and Codex transcripts")
     retro.add_argument("--since", default="7d")

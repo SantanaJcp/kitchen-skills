@@ -67,9 +67,10 @@ class AutomationFixture(unittest.TestCase):
             """) + extra + ("" if steps is None else f"\nGUARD_STEPS=(\n{step_lines}\n)\n"))
 
     def verify_config(self, steps, extra="", guard_steps=(), **options):
-        """srt is a node script: the job finds node only on EXTRA_PATH, as under launchd."""
-        node = Path(shutil.which("node")).parent
-        self.configure(list(guard_steps), extra=f'EXTRA_PATH="{self.bin}:{node}"\nGARDENER_VERIFY_STEPS=({steps})\n' + extra, **options)
+        """srt is a node script: the job finds node only on EXTRA_PATH, as under launchd. lsof goes there too: it may
+        live in ~/.local/bin, which a test that gives the job its own HOME hides."""
+        node, lsof = (Path(shutil.which(tool)).parent for tool in ("node", "lsof"))
+        self.configure(list(guard_steps), extra=f'EXTRA_PATH="{self.bin}:{node}:{lsof}"\nGARDENER_VERIFY_STEPS=({steps})\n' + extra, **options)
 
     def configure_publishing(self, extra="", **options):
         """A config the jobs can pass with: neither the gardener nor the guard is green without steps of its own."""

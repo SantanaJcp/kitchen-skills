@@ -25,6 +25,8 @@ Pick the mode:
 - **Design review**: the whole setup, not a diff (rules, skills, automation, architecture). Pin the commit SHA and the exact list of files or folders in scope.
 - **Design+diff**: both at once, when the change only makes sense against the whole setup. Declare it, pin both (range and file list), and report Design findings apart from the diff's Standards and Request findings.
 
+For a diff review or a design+diff, run `kitchen review-round --branch <head branch> --head <pinned head SHA>` from the repo under review before any reviewer starts, with the head SHA pinned in step 1: in a detached delegate worktree the branch name alone resolves the wrong commit. Any non-zero result stops the review. A BLOCKED result (`BLOCKED:` on stderr, exit 1) is reported to the owner as a numbered decision, and no reviewer launches. If the owner says yes, rerun the same command with `--owner-approved "<the owner's words>"` and continue. A lead launched as a reviewer by another lead (step 0, third bullet) does not run it, and a pure design review does not either.
+
 State the intent in two lines and name the originating request: issue, my message, or spec.
 
 ## 2. Size the panel

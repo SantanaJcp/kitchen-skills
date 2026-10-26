@@ -119,7 +119,7 @@ The author's model does not review its own work. Risky diffs (auth, tenant scope
 
 - **Why:** a different model sees what the author is blind to ("the other model reviews", the deck). The budget is the owner's call (PR #22): open-ended rounds kept finding new blockers instead of converging. Three-model panels at maximum effort cost too much for small and medium work (the deck), so the reviewers are configured once in `kitchen models`: one unless the owner adds more, and each added one runs every lens (owner, 2026-10-12).
 - **When:** before merge, and whenever a worker reports back.
-- **Enforced by:** the `second-opinion` skill, with the reviewers taken from each person's `kitchen models` setup; it stops BLOCKED when any of them cannot be reached; `kitchen models` refuses a reviewer whose model is the author's family. Budget and effort: rule only.
+- **Enforced by:** the `second-opinion` skill, with the reviewers taken from each person's `kitchen models` setup; it stops BLOCKED when any of them cannot be reached; `kitchen models` refuses a reviewer whose model is the author's family; `kitchen review-round` counts the rounds per branch and refuses a third unless the owner grants it (a weekly retro measured PRs at 3, 4 and 6 rounds while the budget was a rule). Effort: rule only.
 
 ## 12. Write it where the next agent will find it (`handoff`)
 

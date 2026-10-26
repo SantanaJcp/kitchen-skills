@@ -12,6 +12,15 @@ def on_path(name: str) -> str | None:
     return shutil.which(name, path=os.environ.get("PATH", ""))
 
 
+# The directories every automation job searches after its project's EXTRA_PATH (automation/lib/common.sh, TOOL_PATH).
+# A tool the jobs need must be found here, not on the caller's PATH: launchd and systemd start jobs with a bare PATH.
+JOB_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def on_job_path(name: str) -> str | None:
+    return shutil.which(name, path=os.pathsep.join(os.path.expanduser(d) for d in JOB_DIRS))
+
+
 def srt(repo: Path) -> Path:
     return repo / "automation" / "node_modules" / ".bin" / "srt"
 
@@ -22,6 +31,9 @@ def automation_tools_problem(repo: Path) -> str | None:
         return "srt is not installed, and the automation needs it: npm ci --ignore-scripts --prefix automation"
     if not on_path("node"):
         return "node is not on PATH, and srt (the automation's sandbox) runs on it: install Node.js"
+    if not on_job_path("lsof"):
+        return ("lsof is not where the automation's jobs look (" + ", ".join(JOB_DIRS) + "), and they check with it that nothing "
+                "of a job still holds its clone: install lsof")
     return None
 
 
