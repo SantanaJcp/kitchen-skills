@@ -469,7 +469,11 @@ def cmd_models(args: argparse.Namespace) -> int:
 
 
 def cmd_retro(args: argparse.Namespace) -> int:
-    prompts, coverage = transcripts.collect(common.parse_since(args.since), args.tool, args.match, args.include_automated)
+    try:
+        prompts, coverage = transcripts.collect(common.parse_since(args.since), args.tool, args.match, args.include_automated)
+    except transcripts.TranscriptsError as error:
+        print(error, file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(prompts, indent=2, ensure_ascii=False))
         print(transcripts.coverage_line(coverage), file=sys.stderr)  # keeps stdout parseable

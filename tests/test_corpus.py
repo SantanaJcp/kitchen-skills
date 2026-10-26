@@ -5,8 +5,10 @@ is tested as a property over known attacks, not as one fixed example. Detection 
 """
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 
 from tests.test_kitchen import KITCHEN, KitchenFixture
@@ -22,13 +24,18 @@ def joined(value):
     return "".join(value) if isinstance(value, list) else value
 
 
-def scrub(text):
+def classifier():
+    """kitchen.transcripts, imported from the lib of this checkout."""
     sys.path.insert(0, str(KITCHEN.parent.parent / "lib"))
     try:
-        from kitchen.transcripts import scrub as kitchen_scrub
+        from kitchen import transcripts
     finally:
         sys.path.pop(0)
-    return kitchen_scrub(text)
+    return transcripts
+
+
+def scrub(text):
+    return classifier().scrub(text)
 
 
 class PublicSafetyCorpus(KitchenFixture):
@@ -103,14 +110,26 @@ class ProvenanceCorpus(KitchenFixture):
     def write_case(self, home, case):
         for relative, events in case["transcripts"].items():
             base = home / ".claude" / "projects" if case["tool"] == "claude" else home / ".codex" / "sessions" / "2099" / "01" / "01"
-            path = base / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("".join(json.dumps(e, separators=(",", ":")) + "\n" for e in events))
+            self.write_events(base / relative, events)
+        for relative, events in case.get("claude_transcripts", {}).items():  # Claude-side evidence of a Codex case
+            self.write_events(home / ".claude" / "projects" / relative, events)
+        if "t3_scheduled_tasks" in case:  # T3 Code's state database: the scheduled_tasks rows, each {prompt, created_at}
+            state = home / ".t3" / "userdata"
+            state.mkdir(parents=True)
+            with closing(sqlite3.connect(state / "statev2.sqlite")) as db:
+                db.execute("CREATE TABLE scheduled_tasks (task_id TEXT PRIMARY KEY, title TEXT, prompt TEXT, created_at TEXT)")
+                db.executemany("INSERT INTO scheduled_tasks VALUES (?, ?, ?, ?)",
+                               [(f"task-{i}", "corpus", row["prompt"], row["created_at"]) for i, row in enumerate(case["t3_scheduled_tasks"])])
+                db.commit()
         for automation in case.get("automations", []):
             folder = home / ".codex" / "automations" / automation["id"]
             folder.mkdir(parents=True)
             (folder / "automation.toml").write_text(
                 f'version = 1\nid = "{automation["id"]}\"\nkind = "{automation["kind"]}"\nprompt = {json.dumps(automation["prompt"])}\n')
+
+    def write_events(self, path, events):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(e, separators=(",", ":")) + "\n" for e in events))
 
     def test_provenance_corpus(self):
         for case in load("provenance")["cases"]:
@@ -125,3 +144,33 @@ class ProvenanceCorpus(KitchenFixture):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 got = [[p["text"], p["excluded"]] for p in json.loads(result.stdout)]
                 self.assertEqual(got, case["expect"])
+
+    def run_retro(self, home, *args):
+        env = {**os.environ, "HOME": str(home), "KITCHEN_REPO": str(self.repo), "KITCHEN_STATE": str(home / "state"),
+               "KITCHEN_CONFIG": str(home / "config"), "KITCHEN_DENYLIST": str(home / "none")}
+        return subprocess.run([sys.executable, str(KITCHEN), "retro", "--since", "1d", *args], env=env, capture_output=True, text=True, cwd=home)
+
+    def test_t3_database_without_scheduled_tasks_fails_loudly(self):
+        home = self.home / "cases" / "t3-database-without-table"
+        state = home / ".t3" / "userdata" / "statev2.sqlite"
+        state.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(state)) as db:
+            db.execute("CREATE TABLE other_table (id TEXT)")
+            db.commit()
+        result = self.run_retro(home, "--json", "--tool", "codex")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr.strip(),
+                         f"retro: cannot read T3's scheduled tasks from {state}: no such table: scheduled_tasks; "
+                         "without them scheduled prompts cannot be told from yours")
+
+    def test_reviewer_brief_template_is_recognized(self):
+        """The reviewer brief of skills/second-opinion starts with its template's first line. Filled for each kind of
+        review, that line must still match the classifier: if the wording drifts, this fails."""
+        template = (KITCHEN.parent.parent / "skills" / "second-opinion" / "reviewer-prompt.md").read_text(encoding="utf-8")
+        first = next(line for line in template.splitlines() if line.startswith("You are the <LENS> reviewer"))
+        for kind in ("code change", "design review", "design+diff review"):
+            filled = first.replace("<LENS>", "Skeptic").replace("<code change | design review | design+diff review>", kind)
+            with self.subTest(kind=kind):
+                self.assertNotIn("<", filled)
+                self.assertIsNotNone(classifier().REVIEW_BRIEF.match(filled), filled)
