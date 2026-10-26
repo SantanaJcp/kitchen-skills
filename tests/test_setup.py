@@ -154,6 +154,52 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.assertIn("WARN  srt is not installed, and the automation needs it: npm ci --ignore-scripts --prefix automation "
                       "(automation configured for: shop)", lines)
 
+    def test_missing_lsof_is_reported_when_automation_is_configured(self):
+        config = self.root / "config"
+        (config / "automation").mkdir(parents=True)
+        (config / "automation" / "shop.env").write_text("BRANCH=dev\n")
+        repo = self.root / "repo"
+        fake_srt = repo / "automation" / "node_modules" / ".bin" / "srt"
+        fake_srt.parent.mkdir(parents=True)
+        fake_srt.write_text("#!/bin/sh\n")
+        fake_srt.chmod(0o755)
+        self.fake("node", "exit 0")
+
+        env = environment()
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin)}), mock.patch.object(env, "JOB_DIRS", (str(self.bin),)):
+            report = env.tools(repo, config)
+
+        self.assertIn(("WARN", f"lsof is not where the automation's jobs look ({self.bin}), and they check with it that nothing of a job "
+                               "still holds its clone: install lsof (automation configured for: shop)"), report)
+
+    def test_lsof_on_the_callers_path_only_still_counts_as_missing_for_the_jobs(self):
+        config = self.root / "config"
+        (config / "automation").mkdir(parents=True)
+        (config / "automation" / "shop.env").write_text("BRANCH=dev\n")
+        repo = self.root / "repo"
+        fake_srt = repo / "automation" / "node_modules" / ".bin" / "srt"
+        fake_srt.parent.mkdir(parents=True)
+        fake_srt.write_text("#!/bin/sh\n")
+        fake_srt.chmod(0o755)
+        self.fake("node", "exit 0")
+        self.fake("lsof", "exit 0")  # on the caller's PATH, as in an interactive shell
+        job_dir = self.root / "job-bin"
+        job_dir.mkdir()
+
+        env = environment()
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin)}), mock.patch.object(env, "JOB_DIRS", (str(job_dir),)):
+            report = env.tools(repo, config)
+
+        self.assertTrue(any(level == "WARN" and message.startswith("lsof is not where the automation's jobs look") for level, message in report), report)
+
+    def test_the_job_directories_are_the_ones_the_jobs_search(self):
+        common = (Path(__file__).resolve().parents[1] / "automation" / "lib" / "common.sh").read_text()
+        line = next(l for l in common.splitlines() if l.startswith("TOOL_PATH="))
+        value = line.split('"', 2)[1]
+        self.assertTrue(value.startswith("${EXTRA_PATH:-}:"), value)
+        dirs = value[len("${EXTRA_PATH:-}:"):].split(":")
+        self.assertEqual([d.replace("$HOME", "~") for d in dirs], list(environment().JOB_DIRS))
+
     def test_a_launchagent_present_but_not_loaded_is_flagged(self):
         agents = self.root / "Library" / "LaunchAgents"
         agents.mkdir(parents=True)
@@ -277,6 +323,12 @@ class FastCheckTests(KitchenFixture):
         srt.parent.mkdir(parents=True)
         srt.write_text("#!/bin/sh\necho 0.0.78\n")
         srt.chmod(0o755)
+        # the automation's tools are checked before its suite runs, where its jobs look; a stand-in lsof in the throwaway
+        # HOME's ~/.local/bin (one of those places) keeps the result independent of this machine
+        tools = self.home / ".local" / "bin"
+        tools.mkdir(parents=True, exist_ok=True)
+        (tools / "lsof").write_text("#!/bin/sh\nexit 0\n")
+        (tools / "lsof").chmod(0o755)
 
     def stage(self, *paths):
         for path in paths:
