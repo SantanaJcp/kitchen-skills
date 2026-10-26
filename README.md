@@ -73,7 +73,7 @@ kitchen status --exceptions # only the lines that are not green; exits 1 when th
 kitchen log "msg" --status done   # agents leave checkpoints during autonomous runs (done, blocked, decision or note)
 kitchen inventory           # skills, rule files and Codex automations the agents can see, and where copies drift
 kitchen retro --since 7d    # my prompts from Claude Code and Codex, for the retro skill
-kitchen models              # which models review each author's work; `kitchen models set|add|remove reviewer --author claude ...` to change them
+kitchen models              # which models review each author's work and which runs delegated work (worker); `kitchen models set|add|remove reviewer --author claude ...` or `kitchen models set worker [--project DIR] ...` to change them
 kitchen integrate fix/a fix/b --base main   # merge in order in a disposable clone, run the project's checks after each merge
 kitchen init ../some-repo   # print the instructions your agent follows to set a repo up (the same as /chef-mode init there)
 kitchen guards ../some-repo # put the kitchen's guards in that repo only; --check fails while they drift

@@ -1,8 +1,10 @@
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,6 +14,12 @@ from tests.test_kitchen import KITCHEN, KitchenFixture
 
 def git(repo, *args):
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def clean_git(repo, *args):
+    """git in REPO without the GIT_* a hook exports: the directory argument, not the hook's repo, decides."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=env)
 
 
 def local_ts(days_ago, hour=3, minute=0):
@@ -957,23 +965,203 @@ class ModelsTests(KitchenFixture):
         self.assertIn("reviewer for codex work  not configured", out)
 
     def test_roles_nothing_reads_are_refused(self):
-        result = self.kitchen("models", "set", "worker", "--author", "claude", "--provider", "codex", "--model", "default",
+        result = self.kitchen("models", "set", "judge", "--author", "claude", "--provider", "codex", "--model", "default",
                               "--effort", "low", "--tier", "standard")
 
         self.assertEqual(result.returncode, 2)
-        self.assertIn("invalid choice: 'worker'", result.stderr)
+        self.assertIn("invalid choice: 'judge'", result.stderr)
 
     def test_set_refuses_to_drop_tables_it_does_not_read(self):
         config = self.home / "config" / "models.toml"
         config.parent.mkdir(parents=True)
-        config.write_text('[worker]\nprovider = "claude"\nmodel = "default"\neffort = "high"\ntier = "standard"\n')
+        config.write_text('[judge]\nprovider = "claude"\nmodel = "default"\neffort = "high"\ntier = "standard"\n')
 
         result = self.kitchen("models", "set", "reviewer", "--author", "claude", "--provider", "codex", "--model", "default",
                               "--effort", "low", "--tier", "standard")
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("tables kitchen does not read (worker)", result.stderr)
-        self.assertIn("[worker]", config.read_text())
+        self.assertIn("tables kitchen does not read (judge)", result.stderr)
+        self.assertIn("[judge]", config.read_text())
+
+    def set_worker(self, provider, model, effort="low", project=None):
+        args = ["--provider", provider, "--model", model, "--effort", effort, "--tier", "standard"]
+        if project is not None:
+            args += ["--project", str(project)]
+        return self.kitchen("models", "set", "worker", *args)
+
+    def get_worker(self, *flags, cwd=None):
+        return self.kitchen("models", "get", "worker", *flags, cwd=cwd)
+
+    def make_repo(self, name, separate_git_dir=None):
+        repo = self.home / "work" / name
+        repo.mkdir(parents=True)
+        init = ["init", "-q", "-b", "main", *(["--separate-git-dir", str(separate_git_dir)] if separate_git_dir else [])]
+        clean_git(repo, *init)
+        clean_git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+        return repo
+
+    def test_a_worker_set_globally_is_what_get_answers_outside_a_repo(self):
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+
+        set_ = self.set_worker("codex", "gpt-w")
+        got = self.get_worker("--json", cwd=elsewhere)
+        text = self.get_worker(cwd=elsewhere)
+
+        self.assertEqual(set_.returncode, 0, set_.stderr)
+        self.assertEqual(json.loads(got.stdout), {"provider": "codex", "model": "gpt-w", "effort": "low", "tier": "standard", "scope": "global"})
+        self.assertEqual(text.stdout, "codex gpt-w · effort low · tier standard (global)\n")
+
+    def test_a_project_override_wins_inside_its_repo_from_a_subdirectory_and_a_worktree(self):
+        shop = self.make_repo("shop")
+        (shop / "src").mkdir()
+        worktree = self.home / "work" / "shop-wt"
+        clean_git(shop, "worktree", "add", "-q", "-b", "wt", str(worktree))
+        self.set_worker("codex", "gpt-w")
+
+        set_ = self.set_worker("claude", "default", effort="high", project=shop)
+        from_subdir = self.get_worker("--json", cwd=shop / "src")
+        from_worktree = self.get_worker("--json", cwd=worktree)
+        text = self.get_worker(cwd=shop / "src")
+
+        self.assertEqual(set_.returncode, 0, set_.stderr)
+        expected = {"provider": "claude", "model": "default", "effort": "high", "tier": "standard", "scope": "project"}
+        self.assertEqual(json.loads(from_subdir.stdout), expected)
+        self.assertEqual(json.loads(from_worktree.stdout), expected)
+        self.assertEqual(text.stdout, "claude default · effort high · tier standard (project)\n")
+
+    def test_another_repo_gets_the_global_worker(self):
+        shop = self.make_repo("shop")
+        other = self.make_repo("other")
+        self.set_worker("codex", "gpt-w")
+        self.set_worker("claude", "default", effort="high", project=shop)
+
+        got = self.get_worker("--json", cwd=other)
+
+        self.assertEqual(json.loads(got.stdout), {"provider": "codex", "model": "gpt-w", "effort": "low", "tier": "standard", "scope": "global"})
+
+    def test_a_worker_nobody_set_fails_with_the_command_that_sets_it(self):
+        result = self.get_worker(cwd=self.home)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("worker is not configured", result.stderr)
+        self.assertIn("kitchen models set worker --provider", result.stderr)
+
+    def test_a_worker_does_not_depend_on_the_author_so_author_is_refused(self):
+        set_ = self.kitchen("models", "set", "worker", "--author", "claude", "--provider", "codex", "--model", "gpt-w",
+                            "--effort", "low", "--tier", "standard")
+        get = self.kitchen("models", "get", "worker", "--author", "claude", cwd=self.home)
+
+        self.assertEqual(set_.returncode, 1)
+        self.assertIn("does not depend on who wrote the work", set_.stderr)
+        self.assertEqual(get.returncode, 1)
+        self.assertIn("does not depend on who wrote the work", get.stderr)
+        self.assertFalse((self.home / "config" / "models.toml").exists())
+
+    def test_a_workers_command_is_refused_because_the_reviewer_call_is_read_only(self):
+        self.set_worker("codex", "gpt-w")
+
+        call = self.get_worker("--command", cwd=self.home)
+
+        self.assertEqual(call.returncode, 1)
+        self.assertEqual(call.stdout, "")
+        self.assertIn("read-only call", call.stderr)
+
+    def test_add_is_refused_for_a_worker_which_holds_one_model(self):
+        self.set_worker("codex", "gpt-w")
+
+        added = self.kitchen("models", "add", "worker", "--provider", "claude", "--model", "default", "--effort", "high", "--tier", "standard")
+        got = self.get_worker("--json", cwd=self.home)
+
+        self.assertEqual(added.returncode, 1)
+        self.assertIn("`kitchen models set worker` replaces it", added.stderr)
+        self.assertEqual(json.loads(got.stdout)["model"], "gpt-w")
+
+    def test_removing_a_project_override_falls_back_to_the_configured_global(self):
+        shop = self.make_repo("shop")
+        self.set_worker("codex", "gpt-w", effort="low")
+        self.set_worker("claude", "default", effort="high", project=shop)
+
+        removed = self.kitchen("models", "remove", "worker", "--project", str(shop))
+        got = self.get_worker("--json", cwd=shop)
+        again = self.kitchen("models", "remove", "worker", "--project", str(shop))
+
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(got.stdout), {"provider": "codex", "model": "gpt-w", "effort": "low", "tier": "standard", "scope": "global"})
+        self.assertEqual(again.returncode, 1)
+        self.assertIn(f"no worker is set for {os.path.realpath(shop)}", again.stderr)
+
+    def test_the_reviewer_and_worker_tables_survive_each_others_writes(self):
+        shop = self.make_repo("shop")
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        self.reviewer("set", "claude", "codex", "gpt-x")
+        self.reviewer("add", "claude", "pi", "openai-codex/gpt-x")
+
+        worker_set = self.set_worker("codex", "gpt-w")
+        project_set = self.set_worker("claude", "default", effort="high", project=shop)
+        reviewer_add = self.reviewer("add", "codex", "claude", "default")
+
+        self.assertEqual((worker_set.returncode, project_set.returncode, reviewer_add.returncode), (0, 0, 0),
+                         worker_set.stderr + project_set.stderr + reviewer_add.stderr)
+        claude_reviewers = json.loads(self.kitchen("models", "get", "reviewer", "--author", "claude", "--json").stdout)
+        codex_reviewers = json.loads(self.kitchen("models", "get", "reviewer", "--author", "codex", "--json").stdout)
+        self.assertEqual([(e["provider"], e["model"]) for e in claude_reviewers], [("codex", "gpt-x"), ("pi", "openai-codex/gpt-x")])
+        self.assertEqual([(e["provider"], e["model"]) for e in codex_reviewers], [("claude", "default")])
+        self.assertEqual(json.loads(self.get_worker("--json", cwd=shop).stdout)["scope"], "project")
+        self.assertEqual(json.loads(self.get_worker("--json", cwd=elsewhere).stdout)["model"], "gpt-w")
+
+        reviewer_again = self.reviewer("add", "claude", "codex", "gpt-y")
+
+        self.assertEqual(reviewer_again.returncode, 0, reviewer_again.stderr)
+        self.assertEqual(json.loads(self.get_worker("--json", cwd=shop).stdout)["model"], "default")
+        self.assertEqual(json.loads(self.get_worker("--json", cwd=elsewhere).stdout)["model"], "gpt-w")
+        self.assertEqual(len(json.loads(self.kitchen("models", "get", "reviewer", "--author", "claude", "--json").stdout)), 3)
+
+    def test_the_listing_shows_the_worker_globally_and_per_project(self):
+        shop = self.make_repo("shop")
+        self.reviewer("set", "claude", "codex", "gpt-x")
+        self.set_worker("codex", "gpt-w")
+        self.set_worker("claude", "default", effort="high", project=shop)
+
+        lines = self.kitchen("models").stdout.splitlines()
+
+        self.assertIn("  reviewer for claude work codex gpt-x · effort high · tier standard", lines)
+        self.assertTrue(any(line.startswith("  worker (global)") and line.endswith("codex gpt-w · effort low · tier standard") for line in lines), lines)
+        self.assertTrue(any(line.startswith("  worker (project)") and line.endswith(f"claude default · effort high · tier standard  for {os.path.realpath(shop)}")
+                            for line in lines), lines)
+
+    def test_a_project_outside_git_is_refused(self):
+        plain = self.home / "plain"
+        plain.mkdir()
+
+        result = self.set_worker("codex", "gpt-w", project=plain)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"{plain} is not in a git repository", result.stderr)
+        self.assertFalse((self.home / "config" / "models.toml").exists())
+
+    def test_a_reviewer_is_per_author_so_project_is_refused(self):
+        shop = self.make_repo("shop")
+
+        result = self.kitchen("models", "set", "reviewer", "--author", "claude", "--provider", "codex", "--model", "gpt-x",
+                              "--effort", "high", "--tier", "standard", "--project", str(shop))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is set per author, not per project", result.stderr)
+
+    def test_a_write_refuses_a_worker_table_it_does_not_read(self):
+        config = self.home / "config" / "models.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text('[worker]\nprovider = "claude"\nmodel = "default"\neffort = "high"\ntier = "standard"\n\n'
+                          '[worker.gemini]\nprovider = "claude"\n')
+
+        result = self.reviewer("set", "claude", "codex", "gpt-x")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("tables kitchen does not read (worker.gemini)", result.stderr)
+        self.assertIn("[worker.gemini]", config.read_text())
 
     def reviewer(self, action, author, provider, model, tier="standard"):
         return self.kitchen("models", action, "reviewer", "--author", author, "--provider", provider, "--model", model,
@@ -1115,6 +1303,164 @@ class ModelsTests(KitchenFixture):
         out = self.kitchen("doctor", env_extra=env).stdout
 
         self.assertIn("`pi` is not on PATH: a reviewer for claude work runs on it", out)
+
+    def stored_file(self):
+        """The config file, read back with tomllib: what another reader of the file would see."""
+        return tomllib.loads((self.home / "config" / "models.toml").read_text(encoding="utf-8"))
+
+    def make_bare_with_worktree(self, name):
+        """A bare repo cloned from a repo with one commit, and a linked worktree of it."""
+        source = self.make_repo(f"{name}-src")
+        bare = self.home / "work" / f"{name}.git"
+        worktree = self.home / "work" / f"{name}-wt"
+        clean_git(self.home, "clone", "-q", "--bare", str(source), str(bare))
+        clean_git(bare, "worktree", "add", "-q", "-b", f"{name}-wt", str(worktree), "main")
+        return bare, worktree
+
+    def test_a_project_path_with_an_emoji_a_quote_and_a_backslash_is_stored_as_valid_toml(self):
+        odd = self.make_repo('shop-🧺-"q"-back\\slash')
+        self.reviewer("set", "claude", "codex", "gpt-x")
+
+        set_ = self.set_worker("claude", "default", effort="high", project=odd)
+        got = self.get_worker("--json", cwd=odd)
+        reviewers = self.kitchen("models", "get", "reviewer", "--author", "claude", "--json")
+
+        self.assertEqual(set_.returncode, 0, set_.stderr)
+        self.assertEqual(list(self.stored_file()["worker"]["projects"]), [os.path.realpath(odd)])
+        self.assertEqual(json.loads(got.stdout)["scope"], "project")
+        self.assertEqual([e["provider"] for e in json.loads(reviewers.stdout)], ["codex"])
+
+    def test_two_sibling_bare_repos_with_worktrees_keep_distinct_overrides(self):
+        a_bare, a_worktree = self.make_bare_with_worktree("a")
+        b_bare, b_worktree = self.make_bare_with_worktree("b")
+        self.set_worker("codex", "gpt-w")
+
+        set_a = self.set_worker("claude", "default", effort="high", project=a_bare)
+        set_b = self.set_worker("codex", "gpt-x", effort="low", project=b_bare)
+        from_a = self.get_worker("--json", cwd=a_worktree)
+        from_b = self.get_worker("--json", cwd=b_worktree)
+
+        self.assertEqual((set_a.returncode, set_b.returncode), (0, 0), set_a.stderr + set_b.stderr)
+        self.assertEqual(sorted(self.stored_file()["worker"]["projects"]), sorted(os.path.realpath(p) for p in (a_bare, b_bare)))
+        self.assertEqual(json.loads(from_a.stdout), {"provider": "claude", "model": "default", "effort": "high", "tier": "standard", "scope": "project"})
+        self.assertEqual(json.loads(from_b.stdout), {"provider": "codex", "model": "gpt-x", "effort": "low", "tier": "standard", "scope": "project"})
+
+    def test_sibling_submodules_keep_distinct_overrides(self):
+        superproject = self.make_repo("super")
+        for name in ("sub-a", "sub-b"):
+            source = self.make_repo(f"{name}-src")
+            clean_git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(source), name)
+        sub_a, sub_b = superproject / "sub-a", superproject / "sub-b"
+        self.set_worker("codex", "gpt-w")
+
+        set_a = self.set_worker("claude", "default", effort="high", project=sub_a)
+        set_b = self.set_worker("codex", "gpt-x", effort="low", project=sub_b)
+        from_a = self.get_worker("--json", cwd=sub_a)
+        from_b = self.get_worker("--json", cwd=sub_b)
+
+        self.assertEqual((set_a.returncode, set_b.returncode), (0, 0), set_a.stderr + set_b.stderr)
+        self.assertEqual(sorted(self.stored_file()["worker"]["projects"]), sorted(os.path.realpath(p) for p in (sub_a, sub_b)))
+        self.assertEqual(json.loads(from_a.stdout)["model"], "default")
+        self.assertEqual(json.loads(from_b.stdout)["model"], "gpt-x")
+
+    def test_a_repo_with_a_separate_git_dir_is_named_by_its_working_tree_and_its_linked_worktree_is_refused(self):
+        repo = self.make_repo("sep", separate_git_dir=self.home / "work" / "sep-gitdir")
+        linked = self.home / "work" / "sep-wt"
+        clean_git(repo, "worktree", "add", "-q", "-b", "sep-wt", str(linked))
+
+        set_ = self.set_worker("claude", "default", effort="high", project=repo)
+        got = self.get_worker("--json", cwd=repo)
+        from_linked = self.get_worker("--json", cwd=linked)
+
+        self.assertEqual(set_.returncode, 0, set_.stderr)
+        self.assertEqual(list(self.stored_file()["worker"]["projects"]), [os.path.realpath(repo)])
+        self.assertEqual(json.loads(got.stdout)["scope"], "project")
+        self.assertEqual(from_linked.returncode, 1, from_linked.stdout)
+        self.assertIn("a git dir (not a checkout): run it from the main checkout", from_linked.stderr)
+
+    def test_a_broken_linked_worktree_fails_instead_of_answering_with_the_global_worker(self):
+        shop = self.make_repo("shop")
+        worktree = self.home / "work" / "shop-wt"
+        clean_git(shop, "worktree", "add", "-q", "-b", "wt", str(worktree))
+        self.set_worker("codex", "gpt-w")
+        self.set_worker("claude", "default", effort="high", project=shop)
+        (shop / ".git").rename(self.home / "moved-git")
+
+        got = self.get_worker("--json", cwd=worktree)
+
+        self.assertEqual(got.returncode, 1, got.stdout)
+        self.assertEqual(got.stdout, "")
+        self.assertIn(f"git could not name the project of {os.path.realpath(worktree)}: fatal:", got.stderr)
+
+    def test_git_saying_not_a_repository_about_a_gitdir_is_an_error_not_outside_a_repo(self):
+        """Only git's outside-a-repo wording means outside. This git words a broken linked worktree differently (the test
+        above), so a stand-in git on PATH prints the wording reported for that case; the real git runs everything else."""
+        shop = self.make_repo("shop")
+        worktree = self.home / "work" / "shop-wt"
+        clean_git(shop, "worktree", "add", "-q", "-b", "wt", str(worktree))
+        self.set_worker("codex", "gpt-w")
+        stand_in = self.home / "standin-bin"
+        stand_in.mkdir()
+        gitdir = shop / ".git" / "worktrees" / "shop-wt"
+        (stand_in / "git").write_text(f'#!/bin/sh\ncase " $* " in *" worktree "*) echo "fatal: not a git repository: {gitdir}" >&2; exit 128;; esac\n'
+                                      f'exec "{shutil.which("git")}" "$@"\n')
+        (stand_in / "git").chmod(0o755)
+
+        got = self.kitchen("models", "get", "worker", "--json", cwd=worktree,
+                           env_extra={"PATH": f"{stand_in}{os.pathsep}{os.environ['PATH']}"})
+
+        self.assertEqual(got.returncode, 1, got.stdout)
+        self.assertEqual(got.stdout, "")
+        self.assertIn(f"git could not name the project of {os.path.realpath(worktree)}: fatal: not a git repository: ", got.stderr)
+
+    def test_an_override_for_a_moved_repo_shows_path_missing_and_is_removed_by_its_old_path(self):
+        shop = self.make_repo("shop")
+        self.set_worker("codex", "gpt-w")
+        self.set_worker("claude", "default", effort="high", project=shop)
+        old = os.path.realpath(shop)
+        shop.rename(self.home / "work" / "shop-moved")
+
+        lines = self.kitchen("models").stdout.splitlines()
+        removed = self.kitchen("models", "remove", "worker", "--project", old)
+        got = self.get_worker("--json", cwd=self.home / "work" / "shop-moved")
+        after = self.kitchen("models").stdout
+
+        self.assertTrue(any(line.endswith(f"for {old}  (path missing)") for line in lines), lines)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(json.loads(got.stdout)["scope"], "global")
+        self.assertNotIn(old, after)
+
+    def test_a_reviewer_without_author_is_a_usage_error_from_the_parser(self):
+        set_args = ["--provider", "codex", "--model", "gpt-x", "--effort", "low", "--tier", "standard"]
+        for argv in (["get"], ["set", *set_args], ["add", *set_args], ["remove", "--provider", "codex"]):
+            with self.subTest(action=argv[0]):
+                result = self.kitchen("models", *argv, "reviewer")
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f"usage: kitchen models {argv[0]}", result.stderr)
+                self.assertIn("pass --author claude or --author codex", result.stderr)
+                self.assertNotIn("FAIL", result.stderr)
+
+    def test_remove_reviewer_without_provider_is_a_usage_error_from_the_parser(self):
+        self.reviewer("set", "claude", "codex", "gpt-x")
+
+        result = self.kitchen("models", "remove", "reviewer", "--author", "claude")
+        got = self.kitchen("models", "get", "reviewer", "--author", "claude").stdout
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("usage: kitchen models remove", result.stderr)
+        self.assertIn("remove needs --provider for reviewer for claude work", result.stderr)
+        self.assertEqual(got, "codex gpt-x · effort high · tier standard\n")
+
+    def test_a_workers_command_names_a_route_that_runs_its_provider(self):
+        self.set_worker("codex", "gpt-w")
+
+        call = self.get_worker("--command", cwd=self.home)
+
+        self.assertEqual(call.returncode, 1)
+        self.assertIn("launch a worker through a route that runs its provider "
+                      "(T3's delegate_task, or that provider's own CLI)", call.stderr)
+        self.assertNotIn("subagent", call.stderr)
 
 
 class InventoryTests(ProjectFixture):

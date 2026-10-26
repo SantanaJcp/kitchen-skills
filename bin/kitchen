@@ -151,7 +151,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     print(f"installed  {len(repo_skills())} skills (chef-mode routes to the rest); "
           "nothing runs until you type /chef-mode (Claude Code) or $chef-mode (Codex)")
     print("next:      in each repo you choose, type /chef-mode init (or run `kitchen init <repo>` for the instructions)")
-    print("next:      kitchen models, to set which model reviews each author's work (each person sets their own)")
+    print("next:      kitchen models, to set which model reviews each author's work and which runs delegated work (each person sets their own)")
     print("next:      kitchen doctor")
     return 0
 
@@ -445,23 +445,23 @@ def cmd_guards(args: argparse.Namespace) -> int:
 
 
 def cmd_models(args: argparse.Namespace) -> int:
+    problem = None if args.action is None else models.usage_problem(args.role, args.action, args.author, getattr(args, "provider", None))
+    if problem:
+        args.parser.error(problem)  # a usage error: the parser's usage line and exit 2
     try:
-        if args.action in ("set", "add", "remove"):
-            if args.action == "remove":
-                models.remove(args.role, args.author, args.provider, args.model)
-            else:
-                entry = {"provider": args.provider, "model": args.model, "effort": args.effort, "tier": args.tier}
-                models.put(args.role, args.author, [entry] if args.action == "set" else models.current(args.role, args.author) + [entry])
-            print(f"{args.action:<11}{args.role} for {args.author} work in {models.path()}")
-            return 0
         if args.action == "get":
-            entries = models.get(args.role, args.author)
-            if args.command:
-                print("\n".join(models.shell(models.command(e)) for e in entries))
-            else:
-                print(json.dumps(entries) if args.json else "\n".join(models.describe(e) for e in entries))
+            print(models.show(args.role, args.author, args.project, args.command, args.json))
             return 0
-        print(models.render())
+        if args.action in ("set", "add"):
+            entry = {"provider": args.provider, "model": args.model, "effort": args.effort, "tier": args.tier}
+            change = models.set_entry if args.action == "set" else models.add_entry
+            written = change(args.role, args.author, args.project, entry)
+        elif args.action == "remove":
+            written = models.remove_entry(args.role, args.author, args.project, args.provider, args.model)
+        else:
+            print(models.render())
+            return 0
+        print(f"{args.action:<11}{written} in {models.path()}")
         return 0
     except models.ModelsError as error:
         print(f"FAIL  {error}", file=sys.stderr)
@@ -539,15 +539,17 @@ def main() -> int:
     guards_cmd.add_argument("--check", action="store_true", help="write nothing; fail while the repo's guards differ from this kitchen's")
     guards_cmd.set_defaults(func=cmd_guards)
 
-    mod = sub.add_parser("models", help="which models review each author's work (the reviewers second-opinion runs), in your own setup")
+    mod = sub.add_parser("models", help="which models review each author's work (reviewer) and which runs delegated work (worker), in your own setup")
     mod_sub = mod.add_subparsers(dest="action")
-    mod_get = mod_sub.add_parser("get", help="print one role's models, one per line; fails, with the command that sets it, when none is configured")
-    mod_set = mod_sub.add_parser("set", help="set one role to one model, replacing any others")
-    mod_add = mod_sub.add_parser("add", help="add a model to one role; second-opinion runs each, in parallel")
-    mod_remove = mod_sub.add_parser("remove", help="remove one model from one role")
+    mod_get = mod_sub.add_parser("get", help="print one role's model(s); fails, with the command that sets it, when none is configured")
+    mod_set = mod_sub.add_parser("set", help="set one role to one model, replacing any others; a worker is set globally or with --project DIR")
+    mod_add = mod_sub.add_parser("add", help="add a model to one reviewer role; second-opinion runs each, in parallel")
+    mod_remove = mod_sub.add_parser("remove", help="remove one model from a reviewer role, or a worker's entry for one scope")
     for p_role in (mod_get, mod_set, mod_add, mod_remove):
+        p_role.set_defaults(parser=p_role)
         p_role.add_argument("role", choices=models.ROLES)
-        p_role.add_argument("--author", required=True, choices=models.AUTHORS, help="who wrote the work; the role runs another family's model")
+        p_role.add_argument("--author", choices=models.AUTHORS, help="who wrote the work: required for reviewer, refused for worker")
+        p_role.add_argument("--project", metavar="DIR", help="worker only: the git repo the override belongs to (default: the global entry; get asks from the current directory)")
     mod_get.add_argument("--json", action="store_true")
     mod_get.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
     for p_entry in (mod_set, mod_add):
@@ -555,8 +557,8 @@ def main() -> int:
         p_entry.add_argument("--model", required=True, help="a model id (`<provider>/<id>` for pi), or `default` for that tool's own default")
         p_entry.add_argument("--effort", required=True, choices=models.EFFORTS)
         p_entry.add_argument("--tier", required=True, choices=models.TIERS)
-    mod_remove.add_argument("--provider", required=True, choices=models.PROVIDERS)
-    mod_remove.add_argument("--model", help="which one, when more than one runs on that provider")
+    mod_remove.add_argument("--provider", choices=models.PROVIDERS, help="reviewer only: which model to remove")
+    mod_remove.add_argument("--model", help="reviewer only: which one, when more than one runs on that provider")
     mod.set_defaults(func=cmd_models, action=None)
 
     retro = sub.add_parser("retro", help="my prompts from Claude Code and Codex transcripts")
