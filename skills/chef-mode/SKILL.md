@@ -67,7 +67,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 - A batch of parallel work is PASS only after `kitchen integrate` passes on the exact sibling SHAs.
 - Review has a budget of two rounds per PR: one open review, then one pass that only reruns the previous round's repros against the fixes. Only P0/P1 findings block a merge; P2 and lower become corpus or test cases.
 - Reviews of risky diffs run on the other model: the reviewers, their effort and their tier are what the owner set in `kitchen models`. For any other delegation, when the interface lets you set a service tier, set it explicitly: Standard unless the owner asks for Fast.
-- A worker that edits files gets its own worktree: in T3 Code `t3_thread_launch` with a worktree `workspaceStrategy` and an explicit `baseRef`; elsewhere `git worktree add`. Reviews and probes go through T3's `delegate_task` with provider, model, effort and tier set; elsewhere each reviewer's CLI (`kitchen models get reviewer --author <you> --command`).
+- A worker that edits files gets its own worktree, and stays a subagent of this session: in T3 Code `delegate_task` with `isolation: "worktree"` (it starts from your current local commit and copies no uncommitted edits, so be on the intended base first); for another repo, or elsewhere, `git worktree add` on an explicit base, with the path in the brief. Open a separate thread (`t3_thread_launch`) only when the owner asks for one. Reviews and probes go through T3's `delegate_task` with provider, model, effort and tier set; elsewhere each reviewer's CLI (`kitchen models get reviewer --author <you> --command`).
 - After opening a PR, watch it instead of polling: in T3 Code `link_pull_request` and `watch_pull_request`, then end the turn; elsewhere read `gh pr checks` when the work resumes.
 
 ## Verification
@@ -80,6 +80,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 ## Reporting
 
 - Label every claim: measured (you ran it; say what and what came out), inferred (you read code or docs; say where) or a guess. Never hand the owner a check you could have run yourself.
+- In a long run, every turn that ends with work still running closes with three lines in the owner's language: running (who, what, since when), next, and what the owner owes (or nothing). They should not have to ask where things stand.
 - When you need decisions, number them; each gets one plain sentence on what happens if the owner says yes, then your recommendation, so they can reply "1 yes, 2 B".
 
 ## When the owner corrects you

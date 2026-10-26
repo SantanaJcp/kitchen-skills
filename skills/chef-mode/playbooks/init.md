@@ -8,7 +8,7 @@ Copy these steps into your todo list.
 
 You need the kitchen on this machine: `kitchen` on PATH and this playbook's starting points next to it. Without it, install it first (the README's one-line prompt), or stop BLOCKED and say so.
 
-Work in a worktree on a new branch `kitchen/init` from the shared base: in T3 Code `t3_thread_launch` with a worktree `workspaceStrategy`, elsewhere `git worktree add -b kitchen/init <path> origin/<base>`. Never in the owner's checkout. Unknown base: ask; never guess.
+Work in a worktree on a new branch `kitchen/init` from the shared base: `git worktree add -b kitchen/init <path> origin/<base>` (in T3 Code too: `delegate_task`'s worktree starts from your local commit, not from the base). Never in the owner's checkout. Unknown base: ask; never guess.
 
 ## 1. Read what is there; write nothing
 
