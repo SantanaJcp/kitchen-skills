@@ -61,13 +61,14 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 
 - Delegate when the work splits into independent pieces or needs a second opinion from the other model; not for its own sake.
 - A worker runs in chef mode too: start every brief with "Before any work, read the chef-mode skill's SKILL.md in full (`~/.claude/skills/chef-mode/SKILL.md`, or `~/.agents/skills/chef-mode/SKILL.md` in Codex) and follow it." The kitchen registers no agent of its own: Claude Code can pick a registered agent on its own, and chef mode starts only when the owner asks.
+- Workers run on the model `kitchen models get worker` prints for the project (its override, else the owner's global entry), with its effort and tier, through a route that runs that provider: T3's `delegate_task`, that provider's own CLI, or your own subagent when it is your family. Not configured, or no route to that provider: BLOCKED; ask the owner once, never pick a model for them.
 - Every brief stands alone: goal, scope, exact branch, worktree or SHA, how to verify, and a report of PASS, ISSUES or BLOCKED with evidence.
 - Inspect each worker's core diff and evidence. Do not upgrade ISSUES, BLOCKED, or missing evidence to PASS.
 - Let machine gates handle reversible verification and integration. Resolve technical exceptions within the authorized scope; do not turn them into owner checkboxes.
 - A batch of parallel work is PASS only after `kitchen integrate` passes on the exact sibling SHAs.
-- Review has a budget of two rounds per PR: one open review, then one pass that only reruns the previous round's repros against the fixes. Only P0/P1 findings block a merge; P2 and lower become corpus or test cases.
+- Review has a budget of two rounds per PR: one open review, then one pass that only reruns the previous round's repros against the fixes. Only P0/P1 findings block a merge; P2 and lower become corpus or test cases. `kitchen review-round` counts the rounds per branch (second-opinion runs it); a third round needs the owner's grant.
 - Reviews of risky diffs run on the other model: the reviewers, their effort and their tier are what the owner set in `kitchen models`. For any other delegation, when the interface lets you set a service tier, set it explicitly: Standard unless the owner asks for Fast.
-- A worker that edits files gets its own worktree: in T3 Code `t3_thread_launch` with a worktree `workspaceStrategy` and an explicit `baseRef`; elsewhere `git worktree add`. Reviews and probes go through T3's `delegate_task` with provider, model, effort and tier set; elsewhere each reviewer's CLI (`kitchen models get reviewer --author <you> --command`).
+- A worker that edits files gets its own worktree, and stays a subagent of this session: in T3 Code `delegate_task` with `isolation: "worktree"` (it starts from your current local commit and copies no uncommitted edits); when the worker needs another base or another repo, or outside T3, `git worktree add` on that explicit base, with the path in the brief. Open a separate thread (`t3_thread_launch`) only when the owner asks for one. Reviews go through T3's `delegate_task` with provider, model, effort and tier set; elsewhere each reviewer's CLI (`kitchen models get reviewer --author <you> --command`). Probes and exploration are workers: they run on the worker model.
 - After opening a PR, watch it instead of polling: in T3 Code `link_pull_request` and `watch_pull_request`, then end the turn; elsewhere read `gh pr checks` when the work resumes.
 
 ## Verification
@@ -80,6 +81,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 ## Reporting
 
 - Label every claim: measured (you ran it; say what and what came out), inferred (you read code or docs; say where) or a guess. Never hand the owner a check you could have run yourself.
+- In a long run, every turn that ends with work still running closes with three lines in the owner's language: running (who, what, since when), next, and what the owner owes (or nothing). They should not have to ask where things stand.
 - When you need decisions, number them; each gets one plain sentence on what happens if the owner says yes, then your recommendation, so they can reply "1 yes, 2 B".
 
 ## When the owner corrects you
