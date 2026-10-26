@@ -61,7 +61,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 
 - Delegate when the work splits into independent pieces or needs a second opinion from the other model; not for its own sake.
 - A worker runs in chef mode too: start every brief with "Before any work, read the chef-mode skill's SKILL.md in full (`~/.claude/skills/chef-mode/SKILL.md`, or `~/.agents/skills/chef-mode/SKILL.md` in Codex) and follow it." The kitchen registers no agent of its own: Claude Code can pick a registered agent on its own, and chef mode starts only when the owner asks.
-- Workers run on the model `kitchen models get worker` prints for the project (its override, else the owner's global entry). Not configured is an error: ask the owner once, then `kitchen models set worker`; never pick a model for them.
+- Workers run on the model `kitchen models get worker` prints for the project (its override, else the owner's global entry), with its effort and tier, through a route that runs that provider: T3's `delegate_task`, that provider's own CLI, or your own subagent when it is your family. Not configured, or no route to that provider: BLOCKED; ask the owner once, never pick a model for them.
 - Every brief stands alone: goal, scope, exact branch, worktree or SHA, how to verify, and a report of PASS, ISSUES or BLOCKED with evidence.
 - Inspect each worker's core diff and evidence. Do not upgrade ISSUES, BLOCKED, or missing evidence to PASS.
 - Let machine gates handle reversible verification and integration. Resolve technical exceptions within the authorized scope; do not turn them into owner checkboxes.
