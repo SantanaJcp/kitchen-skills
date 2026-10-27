@@ -1712,6 +1712,9 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
         self.assertEqual([b for b in self.origin_branches() if b.startswith("audit/")], [])
         self.assertNotIn("gh pr create", self.calls_log())
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #7)")
+        body = self.issue_body()  # the issue says the fixes did not ship, and why
+        self.assertIn("- prose fixes: not published", body)
+        self.assertIn("changes more than prose", body)
 
     def test_findings_whose_issue_report_failed_leave_the_baseline_and_warn(self):
         sha = self.churn()
@@ -1749,6 +1752,27 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
         self.assertNotIn(token, body)
         self.assertIn("[REDACTED]", body)
         self.assertIn("Truncated: the full report is at", body)
+
+    def test_a_report_the_agent_links_to_a_host_file_never_leaves_the_machine(self):
+        secret = Path(self.tmp.name) / "host-only.txt"  # outside every path the agent may read
+        secret.write_text("host-only sentinel\n")
+        self.churn()
+        self.audit_config()
+        for name, plant in (("symlink", f'ln -sf {secret} "$AUDIT_REPORT_FILE"'),
+                            ("hard link", f'rm -f "$AUDIT_REPORT_FILE"; ln {secret} "$AUDIT_REPORT_FILE"')):
+            with self.subTest(name):
+                self.agent("findings")
+                claude = (self.bin / "claude").read_text()
+                (self.bin / "claude").write_text(claude.replace('echo findings > "$AUDIT_OUTCOME_FILE"',
+                                                                f'echo findings > "$AUDIT_OUTCOME_FILE"\n{plant}'))
+
+                result = self.guard_then_audit()
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(self.audits()[-1]["status"], "incomplete")
+                self.assertIn("not a regular file of its own", self.audits()[-1]["detail"])
+                self.assertNotIn("gh issue", self.calls_log())
+                self.assertEqual(len(self.journal()), 1)  # only the baseline
 
     def test_only_a_findings_line_that_names_its_issue_moves_the_baseline(self):
         sha = self.git(self.origin, "rev-parse", "dev")

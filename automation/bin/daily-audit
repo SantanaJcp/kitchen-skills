@@ -96,13 +96,13 @@ journal_outcome() { # outcome [issue-number]
 
 # The findings, in the project's one open findings issue: the run's facts, then the report, redacted and cut under
 # GitHub's body limit. Sets ISSUE_NUMBER; returns 1 when the report did not land.
-report_findings() { # pr-url-or-empty
+report_findings() { # prose-fixes-line-or-empty
   local body="$JOB_DIR/issue.md"
   { printf 'Daily audit outcome **findings** on `%s` (run %s).\n\n- audited SHA: `%s`\n- baseline: `%s`\n' \
       "$BRANCH" "$RUN_ID" "$SHA" "$BASELINE"
     [ -z "$1" ] || printf -- '- prose fixes: %s\n' "$1"
     printf -- '- full report on the audit machine: `%s`\n\nThis issue stays open until a full pass by hand ends clean or changed.\n\n---\n\n' "$REPORT_FILE"
-    cat "$REPORT_FILE"
+    cat "$JOB_DIR/report.md"
   } | redact | python3 -c '
 import sys
 limit, report = int(sys.argv[1]), sys.argv[2]
@@ -253,6 +253,17 @@ case "$OUTCOME" in
   *) stop "no valid outcome in $OUTCOME_FILE (got '${OUTCOME:0:40}')" ;;
 esac
 [ -s "$REPORT_FILE" ] || stop "outcome $OUTCOME, but no report at $REPORT_FILE"
+# The report can leave the machine (the findings issue), and the agent could have linked it to any host file. It is
+# read once, without following a link, into the job's own dir, and only that copy is published.
+python3 -c '
+import os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+info = os.fstat(fd)
+if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as source, open(sys.argv[2], "wb") as copy:
+    copy.write(source.read())' "$REPORT_FILE" "$JOB_DIR/report.md" 2>/dev/null ||
+  stop "outcome $OUTCOME, but the report at $REPORT_FILE is not a regular file of its own"
 
 branches="$(git --git-dir="$AGENT_CLONE/.git" for-each-ref --format='%(refname:short)' refs/heads/audit/ | tr '\n' ' ')"
 case "$OUTCOME" in
@@ -272,7 +283,7 @@ case "$OUTCOME" in
   findings)
     # The prose fixes ship alongside the findings when they pass the same validation as `changed`; what the
     # publication refuses stays drift, in scope of the report and the issue.
-    pr=""
+    pr="" fixes=""
     if [ -n "${branches// /}" ]; then
       if [ "$FIXES" != yes ]; then
         warn "not published: the agent committed ${branches% } but fixes were not authorized ($FIXES)"
@@ -281,8 +292,10 @@ case "$OUTCOME" in
         GIT_DIR="$JOB_DIR/publish.git" publish && pr="$PUBLISHED_URL"
         REFUSAL=result
       fi
+      # The issue says what shipped: fixes the report lists on the branch that did not ship are still drift.
+      fixes="${pr:-not published (${WARNINGS[${#WARNINGS[@]}-1]#not published: }); the fixes the report lists did not ship and are findings}"
     fi
-    if report_findings "$pr"; then
+    if report_findings "$fixes"; then
       journal_outcome findings "$ISSUE_NUMBER"
     else
       warn "findings issue report failed: the baseline does not move"
