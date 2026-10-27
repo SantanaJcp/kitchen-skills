@@ -69,7 +69,7 @@ The owner's attention is the scarcest resource in the kitchen. On reversible wor
 - **When:** planning, reporting, designing any check or automation.
 - **Includes (pstack):**
   - *Never Block on the Human*: proceed on reversible work and let the owner correct afterwards. pstack lets external actions proceed; the kitchen does not: one-way doors (`doors`) and anything sent to people or published still wait for the owner's explicit request.
-- **Enforced by:** the kitchen stays off until the owner types `/chef-mode`, and `install` writes nothing every session reads; `status --exceptions` (prints only non-green, exits 1); notifications only for red, incomplete, blocked or decision; the nightly opens one issue while red and closes it when green; the init playbook asks the owner once, only about what the repo cannot answer. Reply format: rule only.
+- **Enforced by:** the kitchen stays off until the owner types `/chef-mode`, and `install` writes nothing every session reads; `status --exceptions` (prints only non-green, exits 1); notifications only for red, incomplete, blocked or decision; the nightly opens one issue while red and closes it when green; the daily audit files its findings in one issue per project; the init playbook asks the owner once, only about what the repo cannot answer. Reply format: rule only.
 
 ## 7. Know your doors (`doors`)
 
