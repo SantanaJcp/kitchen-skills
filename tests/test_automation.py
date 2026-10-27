@@ -9,6 +9,7 @@ import shutil
 import string
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import textwrap
@@ -449,6 +450,130 @@ class NightlyGuardTests(AutomationFixture):
         self.assertEqual(result.returncode, 1)
         self.assertEqual((run["status"], run["failed_step"]), ("red", "docker"))
 
+
+    def test_the_record_lists_each_finished_step_with_its_seconds_on_every_path(self):
+        self.configure(["fast|true", "slow|sleep 2", "bad|false", "after|true"])
+
+        self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+
+        steps = self.nightly()[-1]["steps"]
+        self.assertEqual([(s["name"], s["status"]) for s in steps], [("fast", "green"), ("slow", "green"), ("bad", "red")])
+        self.assertTrue(2 <= steps[1]["seconds"] <= 10, steps)
+        self.assertTrue(all(isinstance(s["seconds"], int) for s in steps), steps)
+
+        self.configure(["ok|true", "killed|kill -TERM \\$PPID", "after|true"])  # interrupted: only what finished
+
+        self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+
+        run = self.nightly()[-1]
+        self.assertEqual(run["status"], "incomplete")
+        self.assertEqual([(s["name"], s["status"]) for s in run["steps"]], [("ok", "green")])
+
+    def budget_gh(self):
+        """A gh whose budget issue (label nightly-guard-budget) is #7 when BUDGET_ISSUE=7; every call is logged."""
+        self.fake("gh", 'echo "gh $*" >> "$CALLS"; [ "${GH_FAIL:-0}" = 1 ] && exit 1\n'
+                        'case "$*" in "issue list"*"--label nightly-guard-budget"*) echo "${BUDGET_ISSUE:-}";;\n'
+                        '  "issue create"*) echo "https://example.test/issues/8";; esac')
+
+    def budget_calls(self):
+        return [line for line in self.calls_log().splitlines() if "budget" in line]
+
+    def test_a_step_over_its_budget_warns_and_opens_one_budget_issue_never_changing_the_verdict(self):
+        self.budget_gh()
+        budgets = 'GUARD_STEP_BUDGETS=("slow|1" "fast|60" "ghost|5" "broken" "fast|010" "fast|")\n'
+        self.configure(["fast|true", "slow|sleep 2"], extra=budgets)
+
+        result = self.run_job("nightly-guard", "shop")
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertEqual([w for w in run["warnings"] if not w.startswith("over budget")],
+                         ["step budget for ghost, which is not a step", "malformed step budget: broken (want name|seconds)",
+                          "malformed step budget: fast|010 (want name|seconds)", "malformed step budget: fast| (want name|seconds)"])
+        over = [w for w in run["warnings"] if w.startswith("over budget")]
+        self.assertEqual(len(over), 1, run["warnings"])
+        self.assertRegex(over[0], r"^over budget: slow ([2-9]|10)s > 1s$")
+        created = [line for line in self.budget_calls() if line.startswith("gh issue create")]
+        self.assertEqual(len(created), 1, self.calls_log())
+        self.assertIn("--title Nightly guard over its time budget on dev --label nightly-guard-budget", created[0])
+        body = Path(created[0].split("--body-file ")[1].split()[0]).read_text()
+        self.assertRegex(body, r"\n- slow ([2-9]|10)s > 1s\n")  # the body lists the step over budget
+
+        self.calls.unlink()
+        self.run_job("nightly-guard", "shop", BUDGET_ISSUE="7")  # still over: one comment on the open issue
+
+        self.assertTrue(any(line.startswith("gh issue comment 7") for line in self.calls_log().splitlines()), self.calls_log())
+        self.assertFalse(any(line.startswith("gh issue create") for line in self.calls_log().splitlines()), self.calls_log())
+
+        self.calls.unlink()
+        self.configure(["fast|true", "slow|sleep 2", "bad|false"], extra=budgets)
+        self.run_job("nightly-guard", "shop", BUDGET_ISSUE="7")  # red: the budget issue is left alone
+
+        self.assertEqual(self.nightly()[-1]["status"], "red")
+        self.assertTrue(any(w.startswith("over budget: slow") for w in self.nightly()[-1]["warnings"]))
+        self.assertEqual(self.budget_calls(), [])
+
+        self.configure(["fast|true", "slow|sleep 2"], extra='GUARD_STEP_BUDGETS=("slow|60")\n')
+        self.run_job("nightly-guard", "shop", BUDGET_ISSUE="7")  # green within every budget: closed
+
+        self.assertTrue(any(line.startswith("gh issue close 7") for line in self.calls_log().splitlines()), self.calls_log())
+        self.assertFalse(any(w.startswith("over budget") for w in self.nightly()[-1]["warnings"]))
+
+    def test_a_failed_budget_issue_call_is_a_warning(self):
+        self.budget_gh()
+        self.configure(["slow|sleep 2"], extra='GUARD_STEP_BUDGETS=("slow|1")\n')
+
+        result = self.run_job("nightly-guard", "shop", GH_FAIL="1")
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertIn("budget issue report failed", run["warnings"])
+
+    def test_status_shows_the_steps_and_the_over_budget_warning_of_the_guards_record(self):
+        home = Path(self.tmp.name) / "home"
+        checkout = Path(self.tmp.name) / "shop"
+        home.mkdir()
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(checkout)], check=True, env=clean_env())
+        (self.config / "projects.txt").write_text(f"{checkout}\n")
+        self.configure(["slow|sleep 2"], extra='GUARD_STEP_BUDGETS=("slow|1")\n')
+        self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+        self.fake("gh", "echo '[]'")  # status lists the project's pull requests
+        env = {**clean_env(), "HOME": str(home), "KITCHEN_CONFIG": str(self.config), "KITCHEN_STATE": str(self.state),
+               "KITCHEN_DENYLIST": str(home / "no-denylist.txt"), "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+        kitchen = AUTOMATION.parent / "bin" / "kitchen"
+
+        shown = subprocess.run([sys.executable, str(kitchen), "status", str(checkout)], env=env, capture_output=True, text=True)
+        report = subprocess.run([sys.executable, str(kitchen), "status", "--json", str(checkout)], env=env, capture_output=True, text=True)
+
+        self.assertRegex(shown.stdout, r"nightly .* warnings: over budget: slow \d+s > 1s", shown.stdout + shown.stderr)
+        steps = json.loads(report.stdout)["projects"][0]["nightly"]["steps"]
+        self.assertEqual([(s["name"], s["status"]) for s in steps], [("slow", "green")])
+
+    def evidence(self):
+        return self.state / "automation" / "shop" / "evidence"
+
+    def test_each_cited_step_keeps_its_own_evidence_and_only_the_newest_runs_keep_theirs(self):
+        write = "mkdir -p .verify/evidence && echo {} > .verify/evidence/ledger.jsonl"
+        self.configure([f"prove|{write.format('first')}", f"prove-again|{write.format('second')}", "other|true"],
+                       extra='AUDIT_GUARD_STEPS=(prove prove-again)\nAUDIT_EVIDENCE_PATHS=(".verify/evidence/" "not/there")\n')
+
+        result = self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+
+        run = self.nightly()[-1]
+        self.assertEqual(run["status"], "green", result.stdout)
+        kept = self.evidence() / run["run_id"]
+        self.assertEqual(sorted(p.name for p in kept.iterdir()), ["prove", "prove-again"])
+        self.assertEqual((kept / "prove" / ".verify" / "evidence" / "ledger.jsonl").read_text(), "first\n")
+        self.assertEqual((kept / "prove-again" / ".verify" / "evidence" / "ledger.jsonl").read_text(), "second\n")
+        self.assertEqual([w for w in run["warnings"] if w.startswith("evidence")],
+                         ["evidence missing after prove: not/there", "evidence missing after prove-again: not/there"])
+
+        for _ in range(4):
+            self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+        self.run_job("nightly-guard", "shop", GUARD_ONLY="prove")  # a trial run keeps nothing and evicts nothing
+
+        newest = [r["run_id"] for r in self.nightly()[-3:]]
+        self.assertEqual(sorted(p.name for p in self.evidence().iterdir()), sorted(newest))
 
     def test_trial_run_is_neither_recorded_nor_reported(self):
         self.configure(["build|true", "tests|true"], metrics="echo '{}'")
@@ -1510,7 +1635,7 @@ class DailyAuditTests(AutomationFixture):
                                 'GARDENER_SANDBOX_UNIX_SOCKETS=("/var/run/docker.sock")\n')
         self.agent(script=f"""printf "%s\\n" "$@" > {tmp}/args; printf '%s' "$2" > {tmp}/prompt
 work=$(dirname "$AUDIT_REPORT_FILE")
-cat "$work/guard/evidence/.verify/evidence/ledger.jsonl" > {tmp}/ledger
+cat "$work/guard/evidence/prove/.verify/evidence/ledger.jsonl" > {tmp}/ledger
 ls "$work/guard/logs" > {tmp}/logs
 head -1 "$work/skill/SKILL.md" > {tmp}/skill
 git rev-parse HEAD > {tmp}/head
@@ -1537,6 +1662,52 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
         self.assertTrue(any(name.endswith("-control.log") for name in (tmp / "logs").read_text().split()))
         self.assertEqual((tmp / "skill").read_text().strip(), "---")
         self.assertEqual((tmp / "gh").read_text().strip(), "unset")
+
+    def test_each_proof_step_hands_the_agent_its_own_evidence_even_when_a_later_step_rewrites_it(self):
+        tmp = Path(self.tmp.name)
+        self.churn()
+        again = "prove-again|mkdir -p .verify/evidence && echo rewritten > .verify/evidence/ledger.jsonl"
+        self.audit_config(guard_steps=(self.PROVE, again), cited="prove prove-again")
+        self.agent(script=f"""work=$(dirname "$AUDIT_REPORT_FILE"); printf '%s' "$2" > {tmp}/prompt
+cat "$work/guard/evidence/prove/.verify/evidence/ledger.jsonl" > {tmp}/first
+cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/second""")
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(((tmp / "first").read_text(), (tmp / "second").read_text()), ("held\n", "rewritten\n"))
+        self.assertIn("/guard/evidence/<step>/<path> (paths: .verify/evidence)", (tmp / "prompt").read_text())
+
+    def test_a_cited_step_without_its_kept_evidence_is_refused(self):
+        self.churn()
+        self.audit_config()
+        self.agent()
+        self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+        run_id = self.nightly()[-1]["run_id"]
+        shutil.rmtree(self.state / "automation" / "shop" / "evidence" / run_id / "control")
+
+        result = self.run_job("daily-audit", "shop")
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("AUDIT-RESULT: refused - the guard's evidence .verify/evidence after step control is missing", result.stdout)
+        self.assertNotIn("claude", self.calls_log())
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads an unreadable file")
+    def test_a_partial_evidence_copy_is_not_kept_so_the_audit_refuses(self):
+        self.churn()
+        partial = ("prove|mkdir -p .verify/evidence && echo held > .verify/evidence/a.txt && echo x > .verify/evidence/b.txt"
+                   " && chmod 000 .verify/evidence/b.txt")
+        self.audit_config(guard_steps=(partial, "control|chmod 600 .verify/evidence/b.txt"))
+        self.agent()
+
+        result = self.guard_then_audit()
+
+        guard = self.nightly()[-1]
+        self.assertEqual(guard["status"], "green")
+        self.assertIn("evidence of prove not kept: copying .verify/evidence failed", guard["warnings"])
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("AUDIT-RESULT: refused - the guard's evidence .verify/evidence after step prove is missing", result.stdout)
+        self.assertNotIn("claude", self.calls_log())
 
     def test_a_pass_logs_its_outcome_and_a_clean_one_moves_the_baseline(self):
         sha = self.churn()

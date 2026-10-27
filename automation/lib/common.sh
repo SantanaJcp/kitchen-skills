@@ -176,7 +176,7 @@ docker_ready() {
 }
 
 # The nightly history that `kitchen status` reads: one line per run, replaced in place by run_id.
-record_nightly() { # status failed_step cleanup metrics sha run_id log started [warning...]
+record_nightly() { # status failed_step cleanup metrics sha run_id log started steps [warning...]
   python3 "$KITCHEN_AUTOMATION/lib/record.py" "$NIGHTLY_RECORD" write "$@"
 }
 
