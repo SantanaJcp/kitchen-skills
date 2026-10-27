@@ -145,6 +145,7 @@ snapshot_evidence() { # step
     if [ ! -e "$CLONE_DIR/$path" ]; then
       warn "evidence missing after $step: $path"
     elif ! { mkdir -p "$(dirname "$dest/$path")" && cp -R "$CLONE_DIR/$path" "$dest/$path"; }; then
+      rm -rf "${dest:?}/$path"  # a partial copy (disk full, an unreadable file) is no evidence: the audit then refuses
       warn "evidence of $step not kept: copying $path failed"
     fi
   done

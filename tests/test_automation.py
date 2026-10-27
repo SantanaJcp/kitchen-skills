@@ -1692,6 +1692,23 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertIn("AUDIT-RESULT: refused - the guard's evidence .verify/evidence after step control is missing", result.stdout)
         self.assertNotIn("claude", self.calls_log())
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads an unreadable file")
+    def test_a_partial_evidence_copy_is_not_kept_so_the_audit_refuses(self):
+        self.churn()
+        partial = ("prove|mkdir -p .verify/evidence && echo held > .verify/evidence/a.txt && echo x > .verify/evidence/b.txt"
+                   " && chmod 000 .verify/evidence/b.txt")
+        self.audit_config(guard_steps=(partial, "control|chmod 600 .verify/evidence/b.txt"))
+        self.agent()
+
+        result = self.guard_then_audit()
+
+        guard = self.nightly()[-1]
+        self.assertEqual(guard["status"], "green")
+        self.assertIn("evidence of prove not kept: copying .verify/evidence failed", guard["warnings"])
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("AUDIT-RESULT: refused - the guard's evidence .verify/evidence after step prove is missing", result.stdout)
+        self.assertNotIn("claude", self.calls_log())
+
     def test_a_pass_logs_its_outcome_and_a_clean_one_moves_the_baseline(self):
         sha = self.churn()
         self.audit_config()
