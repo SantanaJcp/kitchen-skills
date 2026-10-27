@@ -72,7 +72,7 @@ kitchen status              # every project: branch, upstream, PRs, nightly guar
 kitchen status --exceptions # only the lines that are not green; exits 1 when there are any
 kitchen log "msg" --status done   # agents leave checkpoints during autonomous runs (done, blocked, decision or note)
 kitchen inventory           # skills, rule files and Codex automations the agents can see, and where copies drift
-kitchen retro --since 7d    # my prompts from Claude Code and Codex, for the retro skill
+kitchen retro --since 7d    # my prompts from every Claude account, Codex and the hosts in retro-sources.txt, for the retro skill
 kitchen models              # which models review each author's work; `kitchen models set|add|remove reviewer --author claude ...` to change them
 kitchen integrate fix/a fix/b --base main   # merge in order in a disposable clone, run the project's checks after each merge
 kitchen init ../some-repo   # print the instructions your agent follows to set a repo up (the same as /chef-mode init there)
@@ -91,7 +91,7 @@ kitchen guards ../some-repo # put the kitchen's guards in that repo only; --chec
 
 Scheduled jobs are installed per machine with `automation/bin/install-schedule`: `<project>` (nightly guard and weekly gardener), `--guard <project>` (the nightly guard alone), `--gardener <project>` (the gardener alone, for a machine that runs only it), `--audit <project>` (the daily verification audit, after the guard) or `--retro` (the weekly retro). launchd on macOS, systemd user timers on Linux; details in `automation/README.md`.
 
-Per-machine config lives outside the repo, in `~/.config/kitchen/`: `projects.txt` (one project path per line), `integrate.toml`, `models.toml`, `denylist.txt`, `shared-branches.txt` (optional) and `automation/<project>.env` for the scheduled jobs. State (journal, nightly history, integrate records, retro reports) lives in `~/.local/state/kitchen/`.
+Per-machine config lives outside the repo, in `~/.config/kitchen/`: `projects.txt` (one project path per line), `integrate.toml`, `models.toml`, `denylist.txt`, `shared-branches.txt` (optional), `retro-sources.txt` (optional: where else `kitchen retro` reads my sessions, one per line, a local path or `ssh <host> [user]`, which runs `kitchen retro` on that host) and `automation/<project>.env` for the scheduled jobs. State (journal, nightly history, integrate records, retro reports) lives in `~/.local/state/kitchen/`.
 
 ## Skills
 
