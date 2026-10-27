@@ -6,9 +6,10 @@ Signals come from the transcript formats themselves, not from guessing at wordin
   Claude  origin.kind / promptSource (notifications), entrypoint sdk-cli (`claude -p`), assistant
           turns with a synthetic requestId (replayed history), and sessions whose first prompt an agent
           launched through `claude -p` or a T3 Code launch tool (found in that agent's own tool calls).
-  Codex   session_meta originator/source/thread_source (exec, subagents, guardian reviews), and user
-          items without a client_id that carry the <heartbeat> envelope of a Codex automation.
-A few envelopes have no structured marker (harness injections, T3 Code delegation notices); those
+  Codex   session_meta originator/source/thread_source (exec, subagents, guardian reviews), user items
+          without a client_id that carry the <heartbeat> envelope of a Codex automation, and messages a
+          Claude agent sent into the thread through a T3 Code tool (found in that agent's own tool calls).
+A few envelopes have no structured marker (harness injections, T3 Code notices); those
 are matched by their fixed machine-written prefix.
 """
 from __future__ import annotations
@@ -31,9 +32,15 @@ HARNESS = (
     "<task-notification", "<local-command", "<system-reminder",
     "This session is being continued", "[Request interrupted",
     "Context handoff (",  # T3 Code injects these when it moves context between threads
+    "<artifact-content-authored-by-others/>",  # leads a compaction summary that restates artifacts others wrote
 )
 DELEGATED = re.compile(r"^Act as the [\w -]+ sub-agent for this task\.")  # T3 Code wraps delegated tasks this way
-DELEGATION_NOTICE = re.compile(r"^Delegated tasks? \S.*? reached (?:a )?terminal states?\.")  # T3 Code reports finished delegations
+# T3 Code's own notices: a delegated task's state or result (its machine id leads), a watched pull request's update,
+# background work a server restart cancelled
+T3_NOTICE = re.compile(r"^(?:Delegated tasks? \S.*? reached (?:a )?terminal states?\."
+                       r"|Delegated task node:delegated-task:\S+ "
+                       r"|Update on pull request #\d+ \(\S+\), which T3 Code is watching for you:"
+                       r"|Note: the T3 server restarted, and this background work was cancelled)")
 CODEX_REQUEST = re.compile(r"## My request(?: for Codex)?:\s*\n(.*)", re.S)
 SLASH_COMMAND = re.compile(r"^<command-(?:name|message)>")  # Claude Code's envelope for a slash command I typed
 COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
@@ -216,11 +223,12 @@ def claude_prompts(since, launches: list[str]) -> list[dict]:
             if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "tool_result" for p in content):
                 continue
             origin = event.get("origin") if isinstance(event.get("origin"), dict) else {}
+            marked_human = origin.get("kind") == "human" or event.get("promptSource") == "typed"
             for raw in _text_of(content):
                 text = prompt_text(raw)
                 if not text:
                     continue
-                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or DELEGATION_NOTICE.match(text):
+                if origin.get("kind", "human") != "human" or event.get("promptSource") == "system" or (T3_NOTICE.match(text) and not marked_human):
                     reason = "notification"
                 elif text.startswith(HARNESS):
                     reason = "harness"
@@ -253,7 +261,7 @@ def codex_session_reason(meta: dict) -> str | None:
     return None
 
 
-def codex_prompts(since) -> list[dict]:
+def codex_prompts(since, launches: list[dict]) -> list[dict]:
     root = home() / ".codex"
     files = list((root / "sessions").glob("*/*/*/rollout-*.jsonl")) + list((root / "archived_sessions").glob("rollout-*.jsonl"))
     automation_prompts = []
@@ -291,6 +299,10 @@ def codex_prompts(since) -> list[dict]:
                         reason = "automation"  # a Codex heartbeat automation posting into this thread
                     elif DELEGATED.match(text):
                         reason = "subagent"
+                    elif T3_NOTICE.match(text):
+                        reason = "notification"  # T3 posts these into Codex threads with the same fields as a typed prompt
+                    elif t3_sent(text, ts, launches):
+                        reason = "agent-launched"  # a lead in another session sent it with t3_thread_send
                     elif any(prompt in text for prompt in automation_prompts):
                         reason = "automation"
                     else:
@@ -303,10 +315,11 @@ def codex_prompts(since) -> list[dict]:
 def collect(since, tool: str, pattern: str | None, include_automated: bool = False) -> tuple[list[dict], dict]:
     """Prompts to show, and coverage: how many were included and excluded, by reason."""
     found = []
+    launches = agent_launches(since)
     if tool in ("all", "claude"):
-        found += claude_prompts(since, agent_launches(since))
+        found += claude_prompts(since, launches)
     if tool in ("all", "codex"):
-        found += codex_prompts(since)
+        found += codex_prompts(since, launches)
     if pattern:
         regex = re.compile(pattern, re.IGNORECASE)
         found = [p for p in found if regex.search(p["text"])]
