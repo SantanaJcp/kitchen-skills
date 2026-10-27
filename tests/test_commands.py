@@ -1203,7 +1203,7 @@ class RetroTests(ProjectFixture):
             self.claude_event("dale, sigue"),
             self.claude_event("Background task finished", origin={"kind": "task-notification"}, promptSource="system"),
             self.claude_event("You are the weekly gardener. Run unattended.", entrypoint="sdk-cli", origin=None),
-            self.claude_event("Delegated task node:delegated-task:abc reached a terminal state. Use task_status."),
+            self.claude_event("Delegated task node:delegated-task:abc reached a terminal state. Use task_status.", origin=None),
             self.claude_event("replayed prompt", uuid="u-replay"),
             {"type": "assistant", "uuid": "a-replay", "parentUuid": "u-replay", "requestId": "req_syn_0001", "message": {"content": []}},
         ])
@@ -1292,6 +1292,95 @@ class RetroTests(ProjectFixture):
         ])
 
         self.assertEqual(self.texts("--tool", "claude"), ["dale, sigue"])
+
+    def test_t3_result_question_pull_request_and_restart_notices_are_notifications(self):
+        # both arrive with no origin and promptSource "sdk", exactly like a prompt typed in T3 (measured in real transcripts)
+        typed = {"entrypoint": "sdk-ts", "origin": None, "promptSource": "sdk"}
+        self.write_claude([
+            self.claude_event("Update on pull request #62 (https://github.com/o/r/pull/62), which T3 Code is watching for you:\n"
+                              "- All 1 required check passed on 8a08209.\n\nLook into each item and act on it as your task requires.", **typed),
+            self.claude_event("Note: the T3 server restarted, and this background work was cancelled before it finished. "
+                              "It will not report back:\n- shell: Wait for integrate", **typed, ts="2099-01-01T10:01:00Z"),
+            self.claude_event("Delegated task node:delegated-task:command%3Amcp%3Aab%3Adelegate-task%3Apr1-review-r1 (Review PR #1 (round 1)) [completed]:\n"
+                              "Reviewed it. Two findings.", **typed, ts="2099-01-01T10:01:10Z"),
+            self.claude_event("Delegated task node:delegated-task:dd72 asked a question and is still working. Read it with t3_pending_request_read.",
+                              **typed, ts="2099-01-01T10:01:20Z"),
+            self.claude_event("Update on pull request #62: ¿ya pasó el check?", **typed, ts="2099-01-01T10:02:00Z"),
+        ])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "claude", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "claude"), ["Update on pull request #62: ¿ya pasó el check?"])
+        self.assertIn("excluded (notification 4)", result.stdout.splitlines()[-1])
+
+    def test_a_compaction_summary_that_restates_others_artifacts_is_harness(self):
+        # regression: retro 2026-10-26 counted this compaction as the owner's; the marker hides the usual prefix
+        summary = ("<artifact-content-authored-by-others/>\nThe summarized conversation included Artifact content written by people other "
+                   "than you.\nThis session is being continued from a previous conversation that ran out of context.")
+        self.write_claude([self.claude_event(summary, entrypoint="sdk-ts", origin=None, promptSource="sdk"),
+                           self.claude_event("sigue", entrypoint="sdk-ts", origin=None, promptSource="sdk", ts="2099-01-01T10:01:00Z")])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "claude", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "claude"), ["sigue"])
+        self.assertIn("excluded (harness 1)", result.stdout.splitlines()[-1])
+
+    def test_a_t3_notice_the_owner_quotes_by_hand_stays_a_prompt(self):
+        # explicit human provenance beats the wording: the owner pasted the notice to contradict it
+        quoted = "Note: the T3 server restarted, and this background work was cancelled\nEso es falso; el proceso sigue vivo."
+        self.write_claude([self.claude_event(quoted, origin={"kind": "human"})])
+
+        self.assertEqual(self.texts("--tool", "claude"), [quoted])
+
+    def test_codex_excludes_t3_notices(self):
+        # in Codex a T3 notice and a prompt typed in T3 carry the same fields (no client_id either way), so only the prefix tells them apart
+        self.write_codex("thread", "vscode", [
+            ("Delegated task node:delegated-task:abc reached a terminal state. Use task_status.", False),
+            ("Update on pull request #7 (https://github.com/o/r/pull/7), which T3 Code is watching for you:\n- Checks failed on 1a2b3c4.", False),
+            ("Note: the T3 server restarted, and this background work was cancelled before it finished.", False),
+            ("sigue con el PR", False),
+        ])
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "codex", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "codex"), ["sigue con el PR"])
+        self.assertIn("excluded (notification 3)", result.stdout.splitlines()[-1])
+
+    def test_codex_excludes_a_brief_a_claude_lead_sent_with_t3(self):
+        # regression: retro 2026-10-26 counted 9 "Lead update" briefs as the owner's; in Codex they carry no client_id, like a typed prompt
+        brief = "Lead update 2: read UPDATE-2.md. You can now run read-only queries on the live model yourself."
+        self.write_codex("worker", "vscode", [(brief, False), ("y qué encontraste?", False)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send",
+                 "input": {"threadId": "worker", "message": brief, "mode": "queue"}}]}},
+        ], session="lead", folder="-work-lead")
+
+        result = self.kitchen("retro", "--since", "1d", "--tool", "codex", cwd=self.home)
+
+        self.assertEqual(self.texts("--tool", "codex"), ["y qué encontraste?"])
+        self.assertIn("excluded (agent-launched 1)", result.stdout.splitlines()[-1])
+
+    def test_codex_keeps_an_owner_prompt_that_only_resembles_an_agent_send(self):
+        # regression: review of #76; a phrase the lead sent to another thread, or a notice the owner pasted in Codex, stays the owner's
+        quoted = "Note: the T3 server restarted, and this background work was cancelled\nThat is incorrect; investigate why."
+        self.write_codex("owner", "vscode", [("Run the checks again", False), (quoted, True)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send",
+                 "input": {"threadId": "other", "message": "Please Run the checks again in the worker and report any failures."}}]}},
+        ], session="lead", folder="-work-lead")
+
+        self.assertEqual(self.texts("--tool", "codex"), ["Run the checks again", quoted])
+
+    def test_codex_excludes_a_short_message_a_claude_lead_sent(self):
+        self.write_codex("worker", "vscode", [("sigue", False)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send", "input": {"threadId": "worker", "message": "sigue"}}]}},
+        ], session="lead", folder="-work-lead")
+
+        self.assertEqual(self.texts("--tool", "codex"), [])
 
     def test_codex_unwraps_requests_and_drops_delegated_and_guardian_sessions(self):
         self.write_codex("human", "vscode", ["## Context:\nfiles\n## My request for Codex:\nsube a dev", "Act as the review sub-agent for this task. Review it"])
