@@ -1361,6 +1361,27 @@ class RetroTests(ProjectFixture):
         self.assertEqual(self.texts("--tool", "codex"), ["y qué encontraste?"])
         self.assertIn("excluded (agent-launched 1)", result.stdout.splitlines()[-1])
 
+    def test_codex_keeps_an_owner_prompt_that_only_resembles_an_agent_send(self):
+        # regression: review of #76; a phrase the lead sent to another thread, or a notice the owner pasted in Codex, stays the owner's
+        quoted = "Note: the T3 server restarted, and this background work was cancelled\nThat is incorrect; investigate why."
+        self.write_codex("owner", "vscode", [("Run the checks again", False), (quoted, True)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send",
+                 "input": {"threadId": "other", "message": "Please Run the checks again in the worker and report any failures."}}]}},
+        ], session="lead", folder="-work-lead")
+
+        self.assertEqual(self.texts("--tool", "codex"), ["Run the checks again", quoted])
+
+    def test_codex_excludes_a_short_message_a_claude_lead_sent(self):
+        self.write_codex("worker", "vscode", [("sigue", False)])
+        self.write_claude([
+            {"type": "assistant", "timestamp": "2099-01-01T09:59:50Z", "cwd": "/work/lead", "message": {"content": [
+                {"type": "tool_use", "name": "mcp__t3-code__t3_thread_send", "input": {"threadId": "worker", "message": "sigue"}}]}},
+        ], session="lead", folder="-work-lead")
+
+        self.assertEqual(self.texts("--tool", "codex"), [])
+
     def test_codex_unwraps_requests_and_drops_delegated_and_guardian_sessions(self):
         self.write_codex("human", "vscode", ["## Context:\nfiles\n## My request for Codex:\nsube a dev", "Act as the review sub-agent for this task. Review it"])
         self.write_codex("guardian", {"subagent": {"other": "guardian"}}, ["approve this command?"], thread_source="guardian_review")

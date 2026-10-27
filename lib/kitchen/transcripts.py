@@ -184,9 +184,11 @@ def launch_evidence(first_prompt: str | None, cwd: str | None, started, launches
 
 def t3_sent(text: str, ts, launches: list[dict]) -> bool:
     """An agent sent this very message through a T3 tool just before it arrived. Per message, not per session:
-    the owner keeps typing in a thread an agent opened, and those messages carry the same fields."""
-    return any(launch.get("any_dir") and launch["ts"] and ts and launch["ts"] <= ts <= launch["ts"] + LAUNCH_WINDOW
-               and matches_launch(text, launch["command"]) for launch in launches)
+    the owner keeps typing in a thread an agent opened, and those messages carry the same fields. T3 delivers the
+    text as sent, so it must start the same way, not merely contain a piece of what the agent sent elsewhere."""
+    key = prefix_key(text)
+    return bool(key) and any(launch.get("any_dir") and launch["ts"] and ts and launch["ts"] <= ts <= launch["ts"] + LAUNCH_WINDOW
+                             and prefix_key(launch["command"]) == key for launch in launches)
 
 
 def claude_prompts(since, launches: list[str]) -> list[dict]:
@@ -299,9 +301,9 @@ def codex_prompts(since, launches: list[dict]) -> list[dict]:
                         reason = "automation"  # a Codex heartbeat automation posting into this thread
                     elif DELEGATED.match(text):
                         reason = "subagent"
-                    elif T3_NOTICE.match(text):
-                        reason = "notification"  # T3 posts these into Codex threads with the same fields as a typed prompt
-                    elif t3_sent(text, ts, launches):
+                    elif "client_id" not in item and T3_NOTICE.match(text):
+                        reason = "notification"  # T3 posts these with no client_id, like a prompt typed in T3; one typed in Codex has it
+                    elif "client_id" not in item and t3_sent(text, ts, launches):
                         reason = "agent-launched"  # a lead in another session sent it with t3_thread_send
                     elif any(prompt in text for prompt in automation_prompts):
                         reason = "automation"
