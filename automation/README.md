@@ -35,6 +35,7 @@ GUARD_STEPS=(                          # name|command, run in order in bash -e -
   "build|make build"
   "tests|make test"
 )
+GUARD_STEP_BUDGETS=("tests|900")       # optional; name|seconds. A step over its budget is a warning, never a red run
 CLEANUP_CMD="make stop"                # optional
 METRICS_CMD="python3 scripts/metrics.py --json"   # optional; snapshot per run in the history
 HISTORY_MIRROR="gardener-host:.local/state/kitchen/automation/<project>/history/"   # optional; rsync history.jsonl there after each recorded run, for a gardener on another host
@@ -65,7 +66,8 @@ GARDENER_MODEL="opus"                  # optional; claude --model for the garden
 GARDENER_EFFORT="high"                 # optional; claude --effort (low, medium, high, xhigh, max)
 AUDIT_GUARD_STEPS=(prove control)      # required for the audit; guard steps that drove the app, which the sealed pass cites.
                                        # The latest guard run must be green and have run each of them
-AUDIT_EVIDENCE_PATHS=(".verify/evidence") # optional; paths in the guard's clone copied for the agent; each must exist
+AUDIT_EVIDENCE_PATHS=(".verify/evidence") # optional; paths in the guard's clone the guard keeps after each AUDIT_GUARD_STEPS
+                                       # step, for the agent; each must exist after each of those steps
 AUDIT_EDIT_PATHS=(".agents/skills/verify-*/*") # optional; with AUDIT_VERIFY_STEPS, authorizes prose fixes in these paths
 AUDIT_VERIFY_STEPS=("coverage|make coverage") # optional; rerun by the job on a fix before publishing, as GARDENER_VERIFY_STEPS
 AUDIT_LABEL="audit-verification"       # optional; the audit PR's label
@@ -80,7 +82,7 @@ NET_TIMEOUT_SECONDS=600                # optional; deadline for clone, fetch and
 
 ## Nightly record
 
-One JSON line per run: `ts`, `started`, `sha` (full 40 characters), `status`, `failed_step`, `cleanup`, `metrics`, `warnings`, `run_id`, `log`. The line is written as `running` when the run holds the lock and replaced when it ends. A run skipped as busy never held the lock, so it only logs: it writes no record, and can neither mask the result of the run that held the lock nor race its writes. A night without a recorded run shows as `overdue` in `kitchen status`.
+One JSON line per run: `ts`, `started`, `sha` (full 40 characters), `status`, `failed_step`, `cleanup`, `metrics`, `steps`, `warnings`, `run_id`, `log`. `steps` lists the steps that finished, in order, as `{"name", "seconds", "status"}` (whole seconds, `green` or `red`); a run that stopped early lists only those, and records written before `steps` existed have none. The line is written as `running` when the run holds the lock and replaced when it ends. A run skipped as busy never held the lock, so it only logs: it writes no record, and can neither mask the result of the run that held the lock nor race its writes. A night without a recorded run shows as `overdue` in `kitchen status`.
 
 | `status` | Meaning |
 |---|---|
@@ -89,6 +91,10 @@ One JSON line per run: `ts`, `started`, `sha` (full 40 characters), `status`, `f
 | `incomplete` | Interrupted, aborted or timed out before a verdict; `failed_step` names the phase (a step, `sync`, `lock`, or `config` when no step ran because `GUARD_STEPS` is empty or unset). A `running` line left by a run killed with SIGKILL is closed as `incomplete` (`failed_step: killed`) by the next run. |
 
 Trial runs (`GUARD_ONLY=...`) are neither recorded nor reported.
+
+**Step budgets.** `GUARD_STEP_BUDGETS` holds `name|seconds` entries, apart from `GUARD_STEPS` because a command may contain `|`. A malformed entry or a name that is not a step is a warning, never a failure. A step that ran longer than its budget adds the warning `over budget: <step> <s>s > <budget>s`, which `kitchen status` shows with the nightly's other warnings, and never changes the verdict. On a green run with a step over budget the guard opens one issue labelled `<GUARD_LABEL>-budget`, or comments on the open one; the next green run with every budgeted step within budget closes it. Red and incomplete runs stopped early and prove nothing about time: they leave that issue alone. Without a valid budget the issue is left as is, so close it by hand when you remove the budgets. A failed issue call is the warning `budget issue report failed`.
+
+**Evidence per step.** After each step named in `AUDIT_GUARD_STEPS`, the guard copies every `AUDIT_EVIDENCE_PATHS` entry from its clone into `~/.local/state/kitchen/automation/<project>/evidence/<run_id>/<step>/<path>`, so a later step that writes the same path cannot overwrite what an earlier one left. A missing path, or one outside the clone, is a warning. Only the evidence of the newest 3 runs that kept any is kept; trial runs keep none.
 
 ## Gardener record
 
@@ -110,10 +116,10 @@ One JSON line per run in `~/.local/state/kitchen/audit/<project>.jsonl`: `ts`, `
 | `status` | Meaning |
 |---|---|
 | `clean`, `changed`, `findings`, `blocked`, `skipped` | The pass's outcome, as the skill defines it. `changed` carries the PR's URL, `findings` the report's path, the findings issue and, when its prose fixes were published, the PR's URL, the others the report's path. A red or incomplete latest guard run is `blocked` and the agent does not run; an audited SHA equal to the baseline is `skipped`, also without the agent. Each outcome the agent reached, and each skip, is also logged in the kitchen journal as `audit-verification <outcome> churn at <sha>`, on the project's behalf, where the next churn pass finds its baseline. |
-| `refused` | The job refused an input or the publication: no baseline in the journal (run a full pass by hand), a guard run without one of `AUDIT_GUARD_STEPS`, a guard clone no longer at the guard's SHA or missing an evidence path, a `changed` fix the publication refused, or a committed fix under an outcome of `clean` or `skipped`. A refused fix, or `changed` without authorization, is logged in the journal as `findings`, so the drift stays in the next pass's scope. |
+| `refused` | The job refused an input or the publication: no baseline in the journal (run a full pass by hand), a guard run without one of `AUDIT_GUARD_STEPS`, a guard clone no longer at the guard's SHA, an evidence path the guard did not keep after one of those steps, a `changed` fix the publication refused, or a committed fix under an outcome of `clean` or `skipped`. A refused fix, or `changed` without authorization, is logged in the journal as `findings`, so the drift stays in the next pass's scope. |
 | `incomplete` | Claude failed or outlived `AUDIT_TIMEOUT_SECONDS`, wrote no valid outcome or no report, a prerequisite failed, or the run was aborted or killed. Nothing is logged in the journal. |
 
-The boundary is the gardener's, made stricter. The agent runs in the same sandbox (`lib/sealed.sh`, the `GARDENER_SANDBOX_READ`, `GARDENER_SANDBOX_WRITE` and `GARDENER_ENV_PASS` settings), in its own clone at the audited SHA, with the Agent tool for the skill's source wave. `GARDENER_SANDBOX_DOMAINS` and `GARDENER_SANDBOX_UNIX_SOCKETS` never reach it or its verification: no network but the model API, and no Docker socket. It has no Docker: running the agent's harness code live would need Docker outside the sandbox, which can mount any host path. So the job never drives a fix live. It publishes only Markdown prose outside fenced code blocks (`lib/prose_only.py`) within `AUDIT_EDIT_PATHS`, after the gardener's checks (branch name `audit/<date>-<slug>`, size, `.github/*`, secret scan) and `AUDIT_VERIFY_STEPS` rerun under srt; a fix to a drive block, an assertion or the verifier is a finding. A `findings` pass publishes its prose fixes with the same checks; a refused publication is a warning and the outcome stays `findings`. The guard's evidence lives in its clone until the next job syncs it, so schedule the audit after the guard and before the gardener.
+The boundary is the gardener's, made stricter. The agent runs in the same sandbox (`lib/sealed.sh`, the `GARDENER_SANDBOX_READ`, `GARDENER_SANDBOX_WRITE` and `GARDENER_ENV_PASS` settings), in its own clone at the audited SHA, with the Agent tool for the skill's source wave. `GARDENER_SANDBOX_DOMAINS` and `GARDENER_SANDBOX_UNIX_SOCKETS` never reach it or its verification: no network but the model API, and no Docker socket. It has no Docker: running the agent's harness code live would need Docker outside the sandbox, which can mount any host path. So the job never drives a fix live. It publishes only Markdown prose outside fenced code blocks (`lib/prose_only.py`) within `AUDIT_EDIT_PATHS`, after the gardener's checks (branch name `audit/<date>-<slug>`, size, `.github/*`, secret scan) and `AUDIT_VERIFY_STEPS` rerun under srt; a fix to a drive block, an assertion or the verifier is a finding. A `findings` pass publishes its prose fixes with the same checks; a refused publication is a warning and the outcome stays `findings`. The agent gets the evidence the guard kept after each cited step, at `guard/evidence/<step>/<path>` in its work dir. Its clone is made from the guard's clone, which must still be at the guard's SHA, so schedule the audit after the guard and before the gardener.
 
 Findings go to one GitHub issue per project, labelled `AUDIT_ISSUE_LABEL`: opened when none is open, else commented on. The body names the outcome, audited SHA, baseline and PR, then the report, redacted and cut under GitHub's limit with a pointer to the full report. The baseline moves past a `findings` pass only when its report landed in the issue: its journal line is then `audit-verification findings churn at <sha> (issue #N)`; a failed report is a warning and the baseline stays. The job never closes the issue, since a churn pass covers only its scope: a full pass by hand that ends clean or changed closes it. `blocked`, `refused` and `incomplete` never move the baseline.
 

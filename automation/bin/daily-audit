@@ -7,8 +7,8 @@
 # Run it after the nightly guard, under the same project lock, before anything syncs the guard's clone again:
 #   1. Inputs, outside the sandbox. The audited SHA is the one of the latest nightly guard run, which must be green
 #      and must have run every AUDIT_GUARD_STEPS step (e.g. prove and control): a red or incomplete guard blocks
-#      the pass, and the agent does not run. The guard's clone must still be at that SHA, since the evidence the
-#      pass cites lives there (AUDIT_EVIDENCE_PATHS); otherwise the job refuses. The baseline is the newest
+#      the pass, and the agent does not run. The guard's clone must still be at that SHA, and the guard must have
+#      kept AUDIT_EVIDENCE_PATHS after each of those steps; otherwise the job refuses. The baseline is the newest
 #      audit-verification entry of the last 30 days in the kitchen journal whose outcome moves it (the skill's
 #      rule, lib/audit_state.py); with none, the job refuses: a full pass is run by hand. Audited SHA equal to the
 #      baseline: skipped.
@@ -189,18 +189,28 @@ fi
 git -C "$CLONE_DIR" -c core.hooksPath=/dev/null merge-base --is-ancestor "$BASELINE" "$SHA" 2>/dev/null ||
   { refuse "the baseline ${BASELINE:0:12} is not in the history of the audited ${SHA:0:12}; the agent did not run"; exit 1; }
 
-# 3. The guard's evidence is in its clone until the next sync: the clone must still be at the guard's SHA.
+# 3. The guard's evidence: the copy of AUDIT_EVIDENCE_PATHS the guard kept after each cited step, so a step that
+# rewrote a path cannot hide what an earlier one left. The clone must still be at the guard's SHA: nothing synced it
+# since the guard ran, and the agent's clone is made from it.
 head="$(git -C "$CLONE_DIR" -c core.hooksPath=/dev/null rev-parse --verify --quiet HEAD || true)"
 [ "$head" = "$SHA" ] ||
-  { refuse "the guard proved ${SHA:0:12} but its clone is at ${head:-nothing}: its evidence is gone; the agent did not run"; exit 1; }
+  { refuse "the guard proved ${SHA:0:12} but its clone is at ${head:-nothing}: another job synced it after the guard; the agent did not run"; exit 1; }
 mkdir -p "$WORK_DIR/guard/logs" "$WORK_DIR/guard/evidence" "$WORK_DIR/skill"
 mkdir -p -m 700 "$JOB_DIR"
 tail -n 1 "$NIGHTLY_RECORD" > "$WORK_DIR/guard/record.json"
 cp "$LOG_DIR/guard-$guard_run.log" "$LOG_DIR/guard-$guard_run-"*.log "$WORK_DIR/guard/logs/"
-for path in ${AUDIT_EVIDENCE_PATHS[@]+"${AUDIT_EVIDENCE_PATHS[@]}"}; do
-  [ -e "$CLONE_DIR/$path" ] || { refuse "the guard's evidence $path is missing from its clone; the agent did not run"; exit 1; }
-  mkdir -p "$(dirname "$WORK_DIR/guard/evidence/$path")"
-  cp -R "$CLONE_DIR/$path" "$WORK_DIR/guard/evidence/$path"
+for step in "${AUDIT_GUARD_STEPS[@]}"; do
+  for path in ${AUDIT_EVIDENCE_PATHS[@]+"${AUDIT_EVIDENCE_PATHS[@]}"}; do
+    path="${path%/}"
+    case "/$path/" in
+      //*|*/../*) refuse "AUDIT_EVIDENCE_PATHS has ${path:-an empty path}, which is not inside the clone; the agent did not run"; exit 1 ;;
+    esac
+    kept="$STATE_DIR/evidence/$guard_run/$step/$path"
+    [ -e "$kept" ] ||
+      { refuse "the guard's evidence $path after step $step is missing (no $kept); the agent did not run"; exit 1; }
+    mkdir -p "$(dirname "$WORK_DIR/guard/evidence/$step/$path")"
+    cp -R "$kept" "$WORK_DIR/guard/evidence/$step/$path"
+  done
 done
 cp "$KITCHEN_AUTOMATION/../skills/audit-verification/SKILL.md" "$WORK_DIR/skill/SKILL.md"
 
@@ -222,7 +232,7 @@ FACTS="- audited SHA (your clone's HEAD): $SHA
 - the skill: $WORK_DIR/skill/SKILL.md
 - nightly guard run $guard_run, green on the audited SHA: its record $WORK_DIR/guard/record.json, its log and step logs in $WORK_DIR/guard/logs/
 - guard steps that drove the app and that you cite: ${guard_steps// /, } (logs guard-$guard_run-<step>.log)
-- evidence from the guard's clone, copied after the run: $WORK_DIR/guard/evidence/ (${AUDIT_EVIDENCE_PATHS[*]:-none configured})
+- evidence as each cited step left it in the guard's clone: $WORK_DIR/guard/evidence/<step>/<path> (paths: ${AUDIT_EVIDENCE_PATHS[*]:-none configured})
 - work dir, for scratch notes: $WORK_DIR
 - report file: $REPORT_FILE
 - outcome file: $OUTCOME_FILE
