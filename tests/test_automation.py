@@ -1340,6 +1340,20 @@ git commit -q -am "More notes"
         self.assertEqual([b for b in self.origin_branches() if b.startswith("gardener/")], [])
         self.assertNotIn("gh pr create", self.calls_log())
 
+    def test_a_summary_the_agent_links_to_a_host_file_is_not_published(self):
+        for name, plant in (("symlink", 'ln -sf "$SECRET" "$GARDENER_SUMMARY_FILE"'),
+                            ("hard link", 'rm -f "$GARDENER_SUMMARY_FILE"; ln "$SECRET" "$GARDENER_SUMMARY_FILE"')):
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                secret = Path(self.tmp.name) / "host-only.txt"  # outside every path the agent may read
+                secret.write_text("# host-only sentinel\n\nnot for a PR\n")
+                plant = f"SECRET={secret}; {plant}"
+                self.configure_publishing()
+                self.agent(self.commit_script() + plant + "\n")
+
+                self.assert_refused(self.run_job("weekly-gardener", "shop"), "is not a regular file of its own")
+                self.assertNotIn("host-only sentinel", self.calls_log())
+
     def test_oversized_diff_is_not_published(self):
         self.configure_publishing(extra="GARDENER_MAX_CHANGED_LINES=5")
         self.agent(self.commit_script(lines=10))

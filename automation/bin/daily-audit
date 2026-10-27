@@ -21,11 +21,12 @@
 #      publishes the agent's branch with the gardener's validation and independent verification (lib/sealed.sh
 #      publish), restricted to AUDIT_EDIT_PATHS and to Markdown prose outside fenced code blocks
 #      (lib/prose_only.py): a fix to what runs (a drive block, an assertion, the verifier, a control) must be driven
-#      live before it ships, and nothing here may run the agent's code with Docker, so such a fix is a finding. Fixes are authorized only when AUDIT_EDIT_PATHS and
-#      AUDIT_VERIFY_STEPS are set and no audit PR is open; otherwise the pass is findings-only. Under `findings` a
-#      refused publication is a warning: the outcome stands. Then it files the findings in the project's one open
-#      issue labelled AUDIT_ISSUE_LABEL (a comment, or a new issue), which a hand pass closes, never the job. Only a
-#      findings pass whose issue report landed moves the baseline: its journal line names the issue.
+#      live before it ships, and nothing here may run the agent's code with Docker, so such a fix is a finding.
+#      Fixes are authorized only when AUDIT_EDIT_PATHS and AUDIT_VERIFY_STEPS are set and no audit PR is open;
+#      otherwise the pass is findings-only. Under `findings` a refused publication is a warning: the outcome
+#      stands. Then it files the findings in the project's one open issue labelled AUDIT_ISSUE_LABEL (a comment, or
+#      a new issue), which a hand pass closes, never the job. Only a findings pass whose issue report landed moves
+#      the baseline: its journal line names the issue.
 # Every run that holds the lock ends with one AUDIT-RESULT line and one line in $STATE_ROOT/audit/<project>.jsonl:
 # clean, changed <url>, findings <report, PR, issue>, blocked, skipped (the pass's outcome), refused <reason> (an
 # input or the publication failed validation) or incomplete <reason> (claude failed or timed out, no outcome,
@@ -253,16 +254,8 @@ case "$OUTCOME" in
   *) stop "no valid outcome in $OUTCOME_FILE (got '${OUTCOME:0:40}')" ;;
 esac
 [ -s "$REPORT_FILE" ] || stop "outcome $OUTCOME, but no report at $REPORT_FILE"
-# The report can leave the machine (the findings issue), and the agent could have linked it to any host file. It is
-# read once, without following a link, into the job's own dir, and only that copy is published.
-python3 -c '
-import os, stat, sys
-fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-info = os.fstat(fd)
-if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-    sys.exit(1)
-with os.fdopen(fd, "rb") as source, open(sys.argv[2], "wb") as copy:
-    copy.write(source.read())' "$REPORT_FILE" "$JOB_DIR/report.md" 2>/dev/null ||
+# The report can leave the machine (the findings issue): only the job's own copy is published (lib/sealed.sh).
+copy_agent_file "$REPORT_FILE" "$JOB_DIR/report.md" ||
   stop "outcome $OUTCOME, but the report at $REPORT_FILE is not a regular file of its own"
 
 branches="$(git --git-dir="$AGENT_CLONE/.git" for-each-ref --format='%(refname:short)' refs/heads/audit/ | tr '\n' ' ')"
