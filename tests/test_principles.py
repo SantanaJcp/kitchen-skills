@@ -26,9 +26,17 @@ DECLARATION = re.compile(r"Principles(?: \([^)]*\))?:\s*(.+)")
 NAME = re.compile(r"`([a-z][a-z-]*)`")
 
 
+CHEF_MODE = REPO / "skills" / "chef-mode" / "SKILL.md"
+
+
 def declared(path: Path) -> list[str]:
     match = DECLARATION.search(path.read_text(encoding="utf-8"))
     return NAME.findall(match.group(1)) if match else []
+
+
+def enforced_by_a_control(controls) -> set[str]:
+    """chef-mode names every principle to switch them on; it enforces none, so it cannot vouch for one."""
+    return {n for path in controls if path != CHEF_MODE for n in declared(path)}
 
 
 class Principles(unittest.TestCase):
@@ -60,7 +68,11 @@ class Principles(unittest.TestCase):
 
     def test_chef_mode_names_every_principle(self):
         # chef-mode is the one place the kitchen's rules switch on; a principle it leaves out never reaches an agent
-        self.assertEqual(sorted(declared(REPO / "skills" / "chef-mode" / "SKILL.md")), sorted(self.ids))
+        self.assertEqual(sorted(declared(CHEF_MODE)), sorted(self.ids))
+
+    def test_chef_mode_alone_vouches_for_no_principle(self):
+        # regression: while chef-mode counted as a control, the check below could never fail (audit, 2026-10-26)
+        self.assertEqual(enforced_by_a_control([CHEF_MODE]), set())
 
     def test_chef_mode_reads_this_principles_file(self):
         link = REPO / "skills" / "chef-mode" / "PRINCIPLES.md"
@@ -70,8 +82,7 @@ class Principles(unittest.TestCase):
     def test_every_principle_is_enforced_or_says_rule_only(self):
         text = (REPO / "PRINCIPLES.md").read_text(encoding="utf-8")
         sections = dict(zip(self.ids, re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]))
-        # chef-mode names every principle to switch them on; it enforces none, so it cannot vouch for one
-        cited = {n for path in CONTROLS if path != REPO / "skills" / "chef-mode" / "SKILL.md" for n in declared(path)}
+        cited = enforced_by_a_control(CONTROLS)
         for pid in self.ids:
             with self.subTest(principle=pid):
                 enforced = re.search(r"^- \*\*Enforced by:\*\* (.+)$", sections[pid], re.MULTILINE)

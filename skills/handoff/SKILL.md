@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # handoff
 
-Write it to `${TMPDIR:-/tmp}/handoff-<repo>-<yyyymmdd-hhmm>.md`, never inside the workspace, and print the path. If I passed arguments, they describe what the next session will do; tailor the handoff to that.
+Write it to `${TMPDIR:-/tmp}/handoff-<repo>-<yyyymmdd-hhmm>.md`, never inside the workspace, and print the path. A prompt for another machine, or for me to paste, also goes in full in the reply: the path does not exist there. If I passed arguments, they describe what the next session will do; tailor the handoff to that.
 
 ## Contents
 
