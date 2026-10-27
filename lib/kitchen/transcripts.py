@@ -407,12 +407,15 @@ def remote_prompts(source: dict, window: str, tool: str, pattern: str | None) ->
             raise ValueError
     except ValueError:
         return [], "unknown (output is not kitchen retro JSON)"
+    # ssh adds its own stderr lines (host-key warnings, "Connection closed"), so the coverage line need not be last
+    coverage = next((match for line in reversed(errors) for match in [REMOTE_SOURCES.search(line)] if match), None)
+    if coverage is None:
+        return [], "unknown (no coverage line from the remote)"
     name = ssh_label(source)
     for p in prompts:
         p["source"] = f"{name}: {p.get('source', '?')}"
         p["text"] = scrub(str(p["text"]))
-    inner = REMOTE_SOURCES.search(errors[-1]) if errors else None
-    return prompts, f"ok [{inner.group(1)}]" if inner else "ok"
+    return prompts, f"ok [{coverage.group(1)}]"
 
 
 def collect(window: str, tool: str, pattern: str | None, include_automated: bool = False,

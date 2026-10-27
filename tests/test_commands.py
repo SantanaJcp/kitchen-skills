@@ -1503,6 +1503,19 @@ class RetroTests(ProjectFixture):
         self.assertEqual(args[6], "far-host")
         self.assertIn("kitchen retro --json --include-automated --home-only --since 1d --tool all", args[7])
 
+    def test_ssh_noise_after_the_remote_coverage_line_does_not_hide_a_gap(self):
+        # regression: review of #78; only the last stderr line was read, so a remote gap behind ssh noise showed as plain "ok"
+        self.remote_sources("ssh far-host", "ssh mute-host")
+        body = ('if [ "$5" = mute-host ]; then echo "[]"; exit 0; fi\n'
+                "echo '[]'\n"
+                "echo '0 prompts included · 0 excluded (none) · 0 unknown provenance · sources: claude ~/.claude unknown (Permission denied)' >&2\n"
+                "echo 'Connection to far-host closed.' >&2")
+
+        result = self.kitchen("retro", "--since", "1d", cwd=self.home, env_extra=self.fake_ssh(body))
+
+        self.assertIn("ssh far-host ok [claude ~/.claude unknown (Permission denied)], ssh mute-host unknown (no coverage line from the remote)",
+                      result.stdout.splitlines()[-1])
+
     def test_home_only_reads_no_listed_source(self):
         # what a remote source runs, so two machines that list each other do not recurse
         self.write_claude([self.claude_event("dale")])
