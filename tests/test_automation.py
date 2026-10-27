@@ -38,7 +38,8 @@ class AutomationFixture(unittest.TestCase):
         for args in (["init", "-q", "-b", "dev"], ["commit", "-q", "--allow-empty", "-m", "init"]):
             subprocess.run(["git", "-C", str(self.origin), *args], check=True, env=env)
         self.fake("gh", 'echo "gh $*" >> "$CALLS"; [ "${GH_FAIL:-0}" = 1 ] && exit 1\n'
-                        'case "$1 $2" in "pr list") echo "${OPEN_PRS:-0}";; "pr create") echo "https://example.test/pull/1";; esac')
+                        'case "$1 $2" in "pr list") echo "${OPEN_PRS:-0}";; "pr create") echo "https://example.test/pull/1";;\n'
+                        '  "issue list") echo "${OPEN_ISSUE:-}";; "issue create") echo "https://example.test/issues/7";; esac')
         self.fake("claude", 'echo "claude" >> "$CALLS"; exit "${CLAUDE_EXIT:-0}"')
         for notifier in ("osascript", "notify-send"):  # a test never pops a real notification
             self.fake(notifier, 'echo "notify $*" >> "$CALLS"')
@@ -341,11 +342,11 @@ class NightlyGuardTests(AutomationFixture):
 
         self.run_job("nightly-guard", "shop")
 
-        calls = self.calls_log()
-        self.assertIn("gh issue create", calls)
-        self.assertIn("[REDACTED]", calls)
-        self.assertNotIn("hunter2hunter2", calls)
-        self.assertNotIn(token, calls)
+        line = next(line for line in self.calls_log().splitlines() if line.startswith("gh issue create"))
+        body = Path(line.split("--body-file ")[1].split()[0]).read_text()
+        self.assertIn("[REDACTED]", body)
+        self.assertNotIn("hunter2hunter2", body)
+        self.assertNotIn(token, body)
 
     def test_project_hooks_keep_working_next_to_the_push_guard(self):
         marks = Path(self.tmp.name)
@@ -1339,6 +1340,20 @@ git commit -q -am "More notes"
         self.assertEqual([b for b in self.origin_branches() if b.startswith("gardener/")], [])
         self.assertNotIn("gh pr create", self.calls_log())
 
+    def test_a_summary_the_agent_links_to_a_host_file_is_not_published(self):
+        for name, plant in (("symlink", 'ln -sf "$SECRET" "$GARDENER_SUMMARY_FILE"'),
+                            ("hard link", 'rm -f "$GARDENER_SUMMARY_FILE"; ln "$SECRET" "$GARDENER_SUMMARY_FILE"')):
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                secret = Path(self.tmp.name) / "host-only.txt"  # outside every path the agent may read
+                secret.write_text("# host-only sentinel\n\nnot for a PR\n")
+                plant = f"SECRET={secret}; {plant}"
+                self.configure_publishing()
+                self.agent(self.commit_script() + plant + "\n")
+
+                self.assert_refused(self.run_job("weekly-gardener", "shop"), "is not a regular file of its own")
+                self.assertNotIn("host-only sentinel", self.calls_log())
+
     def test_oversized_diff_is_not_published(self):
         self.configure_publishing(extra="GARDENER_MAX_CHANGED_LINES=5")
         self.agent(self.commit_script(lines=10))
@@ -1384,8 +1399,11 @@ class DailyAuditTests(AutomationFixture):
     FIXES = 'AUDIT_EDIT_PATHS=("docs/*")\nAUDIT_VERIFY_STEPS=("map|grep -q \'every reader\' docs/map.md")\n'
 
     def log_baseline(self, sha, outcome="changed full"):
+        self.log_raw(f"audit-verification {outcome} at {sha}")
+
+    def log_raw(self, message):
         entry = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "repo": str(self.checkout),
-                 "project": str((self.checkout / ".git").resolve()), "status": "note", "message": f"audit-verification {outcome} at {sha}"}
+                 "project": str((self.checkout / ".git").resolve()), "status": "note", "message": message}
         self.state.mkdir(parents=True, exist_ok=True)
         with open(self.state / "log.jsonl", "a") as handle:
             handle.write(json.dumps(entry) + "\n")
@@ -1523,12 +1541,13 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
     def test_a_pass_logs_its_outcome_and_a_clean_one_moves_the_baseline(self):
         sha = self.churn()
         self.audit_config()
-        for outcome, journal_line in (("findings", f"audit-verification findings churn at {sha}"),
-                                      ("clean", f"audit-verification clean (churn) churn at {sha}")):
+        # findings whose issue report failed (gh down) do not move the baseline, so the clean pass still runs
+        for outcome, journal_line, env in (("findings", f"audit-verification findings churn at {sha}", {"GH_FAIL": "1"}),
+                                           ("clean", f"audit-verification clean (churn) churn at {sha}", {})):
             with self.subTest(outcome=outcome):
                 self.agent(outcome)
 
-                result = self.guard_then_audit()
+                result = self.guard_then_audit(**env)
 
                 self.assertEqual(result.returncode, 0, result.stdout)
                 entry = self.journal()[-1]
@@ -1638,6 +1657,152 @@ echo "${{KITCHEN_REAL_GH:-unset}}" > {tmp}/gh""")
                 self.assertIn("fixes were not authorized", result.stdout)
                 self.assertNotIn("gh pr create", self.calls_log())
                 self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+    def issue_body(self):
+        line = next(line for line in self.calls_log().splitlines() if line.startswith(("gh issue create", "gh issue comment")))
+        return Path(line.split("--body-file ")[1].split()[0]).read_text()
+
+    def test_findings_ship_their_prose_fixes_and_land_in_one_issue_that_moves_the_baseline(self):
+        sha = self.churn()
+        baseline = self.git(self.origin, "rev-parse", "dev~1")
+        self.audit_config(extra=self.FIXES)
+        self.agent("findings", self.fix_script())
+
+        result = self.guard_then_audit()
+
+        branch = f"audit/{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d}-map"
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.git(self.origin, "rev-parse", f"{branch}^"), sha)  # published as for changed
+        pr = [line for line in self.calls_log().splitlines() if line.startswith("gh pr create")]
+        self.assertEqual(len(pr), 1)
+        self.assertIn("- map: passed", Path(pr[0].split("--body-file ")[1].split()[0]).read_text())
+        run = self.audits()[-1]
+        self.assertEqual(run["status"], "findings")
+        self.assertIn("report ", run["detail"])
+        self.assertIn("PR https://example.test/pull/1", run["detail"])
+        self.assertIn("issue #7", run["detail"])
+        created = [line for line in self.calls_log().splitlines() if line.startswith("gh issue create")]
+        self.assertEqual(len(created), 1)
+        self.assertIn("--label audit-verification-findings", created[0])
+        body = self.issue_body()
+        for fact in ("**findings**", sha, baseline, "https://example.test/pull/1", "Outcome: findings"):
+            self.assertIn(fact, body)
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #7)")
+        self.assertNotIn("AUDIT-RESULT: refused", result.stdout)
+
+        again = self.run_job("daily-audit", "shop")  # the filed findings are the new baseline
+
+        self.assertEqual(self.audits()[-1]["status"], "skipped", again.stdout)
+        self.assertEqual(self.calls_log().count("claude"), 1)
+
+    def test_an_open_findings_issue_gets_a_comment_and_the_job_never_closes_it(self):
+        sha = self.churn()
+        self.audit_config(extra='AUDIT_ISSUE_LABEL="audit-findings"\n')
+        self.agent("findings")
+
+        result = self.guard_then_audit(OPEN_ISSUE="12")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.calls_log()
+        self.assertIn("gh issue list -R owner/shop --label audit-findings --state open", calls)
+        self.assertIn("gh issue comment 12 ", calls)
+        self.assertNotIn("gh issue create", calls)
+        self.assertNotIn("gh issue close", calls)
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #12)")
+
+    def test_a_fix_the_publication_refuses_under_findings_is_a_warning_and_the_findings_still_land(self):
+        sha = self.churn()
+        self.audit_config(extra=self.FIXES)
+        self.agent("findings", self.fix_script("$V api GET /readers --expect 204", "$V api GET /readers --expect 200"))
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout.count("AUDIT-RESULT:"), 1, result.stdout)
+        run = self.audits()[-1]
+        self.assertEqual(run["status"], "findings")
+        self.assertNotIn("PR ", run["detail"])
+        self.assertTrue(any(w.startswith("not published: ") and "changes more than prose" in w for w in run["warnings"]), run)
+        self.assertEqual([b for b in self.origin_branches() if b.startswith("audit/")], [])
+        self.assertNotIn("gh pr create", self.calls_log())
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #7)")
+        body = self.issue_body()  # the issue says the fixes did not ship, and why
+        self.assertIn("- prose fixes: not published", body)
+        self.assertIn("changes more than prose", body)
+
+    def test_findings_whose_issue_report_failed_leave_the_baseline_and_warn(self):
+        sha = self.churn()
+        self.audit_config()
+        self.agent("findings")
+
+        result = self.guard_then_audit(GH_FAIL="1")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        run = self.audits()[-1]
+        self.assertEqual(run["status"], "findings")
+        self.assertIn("findings issue report failed: the baseline does not move", run["warnings"])
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+        again = self.run_job("daily-audit", "shop")  # the same churn is audited again
+
+        self.assertEqual(self.audits()[-1]["status"], "findings", again.stdout)
+        self.assertEqual(self.calls_log().count("claude"), 2)
+
+    def test_the_findings_issue_body_is_redacted_and_cut_under_githubs_limit(self):
+        token = "ghp_" + "a" * 30  # built at runtime: the repo never holds a credential shape
+        self.churn()
+        self.audit_config()
+        self.agent("findings", f'python3 -c \'print("drift line\\n" * 8000)\' > "$AUDIT_REPORT_FILE.big"\n')
+        report = 'printf "# Audit\\n\\nOutcome: findings\\n" > "$AUDIT_REPORT_FILE"'
+        claude = (self.bin / "claude").read_text()
+        (self.bin / "claude").write_text(claude.replace(report, report + f'\necho "key {token}" >> "$AUDIT_REPORT_FILE"'
+                                                        '\ncat "$AUDIT_REPORT_FILE.big" >> "$AUDIT_REPORT_FILE"'))
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        body = self.issue_body()
+        self.assertLessEqual(len(body), 65536)
+        self.assertNotIn(token, body)
+        self.assertIn("[REDACTED]", body)
+        self.assertIn("Truncated: the full report is at", body)
+
+    def test_a_report_the_agent_links_to_a_host_file_never_leaves_the_machine(self):
+        secret = Path(self.tmp.name) / "host-only.txt"  # outside every path the agent may read
+        secret.write_text("host-only sentinel\n")
+        self.churn()
+        self.audit_config()
+        for name, plant in (("symlink", f'ln -sf {secret} "$AUDIT_REPORT_FILE"'),
+                            ("hard link", f'rm -f "$AUDIT_REPORT_FILE"; ln {secret} "$AUDIT_REPORT_FILE"')):
+            with self.subTest(name):
+                self.agent("findings")
+                claude = (self.bin / "claude").read_text()
+                (self.bin / "claude").write_text(claude.replace('echo findings > "$AUDIT_OUTCOME_FILE"',
+                                                                f'echo findings > "$AUDIT_OUTCOME_FILE"\n{plant}'))
+
+                result = self.guard_then_audit()
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(self.audits()[-1]["status"], "incomplete")
+                self.assertIn("not a regular file of its own", self.audits()[-1]["detail"])
+                self.assertNotIn("gh issue", self.calls_log())
+                self.assertEqual(len(self.journal()), 1)  # only the baseline
+
+    def test_only_a_findings_line_that_names_its_issue_moves_the_baseline(self):
+        sha = self.git(self.origin, "rev-parse", "dev")
+        for message, moves in ((f"findings churn at {sha} (issue #3)", True), (f"findings churn at {sha}", False),
+                               (f"findings churn at {sha} (issue #3) and more", False), (f"findings full at {sha} (issue #3)", False),
+                               (f"findings churn at {sha} (issue #0)", False), (f"blocked churn at {sha} (issue #3)", False)):
+            with self.subTest(message):
+                self.tearDown(); self.setUp()
+                self.log_raw(f"audit-verification {message}")
+
+                result = subprocess.run(["python3", str(AUTOMATION / "lib" / "audit_state.py"), "baseline", "shop"],
+                                        env=self.job_env(), capture_output=True, text=True)
+
+                self.assertEqual(result.returncode, 0 if moves else 3, result.stderr)
+                if moves:
+                    self.assertEqual(result.stdout.splitlines()[0], sha)
 
     def test_busy_project_lock_skips_the_audit_and_records_nothing(self):
         self.audit_config()
