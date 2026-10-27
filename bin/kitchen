@@ -471,7 +471,7 @@ def cmd_models(args: argparse.Namespace) -> int:
 
 
 def cmd_retro(args: argparse.Namespace) -> int:
-    prompts, coverage = transcripts.collect(common.parse_since(args.since), args.tool, args.match, args.include_automated)
+    prompts, coverage = transcripts.collect(args.since, args.tool, args.match, args.include_automated, args.home_only)
     if args.json:
         print(json.dumps(prompts, indent=2, ensure_ascii=False))
         print(transcripts.coverage_line(coverage), file=sys.stderr)  # keeps stdout parseable
@@ -561,7 +561,7 @@ def main() -> int:
     mod_remove.add_argument("--model", help="which one, when more than one runs on that provider")
     mod.set_defaults(func=cmd_models, action=None)
 
-    retro = sub.add_parser("retro", help="my prompts from Claude Code and Codex transcripts")
+    retro = sub.add_parser("retro", help="my prompts from Claude Code and Codex transcripts, in every account and listed source")
     retro.add_argument("--since", default="7d")
     retro.add_argument("--tool", choices=("all", "claude", "codex"), default="all")
     retro.add_argument("--match", help="only prompts matching this regex (case-insensitive)")
@@ -569,6 +569,8 @@ def main() -> int:
     retro.add_argument("--include-automated", action="store_true",
                        help="also show messages excluded by provenance (automations, notifications, subagents, agent-launched runs), tagged with the reason")
     retro.add_argument("--json", action="store_true")
+    retro.add_argument("--home-only", action="store_true",
+                       help="read only this HOME's Claude and Codex dirs, not retro-sources.txt (what a remote source runs)")
     retro.set_defaults(func=cmd_retro)
 
     integ = sub.add_parser("integrate", help="merge branches in order onto a base in a disposable clone and run the project's checks after each merge")
