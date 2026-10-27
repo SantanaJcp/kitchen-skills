@@ -19,7 +19,7 @@ NOT_CONTROLS = {
     "lib/kitchen/inventory.py": "lists what the agents can see",
     "lib/kitchen/notify.py": "sends a local notification for the controls that decide to",
 }
-CANDIDATES = [*REPO.glob(".github/workflows/*.yml"), *REPO.glob("hooks/*"), *REPO.glob("skills/*/SKILL.md"), *REPO.glob("automation/bin/*"), *REPO.glob("lib/kitchen/*.py")]
+CANDIDATES = [REPO / "bin" / "kitchen", *REPO.glob(".github/workflows/*.yml"), *REPO.glob("hooks/*"), *REPO.glob("skills/*/SKILL.md"), *REPO.glob("automation/bin/*"), *REPO.glob("lib/kitchen/*.py")]
 CONTROLS = sorted(p for p in CANDIDATES if p.is_file() and p.name != "README.md" and str(p.relative_to(REPO)) not in NOT_CONTROLS)
 HEADING = re.compile(r"^## \d+\. .+? \(`([a-z-]+)`\)\s*$", re.MULTILINE)
 DECLARATION = re.compile(r"Principles(?: \([^)]*\))?:\s*(.+)")
@@ -70,7 +70,8 @@ class Principles(unittest.TestCase):
     def test_every_principle_is_enforced_or_says_rule_only(self):
         text = (REPO / "PRINCIPLES.md").read_text(encoding="utf-8")
         sections = dict(zip(self.ids, re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]))
-        cited = {n for path in CONTROLS for n in declared(path)}
+        # chef-mode names every principle to switch them on; it enforces none, so it cannot vouch for one
+        cited = {n for path in CONTROLS if path != REPO / "skills" / "chef-mode" / "SKILL.md" for n in declared(path)}
         for pid in self.ids:
             with self.subTest(principle=pid):
                 enforced = re.search(r"^- \*\*Enforced by:\*\* (.+)$", sections[pid], re.MULTILINE)

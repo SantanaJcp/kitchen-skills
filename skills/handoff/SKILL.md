@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: "Write a handoff so another agent, tool or session (Claude, Codex, another machine) can continue this work without the conversation. Use when I ask for a handoff or to pass the work on."
+description: "Write a handoff so another agent, tool or session (Claude, Codex, another machine) can continue this work without the conversation. Use when I ask for a handoff, to pass the work on, or for a prompt to paste into another session or machine."
 disable-model-invocation: true
 ---
 
