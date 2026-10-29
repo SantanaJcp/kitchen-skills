@@ -13,13 +13,14 @@ anywhere else, so a client's account serves that client's project only (owner, 2
 explicit: provider (the CLI, or T3's provider of that name), model (`default` = that tool's own default), effort and
 service tier.
 
-A reviewer nobody set is an error with the command that sets it, never a default model; a reviewer running the author's
-own family is refused, and so is a pi model whose family kitchen cannot tell. The one exception is the worker's model
-(owner, 2026-10-29): a worker nobody set runs on the session model, and `get worker` says so on stderr with the command
-that sets it. Whether the model exists is learned when it is used: the tool's error is shown as it is. pi alone has no
-such error (it runs the nearest model it knows), so its call is refused unless `pi --list-models` lists the id exactly.
-Principles: `cross-review` (another model reviews), `no-fallbacks` (no stand-in reviewer; the worker's fallback is said
-aloud), `owner-attention` (set once).
+No role has a default model. A role nobody set runs on the session model, and `get` says so on stderr with the command
+that sets it: the one exception to `no-fallbacks` (owner, 2026-10-29), so the reply of a review run that way says it was
+not a cross-model review. A reviewer running the author's own family is still refused when it is set, and so is a pi
+model whose family kitchen cannot tell. Whether the model exists is learned when it is used: the tool's error is shown
+as it is. pi alone has no such error (it runs the nearest model it knows), so its call is refused unless
+`pi --list-models` lists the id exactly.
+Principles: `cross-review` (another model reviews), `no-fallbacks` (no stand-in model; the session-model fallback is
+said aloud), `owner-attention` (set once).
 """
 from __future__ import annotations
 
@@ -288,9 +289,9 @@ def worker(job: str, urgent: bool, index: int, project: str | None) -> dict | No
     return out | ({"accounts": accounts, "account": accounts[index % len(accounts)]} if accounts else {})
 
 
-def unset_worker() -> str:
-    return (f"worker is not configured in {path()}: the worker runs on the session model; "
-            f"set it with `{set_command('worker', None)}`")
+def unset(role: str, author: str | None) -> str:
+    runs = "the review runs on the session model, so it is not a cross-model review" if role in PER_AUTHOR else f"the {role} runs on the session model"
+    return f"{label(role, author)} is not configured in {path()}: {runs}; set it with `{set_command(role, author)}`"
 
 
 def t3(entry: dict) -> dict:
@@ -328,7 +329,8 @@ def render() -> str:
                 for i, e in enumerate(get(role, author)):
                     out.append(f"  {name if i == 0 else '':<24} {describe(e)}")
             except ModelsError as error:
-                out.append(f"  {name:<24} not configured" if "not configured" in str(error) else f"  {name:<24} invalid: {error}")
+                out.append(f"  {name:<24} not configured: the review runs on the session model, not cross-model"
+                           if "not configured" in str(error) else f"  {name:<24} invalid: {error}")
     return "\n".join(out)
 
 

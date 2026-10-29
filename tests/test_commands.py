@@ -911,12 +911,27 @@ class IntegrateTests(ProjectFixture):
 
 
 class ModelsTests(KitchenFixture):
-    def test_an_unset_role_fails_with_the_command_that_sets_it(self):
-        result = self.kitchen("models", "get", "reviewer", "--author", "claude")
+    def test_an_unset_reviewer_runs_on_the_session_model_and_says_it_is_not_cross_model(self):
+        for flag, stdout in (("--t3", "{}"), ("--json", "[]"), ("--command", ""), (None, "session model")):
+            with self.subTest(flag=flag):
+                result = self.kitchen("models", "get", "reviewer", "--author", "claude", *([flag] if flag else []))
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), stdout)
+                self.assertIn("the review runs on the session model, so it is not a cross-model review", result.stderr)
+                self.assertIn("kitchen models set reviewer --author claude", result.stderr)
+
+    def test_a_reviewer_of_the_authors_family_is_refused_not_replaced_by_the_session_model(self):
+        config = self.home / "config" / "models.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text('[[reviewer.claude]]\nprovider = "claude"\nmodel = "default"\neffort = "high"\ntier = "standard"\n')
+
+        result = self.kitchen("models", "get", "reviewer", "--author", "claude", "--t3")
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("not configured", result.stderr)
-        self.assertIn("kitchen models set reviewer --author claude", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("the author's model does not check its own work", result.stderr)
+        self.assertNotIn("session model", result.stderr)
 
     def test_set_then_get_and_the_cli_call(self):
         set_ = self.kitchen("models", "set", "reviewer", "--author", "claude", "--provider", "codex", "--model", "gpt-x",
@@ -925,8 +940,11 @@ class ModelsTests(KitchenFixture):
 
         got = self.kitchen("models", "get", "reviewer", "--author", "claude", "--json")
         call = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command")
+        target = self.kitchen("models", "get", "reviewer", "--author", "claude", "--t3")
 
         self.assertEqual(json.loads(got.stdout), [{"provider": "codex", "model": "gpt-x", "effort": "low", "tier": "standard"}])
+        self.assertEqual(json.loads(target.stdout), {"driverKind": "codex", "model": "gpt-x",
+                                                     "options": {"reasoningEffort": "low", "serviceTier": "default"}})
         self.assertEqual(call.stdout.strip(), "codex exec --skip-git-repo-check -s read-only -m gpt-x "
                                               "-c 'model_reasoning_effort=\"low\"' -c 'service_tier=\"default\"'")
 
@@ -954,7 +972,7 @@ class ModelsTests(KitchenFixture):
         out = self.kitchen("models").stdout
 
         self.assertIn("reviewer for claude work codex default · effort low · tier fast", out)
-        self.assertIn("reviewer for codex work  not configured", out)
+        self.assertIn("reviewer for codex work  not configured: the review runs on the session model, not cross-model", out)
 
     def test_roles_nothing_reads_are_refused(self):
         result = self.kitchen("models", "set", "explorer", "--author", "claude", "--provider", "codex", "--model", "default",
@@ -1030,7 +1048,7 @@ class ModelsTests(KitchenFixture):
         self.assertEqual(codex_call, "codex exec --skip-git-repo-check -s workspace-write -m gpt-x "
                                      "-c 'model_reasoning_effort=\"medium\"' -c 'service_tier=\"default\"'")
 
-    def test_an_unset_worker_runs_on_the_session_model_and_an_unset_reviewer_still_fails(self):
+    def test_an_unset_worker_and_an_unset_reviewer_both_run_on_the_session_model(self):
         worker = self.kitchen("models", "get", "worker", "--job", "routine", "--t3")
         reviewer = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command")
 
@@ -1038,9 +1056,9 @@ class ModelsTests(KitchenFixture):
         self.assertEqual(json.loads(worker.stdout), {})
         self.assertIn("the worker runs on the session model", worker.stderr)
         self.assertIn("kitchen models set worker --provider", worker.stderr)
-        self.assertEqual(reviewer.returncode, 1)
+        self.assertEqual(reviewer.returncode, 0, reviewer.stderr)
         self.assertEqual(reviewer.stdout, "")
-        self.assertIn("not configured", reviewer.stderr)
+        self.assertIn("not a cross-model review", reviewer.stderr)
 
     def git_repo(self, name):
         """A git repository named `name`, with one commit so it can grow a worktree."""
