@@ -1510,11 +1510,56 @@ class DailyAuditTests(AutomationFixture):
     PROVE = "prove|mkdir -p .verify/evidence && echo held > .verify/evidence/ledger.jsonl"
     MAP = "# Map\n\nReaders: list them.\n\n```bash\n$V api GET /readers --expect 200\n```\n"
 
+    GH = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        # A gh whose issues live in gh-store.json next to it, so a rerun sees what the last run filed. Every call is
+        # logged; GH_FAIL=1 fails them all, GH_FAIL_ON=<text> fails an issue create or comment whose body holds it.
+        import json, os, sys
+        from pathlib import Path
+        args = sys.argv[1:]
+        with open(os.environ["CALLS"], "a") as log:
+            log.write("gh " + " ".join(args) + "\\n")
+        if os.environ.get("GH_FAIL") == "1":
+            sys.exit(1)
+        store = Path(__file__).with_name("gh-store.json")
+        issues = json.loads(store.read_text()) if store.exists() else []
+        opt = lambda name: args[args.index(name) + 1]
+        command = " ".join(args[:2])
+        if command == "pr list":
+            print(os.environ.get("OPEN_PRS", "0"))
+        elif command == "pr create":
+            print("https://example.test/pull/1")
+        elif command == "issue list":
+            listed = [{key: issue[key] for key in ("number", "title", "body", "comments")}
+                      for issue in issues if issue["open"] and opt("--label") in issue["labels"]]
+            if "--jq" in args:  # the one filter the nightly's report_issue uses
+                assert opt("--jq") == ".[0].number // empty", opt("--jq")
+                print(listed[0]["number"] if listed else "")
+            else:
+                print(json.dumps(listed))
+        elif command in ("issue create", "issue comment"):
+            body = Path(opt("--body-file")).read_text()
+            if os.environ.get("GH_FAIL_ON") and os.environ["GH_FAIL_ON"] in body:
+                sys.exit(1)
+            if command == "issue create":
+                number = max([6] + [issue["number"] for issue in issues]) + 1
+                issues.append({"number": number, "title": opt("--title"), "labels": [opt("--label")], "body": body,
+                               "comments": [], "open": True})
+                print(f"https://example.test/issues/{number}")
+            else:
+                next(issue for issue in issues if issue["number"] == int(args[2]))["comments"].append({"body": body})
+            store.write_text(json.dumps(issues))
+        """)
+    READERS = ("readers-no-assertion", "Readers have no real assertion", "The readers drive checks only its exit code.")
+    WRITERS = ("writers-owed-a-control", "Writers are owed a hand control", "Its assertions changed since the baseline.")
+
     def setUp(self):
         super().setUp()
         self.checkout = Path(self.tmp.name) / "shop"  # the owner's checkout, named like the project; only read
         subprocess.run(["git", "clone", "-q", str(self.origin), str(self.checkout)], check=True, env=clean_env())
         (self.config / "projects.txt").write_text(f"{self.checkout}\n")
+        (self.bin / "gh").write_text(self.GH)
+        (self.bin / "gh").chmod(0o755)
 
     def audit_config(self, guard_steps=(PROVE, "control|true"), cited="prove control", extra=""):
         node = Path(shutil.which("node")).parent  # srt, for the job's verification of a fix
@@ -1546,9 +1591,28 @@ class DailyAuditTests(AutomationFixture):
         self.commit_to_origin({"docs/map.md": (self.MAP, 0o644)})
         return self.git(self.origin, "rev-parse", "dev")
 
-    def agent(self, outcome="findings", script=""):
+    def agent(self, outcome="findings", script="", findings=None):
+        """A fake agent: its report lists <findings> (key, title, text), by default one under `findings`, and it keeps
+        the open findings it was shown in seen-open-findings.md."""
+        findings = ((self.READERS,) if outcome == "findings" else ()) if findings is None else findings
+        report = f"# Audit\n\nOutcome: {outcome}\n"
+        if findings:
+            report += "\n## Findings\n" + "".join(f"\n### {key}: {title}\n\n{text}\n" for key, title, text in findings)
+        (Path(self.tmp.name) / "agent-report.md").write_text(report)
+        seen = Path(self.tmp.name) / "seen-open-findings.md"
         self.fake("claude", 'echo "claude" >> "$CALLS"\n' + script +
-                  f'\nprintf "# Audit\\n\\nOutcome: {outcome}\\n" > "$AUDIT_REPORT_FILE"\necho {outcome} > "$AUDIT_OUTCOME_FILE"\n')
+                  f'\ncp "$(dirname "$AUDIT_REPORT_FILE")/open-findings.md" "{seen}"'
+                  f'\ncat "{Path(self.tmp.name) / "agent-report.md"}" > "$AUDIT_REPORT_FILE"\necho {outcome} > "$AUDIT_OUTCOME_FILE"\n')
+
+    def issues(self):
+        store = self.bin / "gh-store.json"
+        return json.loads(store.read_text()) if store.exists() else []
+
+    def created(self):
+        return [line for line in self.calls_log().splitlines() if line.startswith("gh issue create")]
+
+    def commented(self):
+        return [line for line in self.calls_log().splitlines() if line.startswith("gh issue comment")]
 
     def guard_then_audit(self, **env):
         guard = self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
@@ -1829,11 +1893,10 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
                 self.assertNotIn("gh pr create", self.calls_log())
                 self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
 
-    def issue_body(self):
-        line = next(line for line in self.calls_log().splitlines() if line.startswith(("gh issue create", "gh issue comment")))
-        return Path(line.split("--body-file ")[1].split()[0]).read_text()
+    def issue(self, key):
+        return next(issue for issue in self.issues() if issue["title"].endswith(f"[{key}]"))
 
-    def test_findings_ship_their_prose_fixes_and_land_in_one_issue_that_moves_the_baseline(self):
+    def test_findings_ship_their_prose_fixes_and_land_in_their_own_issue_that_moves_the_baseline(self):
         sha = self.churn()
         baseline = self.git(self.origin, "rev-parse", "dev~1")
         self.audit_config(extra=self.FIXES)
@@ -1851,13 +1914,13 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertEqual(run["status"], "findings")
         self.assertIn("report ", run["detail"])
         self.assertIn("PR https://example.test/pull/1", run["detail"])
-        self.assertIn("issue #7", run["detail"])
-        created = [line for line in self.calls_log().splitlines() if line.startswith("gh issue create")]
-        self.assertEqual(len(created), 1)
-        self.assertIn("--label audit-verification-findings", created[0])
-        body = self.issue_body()
-        for fact in ("**findings**", sha, baseline, "https://example.test/pull/1", "Outcome: findings"):
-            self.assertIn(fact, body)
+        self.assertIn("issues #7", run["detail"])
+        self.assertEqual(len(self.created()), 1)
+        self.assertIn("--label audit-verification-findings", self.created()[0])
+        issue = self.issue("readers-no-assertion")
+        self.assertEqual(issue["title"], "Audit finding in shop: Readers have no real assertion [readers-no-assertion]")
+        for fact in (sha, baseline, "https://example.test/pull/1", "The readers drive checks only its exit code."):
+            self.assertIn(fact, issue["body"])
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #7)")
         self.assertNotIn("AUDIT-RESULT: refused", result.stdout)
 
@@ -1866,22 +1929,80 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertEqual(self.audits()[-1]["status"], "skipped", again.stdout)
         self.assertEqual(self.calls_log().count("claude"), 1)
 
-    def test_an_open_findings_issue_gets_a_comment_and_the_job_never_closes_it(self):
+    def test_two_findings_open_two_issues_each_named_for_the_project_and_its_finding(self):
+        sha = self.churn()
+        self.audit_config()
+        fenced = ("writers-owed-a-control", "Writers are owed a hand control",
+                  "Its assertions changed.\n\n```md\n### not-a-finding: a heading inside a fence is text\n```")
+        self.agent("findings", findings=(self.READERS, fenced))
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(self.created()), 2, self.calls_log())
+        self.assertEqual(sorted(issue["title"] for issue in self.issues()),
+                         ["Audit finding in shop: Readers have no real assertion [readers-no-assertion]",
+                          "Audit finding in shop: Writers are owed a hand control [writers-owed-a-control]"])
+        readers, writers = self.issue("readers-no-assertion"), self.issue("writers-owed-a-control")
+        self.assertIn("The readers drive checks only its exit code.", readers["body"])
+        self.assertNotIn("Its assertions changed.", readers["body"])  # each issue holds its own finding only
+        self.assertIn("### not-a-finding: a heading inside a fence is text", writers["body"])
+        self.assertNotIn("The readers drive", writers["body"])
+        self.assertIn("issues #7, #8", self.audits()[-1]["detail"])
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issues #7, #8)")
+
+    def test_a_rerun_with_the_same_findings_opens_nothing_and_a_changed_one_gets_one_comment(self):
+        self.churn()
+        self.audit_config()
+        self.agent("findings", findings=(self.READERS, self.WRITERS))
+        self.guard_then_audit()
+        self.assertEqual(len(self.created()), 2, self.calls_log())
+
+        for name, findings, comments in (("same", (self.READERS, self.WRITERS), 0),
+                                         ("changed", (self.READERS, self.WRITERS[:2] + ("Now also the bulk writer.",)), 1)):
+            with self.subTest(name):
+                self.commit_to_origin({f"docs/{name}.md": ("more\n", 0o644)})  # new churn, so the pass runs again
+                sha = self.git(self.origin, "rev-parse", "dev")
+                self.agent("findings", findings=findings)
+
+                result = self.guard_then_audit()
+
+                self.assertEqual(result.returncode, 0, result.stdout)
+                seen = (Path(self.tmp.name) / "seen-open-findings.md").read_text()  # the agent saw the open keys
+                self.assertIn("- readers-no-assertion: Audit finding in shop: Readers have no real assertion", seen)
+                self.assertIn("- writers-owed-a-control: ", seen)
+                self.assertEqual(len(self.created()), 2, self.calls_log())  # never a duplicate
+                self.assertEqual(len(self.commented()), comments, self.calls_log())
+                self.assertEqual(len(self.issues()), 2)
+                self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issues #7, #8)")
+        writers = self.issue("writers-owed-a-control")
+        self.assertEqual(len(writers["comments"]), 1)
+        self.assertIn("Now also the bulk writer.", writers["comments"][0]["body"])
+        self.assertEqual(self.issue("readers-no-assertion")["comments"], [])
+        self.assertNotIn("gh issue close", self.calls_log())
+
+    def test_an_open_finding_issue_gets_a_comment_and_the_job_never_closes_it(self):
         sha = self.churn()
         self.audit_config(extra='AUDIT_ISSUE_LABEL="audit-findings"\n')
         self.agent("findings")
+        store = [  # the one findings issue of the old flow, and this finding's issue as an older pass left it
+            {"number": 11, "title": "Verification audit findings on dev", "labels": ["audit-findings"], "body": "the old report",
+             "comments": [], "open": True},
+            {"number": 12, "title": "renamed by hand", "labels": ["audit-findings"], "open": True, "comments": [],
+             "body": "<!-- kitchen-audit-finding key=readers-no-assertion digest=0123456789abcdef -->\nolder text"}]
+        (self.bin / "gh-store.json").write_text(json.dumps(store))
 
-        result = self.guard_then_audit(OPEN_ISSUE="12")
+        result = self.guard_then_audit()
 
         self.assertEqual(result.returncode, 0, result.stdout)
         calls = self.calls_log()
         self.assertIn("gh issue list -R owner/shop --label audit-findings --state open", calls)
-        self.assertIn("gh issue comment 12 ", calls)
+        self.assertEqual([line.split()[3] for line in self.commented()], ["12"])
         self.assertNotIn("gh issue create", calls)
         self.assertNotIn("gh issue close", calls)
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #12)")
 
-    def test_a_fix_the_publication_refuses_under_findings_is_a_warning_and_the_findings_still_land(self):
+    def test_a_fix_the_publication_refuses_under_findings_is_a_warning_and_its_own_finding(self):
         sha = self.churn()
         self.audit_config(extra=self.FIXES)
         self.agent("findings", self.fix_script("$V api GET /readers --expect 204", "$V api GET /readers --expect 200"))
@@ -1896,10 +2017,11 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertTrue(any(w.startswith("not published: ") and "changes more than prose" in w for w in run["warnings"]), run)
         self.assertEqual([b for b in self.origin_branches() if b.startswith("audit/")], [])
         self.assertNotIn("gh pr create", self.calls_log())
-        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #7)")
-        body = self.issue_body()  # the issue says the fixes did not ship, and why
-        self.assertIn("- prose fixes: not published", body)
-        self.assertIn("changes more than prose", body)
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issues #7, #8)")
+        self.assertIn("- prose fixes of this pass: not published", self.issue("readers-no-assertion")["body"])
+        unpublished = self.issue("unpublished-prose-fixes")["body"]  # the fixes did not ship, and why
+        self.assertIn("changes more than prose", unpublished)
+        self.assertIn("still drift", unpublished)
 
     def test_findings_whose_issue_report_failed_leave_the_baseline_and_warn(self):
         sha = self.churn()
@@ -1911,7 +2033,9 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertEqual(result.returncode, 0, result.stdout)
         run = self.audits()[-1]
         self.assertEqual(run["status"], "findings")
-        self.assertIn("findings issue report failed: the baseline does not move", run["warnings"])
+        self.assertIn("could not list the open findings issues: findings of this pass will not be filed", run["warnings"])
+        self.assertTrue(any(w.startswith("findings issue report failed, the baseline does not move: not filed: ")
+                            for w in run["warnings"]), run["warnings"])
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
 
         again = self.run_job("daily-audit", "shop")  # the same churn is audited again
@@ -1919,24 +2043,64 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertEqual(self.audits()[-1]["status"], "findings", again.stdout)
         self.assertEqual(self.calls_log().count("claude"), 2)
 
+    def test_a_failing_issue_report_keeps_the_baseline_and_names_the_finding(self):
+        sha = self.churn()
+        self.audit_config()
+        self.agent("findings", findings=(self.READERS, self.WRITERS))
+
+        result = self.guard_then_audit(GH_FAIL_ON="Its assertions changed")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        run = self.audits()[-1]
+        self.assertEqual(run["status"], "findings")
+        self.assertIn("findings issue report failed, the baseline does not move: not filed: writers-owed-a-control", run["warnings"])
+        self.assertIn("issues #7; not filed: writers-owed-a-control", run["detail"])
+        self.assertEqual([issue["title"] for issue in self.issues()],
+                         ["Audit finding in shop: Readers have no real assertion [readers-no-assertion]"])
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+        again = self.run_job("daily-audit", "shop")  # the baseline stayed: the same churn runs, and files only what is missing
+
+        self.assertEqual(self.audits()[-1]["status"], "findings", again.stdout)
+        self.assertEqual(len(self.created()), 3, self.calls_log())  # the failed one twice, then filed
+        self.assertEqual(len(self.issues()), 2)
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issues #7, #8)")
+
+    def test_a_report_whose_findings_cannot_be_split_exactly_files_nothing(self):
+        for name, report, reason in (
+                ("no key", "## Findings\n\n### Readers have no assertion\n\ntext\n", "is not `### <kebab-key>: <title>`"),
+                ("no section", "Readers have no assertion.\n", "no `## Findings` section"),
+                ("a key twice", "## Findings\n\n### a-b: one\n\nx\n\n### a-b: two\n\ny\n", "a-b is used twice")):
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                sha = self.churn()
+                self.audit_config()
+                self.agent("findings")
+                (Path(self.tmp.name) / "agent-report.md").write_text(f"# Audit\n\n{report}")
+
+                result = self.guard_then_audit()
+
+                self.assertEqual(result.returncode, 0, result.stdout)
+                warning = next(w for w in self.audits()[-1]["warnings"] if w.startswith("findings issue report failed"))
+                self.assertIn(reason, warning)
+                self.assertNotIn("gh issue create", self.calls_log())
+                self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
     def test_the_findings_issue_body_is_redacted_and_cut_under_githubs_limit(self):
         token = "ghp_" + "a" * 30  # built at runtime: the repo never holds a credential shape
         self.churn()
         self.audit_config()
-        self.agent("findings", f'python3 -c \'print("drift line\\n" * 8000)\' > "$AUDIT_REPORT_FILE.big"\n')
-        report = 'printf "# Audit\\n\\nOutcome: findings\\n" > "$AUDIT_REPORT_FILE"'
-        claude = (self.bin / "claude").read_text()
-        (self.bin / "claude").write_text(claude.replace(report, report + f'\necho "key {token}" >> "$AUDIT_REPORT_FILE"'
-                                                        '\ncat "$AUDIT_REPORT_FILE.big" >> "$AUDIT_REPORT_FILE"'))
+        self.agent("findings", findings=(("readers-no-assertion", f"Readers leak {token}", f"key {token}\n" + "drift line\n" * 8000),))
 
         result = self.guard_then_audit()
 
         self.assertEqual(result.returncode, 0, result.stdout)
-        body = self.issue_body()
-        self.assertLessEqual(len(body), 65536)
-        self.assertNotIn(token, body)
-        self.assertIn("[REDACTED]", body)
-        self.assertIn("Truncated: the full report is at", body)
+        issue = self.issue("readers-no-assertion")
+        self.assertLessEqual(len(issue["body"]), 65536)
+        self.assertNotIn(token, issue["body"] + issue["title"])
+        self.assertIn("[REDACTED]", issue["body"])
+        self.assertIn("[REDACTED]", issue["title"])
+        self.assertIn("Truncated: the full report is on the audit machine", issue["body"])
 
     def test_a_report_the_agent_links_to_a_host_file_never_leaves_the_machine(self):
         secret = Path(self.tmp.name) / "host-only.txt"  # outside every path the agent may read
@@ -1956,12 +2120,14 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertEqual(self.audits()[-1]["status"], "incomplete")
                 self.assertIn("not a regular file of its own", self.audits()[-1]["detail"])
-                self.assertNotIn("gh issue", self.calls_log())
+                self.assertNotIn("gh issue create", self.calls_log())
+                self.assertNotIn("gh issue comment", self.calls_log())
                 self.assertEqual(len(self.journal()), 1)  # only the baseline
 
     def test_only_a_findings_line_that_names_its_issue_moves_the_baseline(self):
         sha = self.git(self.origin, "rev-parse", "dev")
         for message, moves in ((f"findings churn at {sha} (issue #3)", True), (f"findings churn at {sha}", False),
+                               (f"findings churn at {sha} (issues #3, #4)", True), (f"findings churn at {sha} (issues #3)", False),
                                (f"findings churn at {sha} (issue #3) and more", False), (f"findings full at {sha} (issue #3)", False),
                                (f"findings churn at {sha} (issue #0)", False), (f"blocked churn at {sha} (issue #3)", False)):
             with self.subTest(message):
