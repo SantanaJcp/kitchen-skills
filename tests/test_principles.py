@@ -27,6 +27,9 @@ NAME = re.compile(r"`([a-z][a-z-]*)`")
 
 
 CHEF_MODE = REPO / "skills" / "chef-mode" / "SKILL.md"
+OWNER_TYPED = {
+    "wait-what": "the owner types it when a reply did not land; no request routes to it",
+}
 
 
 def declared(path: Path) -> list[str]:
@@ -73,6 +76,15 @@ class Principles(unittest.TestCase):
     def test_chef_mode_alone_vouches_for_no_principle(self):
         # regression: while chef-mode counted as a control, the check below could never fail (audit, 2026-10-26)
         self.assertEqual(enforced_by_a_control([CHEF_MODE]), set())
+
+    def test_chef_mode_routes_every_skill(self):
+        # every kitchen skill is manual-only: one that no playbook row names is reached only if the owner remembers it
+        section = CHEF_MODE.read_text(encoding="utf-8").split("## Playbooks", 1)[1].split("\n## ", 1)[0]
+        routed = {name for row in section.splitlines() if row.startswith("|")
+                  for name in NAME.findall(row.rstrip(" |").rsplit("|", 1)[-1])}
+        skills = {p.parent.name for p in REPO.glob("skills/*/SKILL.md")} - {"chef-mode"}
+        self.assertEqual(sorted(skills - routed - set(OWNER_TYPED)), [], "add a row to chef-mode's playbook table")
+        self.assertEqual(sorted(set(OWNER_TYPED) - skills), [], "drop a gone skill from OWNER_TYPED")
 
     def test_chef_mode_reads_this_principles_file(self):
         link = REPO / "skills" / "chef-mode" / "PRINCIPLES.md"

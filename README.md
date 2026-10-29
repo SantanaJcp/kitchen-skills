@@ -105,6 +105,7 @@ Every skill is manual: `/name` in Claude Code, `$name` in Codex, or read by chef
 | `find-the-cause` | Something is broken and the cause is unknown |
 | `second-opinion` | Before merging: cross-model review with triaged findings |
 | `handoff` | Passing work to another agent, tool or session |
+| `catch-me-up` | "Qué pasó": what happened since your last message, and what waits on you |
 | `retro` | Weekly: turn repeated corrections into environment fixes |
 | `wait-what` | The last answer did not land |
 | `audit-verification` | Periodically: prove a project's verify skill still tells the truth |
