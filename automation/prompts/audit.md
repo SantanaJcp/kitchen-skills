@@ -11,7 +11,7 @@ Follow the audit-verification skill (its file is in the run facts) as a **churn*
 
 Outputs, all in the work dir:
 
-1. The report file: the skill's Reply, in Markdown. It is the evidence the owner reads; label each claim measured, inferred or cited.
+1. The report file: the skill's Reply, in Markdown. It is the evidence the owner reads; label each claim measured, inferred or cited. For `findings`, put every finding in one `## Findings` section, each under its own `### <key>: <title>` heading followed by its evidence, and nothing else in that section (inside a finding, only headings of level 4 or deeper); the job files each one in its own GitHub issue, keyed by `<key>`. The key is kebab-case (lowercase letters, digits, hyphens; at most 60 characters) and names the feature and the gap, such as `readers-no-assertion`. When the open findings issues in the run facts list the same finding, reuse its key exactly; a new finding gets a new key. Keep the finding's text free of the SHA, run id and date: the job adds those, and comments on an open issue only when the text changes. Put fixes you shipped on the branch outside that section.
 2. The outcome file: exactly one word, `clean`, `changed`, `findings`, `blocked` or `skipped` (`skipped`: nothing in the churn touches a feature or the map).
 3. Only for `changed`, or `findings` with doc fixes: one branch named as the run facts say, created from your current HEAD, with your commits, and the PR summary file (first line: the PR title; then what drifted, what you fixed and how you checked it).
 

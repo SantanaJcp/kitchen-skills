@@ -7,9 +7,9 @@ journal, and the journal entry for the pass (bin/daily-audit).
   audit_state.py baseline <project>
       the next churn pass's baseline, one per line: its sha and its journal line. It is the newest `audit-verification`
       entry of the last 30 days whose outcome moves it (clean, clean (churn), changed, skipped, or exactly
-      `audit-verification findings churn at <sha> (issue #N)`: a sealed pass whose findings landed in the findings
-      issue), as the audit-verification skill reads it from `kitchen status --json`; exit 3, saying why, when there
-      is none
+      `audit-verification findings churn at <sha> (issue #N)` or `(issues #N, #M)`: a sealed pass whose every
+      finding landed in its own findings issue), as the audit-verification skill reads it from `kitchen status
+      --json`; exit 3, saying why, when there is none
   audit_state.py log <project> <branch> <sha> <run-id> <status> <message>
       appends the pass's entry to the journal on the project's behalf
 
@@ -29,7 +29,8 @@ from kitchen.common import git_common_dir, git_out, now, parse_since, projects  
 
 ENTRY = re.compile(r"^audit-verification (clean \(churn\)|clean|changed|findings|blocked|skipped) (full|churn) at ([0-9a-f]{40})\b")
 MOVES_BASELINE = ("clean", "clean (churn)", "changed", "skipped")
-FILED_FINDINGS = re.compile(r"audit-verification findings churn at ([0-9a-f]{40}) \(issue #[1-9][0-9]*\)")
+ISSUE = r"#[1-9][0-9]*"
+FILED_FINDINGS = re.compile(rf"audit-verification findings churn at ([0-9a-f]{{40}}) \((?:issue {ISSUE}|issues {ISSUE}(?:, {ISSUE})+)\)")
 WINDOW = "30d"
 
 
