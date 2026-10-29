@@ -6,10 +6,12 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from tests.test_hooks import Session, numbered
 from tests.test_kitchen import KITCHEN, KitchenFixture
 
 ROOT = KITCHEN.parent.parent
 GUARDS = ["deny-no-verify", "deny-recursive-rm", "deny-shared-push"]
+AFTER_COMPACT = "chef-mode-after-compact"
 PUSH = {"tool_name": "Bash", "hook_event_name": "PreToolUse", "tool_input": {"command": "git push origin HEAD:main"}}
 PROBES = {"deny-shared-push": "git push origin HEAD:main", "deny-no-verify": "git commit --no-verify -m x",
           "deny-recursive-rm": "rm -rf /kitchen-probe"}
@@ -24,8 +26,8 @@ class GuardsFixture(KitchenFixture):
         self.claude = self.project / ".claude" / "settings.json"
         self.codex = self.project / ".codex" / "hooks.json"
 
-    def handlers(self, path):
-        return [h for g in json.loads(path.read_text())["hooks"]["PreToolUse"] for h in g["hooks"]]
+    def handlers(self, path, event="PreToolUse"):
+        return [h for g in json.loads(path.read_text())["hooks"][event] for h in g["hooks"]]
 
     def run_handler(self, handler, cwd, env_extra=None, command=None):
         payload = json.dumps({**PUSH, "cwd": str(cwd), **({"tool_input": {"command": command}} if command else {})})
@@ -121,6 +123,70 @@ class GuardsTests(GuardsFixture):
         result = self.run_handler(handler, self.project, {"CLAUDE_PROJECT_DIR": str(self.project)})
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_guards_runs_the_after_compact_hook_on_each_tools_compaction_event(self):
+        result = self.kitchen("guards", str(self.project))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        copy = self.project / ".kitchen" / "hooks" / AFTER_COMPACT
+        self.assertEqual(copy.read_bytes(), (ROOT / "hooks" / AFTER_COMPACT).read_bytes())
+        self.assertTrue(os.access(copy, os.X_OK))
+        for path, matcher in ((self.claude, "compact"), (self.codex, "^compact$")):
+            with self.subTest(tool=path.name):
+                groups = json.loads(path.read_text())["hooks"]["SessionStart"]
+                self.assertEqual([g["matcher"] for g in groups], [matcher])
+                self.assertEqual([h["command"].count(f"/.kitchen/hooks/{AFTER_COMPACT}") for h in groups[0]["hooks"]], [1])
+                self.assertFalse(any(AFTER_COMPACT in h["command"] for h in self.handlers(path)), "it guards no Bash call")
+
+    def test_the_installed_after_compact_handler_sends_a_chef_mode_session_back_to_its_skill(self):
+        self.kitchen("guards", str(self.project))
+        skill = self.home / ".claude" / "skills" / "chef-mode" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text((ROOT / "skills" / "chef-mode" / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
+        loaded = Session(self.project).tool("toolu_1", "Read", {"file_path": str(skill)}, numbered(skill.read_text(encoding="utf-8")))
+        plain = Session(self.project).user("Fix the login bug.")
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+
+        for path, extra in ((self.claude, {"CLAUDE_PROJECT_DIR": str(self.project)}), (self.codex, {})):
+            for label, session in (("loaded", loaded), ("plain", plain)):
+                with self.subTest(tool=path.name, session=label):
+                    event = json.dumps({"hook_event_name": "SessionStart", "source": "compact", "cwd": str(self.project),
+                                        "transcript_path": str(session.write(self.home / f"{label}.jsonl"))})
+                    handler, = self.handlers(path, "SessionStart")
+                    result = subprocess.run(["/bin/sh", "-c", handler["command"]], input=event, capture_output=True,
+                                            text=True, cwd=self.project, env={**env, "HOME": str(self.home), **extra})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if label == "plain":
+                        self.assertEqual(result.stdout, "")
+                    else:
+                        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+                        self.assertTrue(context.startswith(f"Chef mode is still on in this session. The compaction dropped it: read `{skill}`"))
+                        self.assertIn("\n- `prove`, prove it on the real thing", context)
+
+    def test_guards_keeps_a_projects_own_session_start_hook_and_reruns_byte_identical(self):
+        mine = {"type": "command", "command": "./scripts/session-notes.sh"}
+        self.claude.parent.mkdir(parents=True)
+        self.claude.write_text(json.dumps({"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [mine]}]}}))
+        self.kitchen("guards", str(self.project))
+        first = {path: path.read_bytes() for path in (self.claude, self.codex)}
+
+        again = self.kitchen("guards", str(self.project))
+
+        self.assertEqual({path: path.read_bytes() for path in first}, first)
+        self.assertIn("(already current)", again.stdout)
+        groups = json.loads(self.claude.read_text())["hooks"]["SessionStart"]
+        self.assertEqual(groups[0], {"matcher": "startup", "hooks": [mine]})
+        self.assertEqual([g["matcher"] for g in groups], ["startup", "compact"])
+
+    def test_guards_refuses_a_session_start_it_cannot_merge(self):
+        self.claude.parent.mkdir(parents=True)
+        self.claude.write_text(json.dumps({"hooks": {"SessionStart": {"compact": "not a list"}}}))
+
+        result = self.kitchen("guards", str(self.project))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not have the shape hooks.SessionStart[]", result.stderr)
+        self.assertFalse((self.project / ".kitchen").exists())
 
     def test_guards_keeps_the_projects_settings_and_hooks_and_replaces_only_its_own(self):
         mine = {"type": "command", "command": "./scripts/lint-hook.sh"}

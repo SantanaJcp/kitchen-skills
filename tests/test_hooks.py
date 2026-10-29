@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / "hooks"
 CORPUS = json.loads((Path(__file__).resolve().parent / "corpus" / "hooks" / "cases.json").read_text(encoding="utf-8"))
 GUARDS = ("deny-no-verify", "deny-shared-push", "deny-recursive-rm")
+AFTER_COMPACT = "chef-mode-after-compact"  # blocks nothing, so it has no attack corpus: AfterCompactTests below
+CHEF_MODE = ROOT / "skills" / "chef-mode" / "SKILL.md"
 # Each block names its way out: what to do instead.
 ADVICE = {"deny-no-verify": "Run it without", "deny-shared-push": "Push your own branch", "deny-recursive-rm": "trash "}
 GIT_ID = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test", "GIT_COMMITTER_NAME": "t",
@@ -90,6 +92,10 @@ class HookCorpusTests(HookFixture):
             self.assertEqual(case["expect"], expected, case["id"])
             if case["kind"] == "known-limit":
                 self.assertTrue(case.get("limit"), f"{case['id']}: a known limit says why the guard misses it")
+
+    def test_every_hook_is_a_guard_in_the_corpus_or_the_after_compact_hook(self):
+        hooks = {p.name for p in HOOKS.iterdir() if p.is_file() and "." not in p.name and os.access(p, os.X_OK)}
+        self.assertEqual(hooks, {*GUARDS, AFTER_COMPACT}, "a new guard goes in GUARDS and gets corpus cases")
 
     def test_corpus(self):
         for case in CORPUS["cases"]:
@@ -208,6 +214,226 @@ class HookPayloadTests(HookFixture):
                 nested = self.run_guard(guard, "[" * 100000 + "]" * 100000, python="/usr/bin/python3")
                 self.assertEqual(nested.returncode, 2, nested.stderr)
                 self.assertIn("cannot read the hook input", nested.stderr)
+
+
+def numbered(text):
+    """A file as Claude Code's Read tool returns it: each line behind its number and a tab."""
+    return "".join(f"{n:>6}\t{line}\n" for n, line in enumerate(text.splitlines(), 1))
+
+
+class Session:
+    """A transcript in the shapes Claude Code 2.1.312 and Codex 0.165 write (copied from real sessions, trimmed)."""
+
+    def __init__(self, cwd):
+        self.cwd, self.lines = str(cwd), [{"type": "attachment", "attachment": {"type": "date", "date": "2026-10-29"}}]
+
+    def user(self, content, **extra):
+        self.lines.append({"type": "user", "isSidechain": False, "cwd": self.cwd, **extra,
+                           "message": {"role": "user", "content": content}})
+        return self
+
+    def tool(self, tool_id, name, tool_input, result, **extra):
+        self.lines.append({"type": "assistant", "isSidechain": False, "cwd": self.cwd, **extra, "message": {
+            "role": "assistant", "content": [{"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}]}})
+        return self.user([{"type": "tool_result", "tool_use_id": tool_id, "content": result}], **extra)
+
+    def slash(self, folder, body):
+        self.user("<command-message>chef-mode</command-message>\n<command-name>/chef-mode</command-name>\n<command-args>go</command-args>")
+        return self.user([{"type": "text", "text": f"Base directory for this skill: {folder}\n\n{body}"}], isMeta=True)
+
+    def compacted(self):
+        self.lines.append({"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted"})
+        return self.user("Summary:\n1. Primary Request and Intent: the owner asked for X in chef mode.", isCompactSummary=True)
+
+    def codex(self, kind, payload):
+        self.lines.append({"timestamp": "2026-10-29T21:35:20.926Z", "type": kind, "payload": payload})
+        return self
+
+    def write(self, path):
+        path.write_text("".join(json.dumps(line) + "\n" for line in self.lines), encoding="utf-8")
+        return path
+
+
+class AfterCompactTests(HookFixture):
+    """chef-mode-after-compact reads the session's transcript on SessionStart `compact`, the way Claude Code and Codex
+    run it: the event as JSON on stdin. Loaded: one JSON object whose additionalContext sends the agent back to SKILL.md
+    with the index. Not loaded: no output. The skill is a copy of the real SKILL.md, so the markers the hook looks for
+    are the ones chef-mode carries today."""
+
+    def setUp(self):
+        super().setUp()
+        self.text = CHEF_MODE.read_text(encoding="utf-8")
+        self.body = self.text.split("\n---\n", 1)[1].lstrip("\n")
+        self.folder = self.home / ".claude" / "skills" / "chef-mode"
+        self.folder.mkdir(parents=True)
+        self.skill = self.folder / "SKILL.md"
+        self.skill.write_text(self.text, encoding="utf-8")
+        self.project = self.home / "project"
+        self.project.mkdir()
+        self.session = Session(self.project).user("Fix the login bug. Before any work, read the chef-mode skill's "
+                                                  "SKILL.md in full (`~/.claude/skills/chef-mode/SKILL.md`) and follow it.")
+
+    def run_hook(self, session=None, payload=None, python=None):
+        transcript = (session or self.session).compacted().write(self.home / "session.jsonl")
+        event = payload if payload is not None else json.dumps({
+            "session_id": "s", "transcript_path": str(transcript), "cwd": str(self.project),
+            "hook_event_name": "SessionStart", "source": "compact"})
+        return self.run_guard(AFTER_COMPACT, event, python=python)
+
+    def context(self, result):
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        output = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "SessionStart")
+        return output["additionalContext"]
+
+    def assert_sends_back(self, result, path):
+        context = self.context(result)
+        self.assertTrue(context.startswith(f"Chef mode is still on in this session. The compaction dropped it: read `{path}` "
+                                           "in full before your next action."), context[:300])
+        self.assertIn("\n## Principles\n\n[PRINCIPLES.md](PRINCIPLES.md) is the why behind every rule below", context)
+        self.assertIn("\n- `prove`, prove it on the real thing: before you claim anything is done, fixed or safe.\n", context)
+        self.assertIn("  - [experience-first](principles/experience-first.md): product, UX or scope tradeoffs.", context)
+        self.assertNotIn("## Playbooks", context)
+        # over 10,000 characters Claude Code moves the text to a file and shows a 2,000-character preview (hooks docs)
+        self.assertLess(len(context), 10_000)
+        return context
+
+    def test_a_session_without_chef_mode_gets_nothing(self):
+        session = self.session.tool("toolu_1", "Bash", {"command": "ls skills/chef-mode"}, "SKILL.md\nplaybooks\n")
+        session.tool("toolu_2", "Grep", {"pattern": "chef-mode", "path": str(self.folder)}, "SKILL.md:2:name: chef-mode")
+        result = self.run_hook(session)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_a_slash_command_load_is_sent_back_to_its_skill_file(self):
+        self.assert_sends_back(self.run_hook(self.session.slash(self.folder, self.body)), self.skill)
+
+    def test_a_skill_tool_load_is_sent_back_to_its_skill_file(self):
+        session = self.session.tool("toolu_1", "Skill", {"skill": "chef-mode"}, "Launching skill: chef-mode")
+        session.user([{"type": "text", "text": f"Base directory for this skill: {self.folder}\n\n{self.body}"}],
+                     isMeta=True, sourceToolUseID="toolu_1")
+        self.assert_sends_back(self.run_hook(session), self.skill)
+
+    def test_a_read_load_is_sent_back_to_the_file_it_read(self):
+        session = self.session.tool("toolu_1", "Read", {"file_path": str(self.skill)}, numbered(self.text))
+        self.assert_sends_back(self.run_hook(session), self.skill)
+
+    def test_a_shell_read_of_the_skill_is_sent_back_to_the_path_in_the_command(self):
+        session = self.session.tool("toolu_1", "Bash", {"command": "cat ~/.claude/skills/chef-mode/SKILL.md; ls ~/.claude/skills",
+                                                        "description": "Read chef-mode"}, self.text)
+        self.assert_sends_back(self.run_hook(session), self.skill)
+
+    def test_a_relative_path_resolves_from_the_directory_the_call_ran_in(self):
+        session = Session(self.home).user("go").tool("toolu_1", "Bash", {"command": "sed -n 1,200p .claude/skills/chef-mode/SKILL.md"},
+                                                     self.text)
+        self.assert_sends_back(self.run_hook(session), self.skill)
+
+    def test_the_last_skill_file_read_is_the_one_named(self):
+        other = self.home / "worktree" / "skills" / "chef-mode"
+        other.mkdir(parents=True)
+        (other / "SKILL.md").write_text(self.text, encoding="utf-8")
+        session = self.session.slash(self.folder, self.body).tool("toolu_1", "Read", {"file_path": str(other / "SKILL.md")},
+                                                                  numbered(self.text))
+        self.assert_sends_back(self.run_hook(session), other / "SKILL.md")
+
+    def test_a_brief_that_only_names_the_skill_or_a_subagent_that_loads_it_is_no_load(self):
+        session = self.session.tool("toolu_1", "Agent", {"prompt": "Read ~/.claude/skills/chef-mode/SKILL.md, then work."}, "done")
+        session.tool("toolu_2", "Read", {"file_path": str(self.skill)}, numbered(self.text), isSidechain=True)
+        result = self.run_hook(session)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_the_index_is_read_from_the_file_when_the_hook_runs(self):
+        session = self.session.tool("toolu_1", "Read", {"file_path": str(self.skill)}, numbered(self.text))
+        self.skill.write_text(self.text.replace("- `prove`, prove it on the real thing", "- `prove`, edited after the load"),
+                              encoding="utf-8")
+        self.assertIn("- `prove`, edited after the load", self.context(self.run_hook(session)))
+
+    def test_a_skill_file_that_is_gone_is_said_loudly(self):
+        session = self.session.tool("toolu_1", "Read", {"file_path": str(self.skill)}, numbered(self.text))
+        self.skill.unlink()
+        context = self.context(self.run_hook(session))
+        self.assertTrue(context.startswith(f"Chef mode is still on in this session. The compaction dropped it, and its skill "
+                                           f"file `{self.skill}` cannot be read"), context)
+        self.assertIn("Tell the owner", context)
+
+    def test_a_load_whose_path_the_transcript_does_not_name_is_said_loudly(self):
+        # a Codex call with a relative path and no directory recorded for it
+        session = Session(self.project).codex("response_item", {
+            "type": "function_call", "call_id": "call_1", "name": "exec_command",
+            "arguments": json.dumps({"cmd": "cat .claude/skills/chef-mode/SKILL.md"})})
+        session.codex("response_item", {"type": "function_call_output", "call_id": "call_1", "output": self.text})
+        context = self.context(self.run_hook(session))
+        self.assertIn("the transcript does not say which chef-mode SKILL.md was read", context)
+
+    def test_reading_this_hooks_source_is_no_load(self):
+        source = (HOOKS / AFTER_COMPACT).read_text(encoding="utf-8")
+        session = self.session.tool("toolu_1", "Bash", {"command": "cat .kitchen/hooks/chef-mode-after-compact"}, source)
+        session.tool("toolu_2", "Bash", {"command": 'cat "$SKILL"'}, self.text)
+        result = self.run_hook(session)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_a_prompt_that_quotes_the_load_formats_is_no_load(self):
+        quoted = ("Review this test. It writes <command-message>chef-mode</command-message>\n<command-name>/chef-mode</command-name>,"
+                  f"\nBase directory for this skill: {self.folder}\nand <skill>\n<name>chef-mode</name>\n<path>{self.skill}</path>")
+        session = self.session.user(quoted).user([{"type": "text", "text": quoted}])
+        session.codex("response_item", {"type": "message", "role": "user", "content": [{"type": "input_text", "text": quoted}]})
+        result = self.run_hook(session)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_an_index_too_long_to_inject_is_said_instead_of_cut(self):
+        long = self.text.replace("## Playbooks", "- `padding`, " + "x" * 12_000 + "\n\n## Playbooks", 1)
+        self.skill.write_text(long, encoding="utf-8")
+        context = self.context(self.run_hook(self.session.slash(self.folder, self.body)))
+        self.assertLess(len(context), 10_000)
+        self.assertIn(f"read `{self.skill}` in full before your next action", context)
+        self.assertIn("too long to hand back here", context)
+        self.assertNotIn("xxxx", context)
+
+    def test_a_codex_skill_load_is_sent_back_to_its_skill_file(self):
+        session = Session(self.project).codex("response_item", {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": f"<skill>\n<name>chef-mode</name>\n<path>{self.skill}</path>\n{self.text}\n</skill>"}]})
+        self.assert_sends_back(self.run_hook(session), self.skill)
+
+    def test_a_codex_shell_read_is_sent_back_to_the_path_in_the_command(self):
+        session = Session(self.project).codex("event_msg", {"type": "item_completed", "item": {
+            "type": "CommandExecution", "command": ["/usr/bin/bash", "-lc", "nl -ba .claude/skills/chef-mode/SKILL.md"],
+            "cwd": f"file://{self.home}", "aggregated_output": numbered(self.text)}})
+        self.assert_sends_back(self.run_hook(session), self.skill)
+
+    def test_a_codex_function_call_read_is_sent_back_to_the_path_in_its_arguments(self):
+        session = Session(self.project).codex("response_item", {
+            "type": "function_call", "call_id": "call_1", "name": "exec_command",
+            "arguments": json.dumps({"cmd": f"cat {self.skill}"})})
+        session.codex("response_item", {"type": "function_call_output", "call_id": "call_1", "output": self.text})
+        self.assert_sends_back(self.run_hook(session), self.skill)
+
+    def test_unreadable_input_or_transcript_fails_with_exit_2(self):
+        """On SessionStart exit 2 blocks nothing: Claude Code shows the reason to the person as a hook error."""
+        missing = json.dumps({"transcript_path": str(self.home / "missing.jsonl"), "hook_event_name": "SessionStart"})
+        cases = {"not json": "{oops", "a list": "[]", "no transcript": "{}", "null transcript": '{"transcript_path": null}',
+                 "deeply nested": "[" * 100000 + "]" * 100000, "missing transcript": missing}
+        for label, data in cases.items():
+            with self.subTest(input=label):
+                result = self.run_hook(payload=data)
+                self.assertEqual((result.returncode, result.stdout), (2, ""))
+                self.assertIn("Kitchen hook chef-mode-after-compact: cannot read the", result.stderr)
+
+    def test_a_broken_line_fails_only_when_no_other_line_shows_a_load(self):
+        transcript = self.session.compacted().write(self.home / "session.jsonl")
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write('{"type": "user", "message": {"content": "<command-name>/chef-mode</command-name>\n')
+        event = json.dumps({"transcript_path": str(transcript), "hook_event_name": "SessionStart", "source": "compact"})
+        broken = self.run_guard(AFTER_COMPACT, event)
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(Session(self.project).tool("toolu_1", "Read", {"file_path": str(self.skill)}, numbered(self.text)).lines[-2]) + "\n")
+        loaded = self.run_guard(AFTER_COMPACT, event)
+        self.assertEqual(broken.returncode, 2)
+        self.assertIn("are not JSON", broken.stderr)
+        self.assert_sends_back(loaded, self.skill)
+
+    @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system python3")
+    def test_it_runs_on_the_system_python(self):
+        session = self.session.tool("toolu_1", "Read", {"file_path": str(self.skill)}, numbered(self.text))
+        self.assert_sends_back(self.run_hook(session, python="/usr/bin/python3"), self.skill)
 
 
 if __name__ == "__main__":

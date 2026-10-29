@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""SessionStart `compact` hook: after a compaction in a session that loaded chef-mode, say chef mode is still on, send the
+agent back to its SKILL.md and hand back the `## Principles` index, read from that file now.
+
+A compaction drops chef-mode (measured with Claude Code 2.1.312, across processes), and most loads are a worker reading
+SKILL.md, which no skill hook sees. So this hook reads the session's transcript. Loaded means any of: a `/chef-mode`
+command, a skill expansion from a `chef-mode` folder, a Codex `<skill>` block named chef-mode (each where the tool puts
+it, at the start of a message, so a prompt that quotes one is no load), a Read of a path ending in chef-mode/SKILL.md, or
+a tool call that names such a path and returns chef-mode's text. Not loaded: no output. A transcript or input it
+cannot read: exit 2 with the reason on stderr, the rule every kitchen hook follows; on SessionStart that blocks nothing,
+and Claude Code shows it to the person as a hook error.
+Principles: `handoff` (the agent after a compaction is the next agent), `no-fallbacks` (a gone file or an unreadable
+transcript is said, never skipped)."""
+import json
+import os
+import re
+import sys
+from urllib.parse import unquote
+
+sys.dont_write_bytecode = True
+
+HOOK = "chef-mode-after-compact"
+LIMIT = 10_000  # Claude Code moves longer additionalContext to a file and shows a 2,000-character preview (hooks docs)
+# chef-mode's first lines; tests/test_hooks.py feeds the real SKILL.md, so an edit that drops one fails there
+MARKERS = ("# chef-mode", "You are working in the owner's kitchen.")
+# Claude Code writes `<command-message>` first for a skill and `<command-name>` first for a built-in command
+SLASH = re.compile(r"\s*(?:<command-message>chef-mode</command-message>\s*)?<command-name>/chef-mode</command-name>")
+BASE_DIR = re.compile(r"Base directory for this skill: (.+)")
+CODEX_SKILL = re.compile(r"\s*<skill>\s*<name>chef-mode</name>\s*<path>([^<\n]+)</path>")
+PATH_WORD = re.compile(r"""(?<![^\s'"`=(])((?:~|\$HOME|\$\{HOME\})?[^\s'"`;|&<>()$:]*chef-mode/SKILL\.md)(?![\w.-])""")
+INDEX = re.compile(r"^## Principles\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+CALLS = ("function_call", "custom_tool_call")
+OUTPUTS = ("function_call_output", "custom_tool_call_output")
+
+
+def strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+
+
+def carries(value):
+    text = "\n".join(strings(value))
+    return all(marker in text for marker in MARKERS)
+
+
+def resolve(word, cwd):
+    """The absolute path a word in a tool call names, or None when it depends on something the transcript lacks."""
+    if not isinstance(word, str) or not word:
+        return None
+    if word.startswith("file://"):
+        word = unquote(word[len("file://"):])
+    for prefix in ("~", "$HOME", "${HOME}"):
+        if word == prefix or word.startswith(prefix + "/"):
+            word = os.path.expanduser("~") + word[len(prefix):]
+    if not os.path.isabs(word):
+        cwd = resolve(cwd, None) if isinstance(cwd, str) and cwd else None
+        if not cwd:
+            return None
+        word = os.path.join(cwd, word)
+    return os.path.normpath(word)
+
+
+def named_paths(call):
+    """The chef-mode/SKILL.md paths a tool call names, each resolved from the cwd it ran in or None."""
+    value, cwd = call or (None, None)
+    return [resolve(word, cwd) for text in strings(value) for word in PATH_WORD.findall(text)]
+
+
+def returned(call, result):
+    """(loaded, path): a call that names a chef-mode/SKILL.md and returns chef-mode's text. Text alone is no load: the
+    markers also sit in this hook's source and its tests."""
+    paths = named_paths(call)
+    return bool(paths) and carries(result), next((p for p in paths if p), None)
+
+
+class Transcript:
+    def __init__(self):
+        self.loaded, self.path, self.calls = False, None, {}
+
+    def load(self, path):
+        self.loaded = True
+        self.path = path or self.path
+
+    def user_text(self, text):
+        if not isinstance(text, str):
+            return
+        if SLASH.match(text):
+            self.load(None)  # the expansion that follows names the folder
+        folder, skill = BASE_DIR.match(text), CODEX_SKILL.match(text)
+        if folder and os.path.basename(folder.group(1).rstrip("/")) == "chef-mode":
+            self.load(resolve(folder.group(1).rstrip("/") + "/SKILL.md", None))
+        if skill:
+            self.load(resolve(skill.group(1).strip(), None))
+
+    def returns(self, call, result):
+        loaded, path = returned(call, result)
+        if loaded:
+            self.load(path)
+
+    def read(self, entry):
+        kind, cwd = entry.get("type"), entry.get("cwd")
+        message, payload = entry.get("message"), entry.get("payload")
+        if kind in ("user", "assistant") and isinstance(message, dict) and not entry.get("isSidechain"):  # Claude Code
+            content = message.get("content")
+            for block in [{"type": "text", "text": content}] if isinstance(content, str) else content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and kind == "user":
+                    self.user_text(block.get("text"))
+                elif block.get("type") == "tool_use":
+                    tool_input = block.get("input")
+                    self.calls[block.get("id")] = (tool_input, cwd)
+                    path = tool_input.get("file_path") if isinstance(tool_input, dict) and block.get("name") == "Read" else None
+                    if isinstance(path, str) and path.endswith("chef-mode/SKILL.md"):
+                        self.load(resolve(path, cwd))
+                elif block.get("type") == "tool_result":
+                    self.returns(self.calls.get(block.get("tool_use_id")), block.get("content"))
+        elif kind == "response_item" and isinstance(payload, dict):  # Codex
+            if payload.get("type") == "message" and payload.get("role") == "user":
+                for text in strings(payload.get("content")):
+                    self.user_text(text)
+            elif payload.get("type") in CALLS:
+                self.calls[payload.get("call_id")] = (payload.get("arguments", payload.get("input")), None)
+            elif payload.get("type") in OUTPUTS:
+                self.returns(self.calls.get(payload.get("call_id")), payload.get("output"))
+        elif kind == "event_msg" and isinstance(payload, dict) and isinstance(payload.get("item"), dict):  # Codex
+            item = payload["item"]
+            if item.get("type") == "CommandExecution":
+                self.returns((item.get("command"), item.get("cwd")), item.get("aggregated_output"))
+
+
+def scan(path):
+    """(loaded, SKILL.md path or None, unreadable line numbers). Only lines that name chef-mode are parsed: every load
+    above needs those bytes, so a line without them cannot hide one, broken or not."""
+    transcript, unreadable = Transcript(), []
+    with open(path, "rb") as handle:
+        for number, raw in enumerate(handle, 1):
+            if b"chef-mode" not in raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except (ValueError, RecursionError):
+                unreadable.append(number)
+                continue
+            if isinstance(entry, dict):
+                transcript.read(entry)
+    return transcript.loaded, transcript.path, unreadable
+
+
+def context(path):
+    if path is None:
+        return ("Chef mode is still on in this session. The compaction dropped it, and the transcript does not say which "
+                "chef-mode SKILL.md was read: find it (`~/.claude/skills/chef-mode/SKILL.md` in Claude Code, "
+                "`~/.agents/skills/chef-mode/SKILL.md` in Codex) and read it in full before your next action.\n")
+    head = f"Chef mode is still on in this session. The compaction dropped it: read `{path}` in full before your next action."
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError) as error:
+        return (f"Chef mode is still on in this session. The compaction dropped it, and its skill file `{path}` cannot be "
+                f"read ({error}). Tell the owner, find chef-mode's SKILL.md and read it in full before your next action.\n")
+    index = INDEX.search(text)
+    if index is None:
+        return head + f"\n\n`{path}` has no `## Principles` section to hand back here: tell the owner.\n"
+    links = f" Links in the index below are relative to `{os.path.dirname(path)}`."
+    full = head + links + "\n\n" + index.group(0).rstrip() + "\n"
+    if len(full) < LIMIT:
+        return full
+    return head + f"\n\nIts `## Principles` index is {len(index.group(0))} characters, too long to hand back here: read it there.\n"
+
+
+def fail(reason):
+    sys.stderr.write(f"Kitchen hook {HOOK}: {reason}. Chef mode may have been on before this compaction; "
+                     "if it was, read chef-mode's SKILL.md again.\n")
+    sys.exit(2)
+
+
+def main():
+    try:
+        event = json.loads(sys.stdin.read())
+        transcript = event["transcript_path"]
+        if not isinstance(transcript, str) or not transcript:
+            raise ValueError("transcript_path is not a path")
+    except Exception as error:  # noqa: BLE001 - any unreadable input is reported, never passed silently
+        fail(f"cannot read the hook input ({type(error).__name__}: {error})")
+    try:
+        loaded, path, unreadable = scan(transcript)
+    except OSError as error:
+        fail(f"cannot read the transcript {transcript} ({error})")
+    if not loaded:
+        if unreadable:
+            fail(f"cannot read the transcript {transcript} (lines {', '.join(map(str, unreadable[:5]))} are not JSON)")
+        return
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context(path)}}))
+
+
+if __name__ == "__main__":
+    main()
