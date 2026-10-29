@@ -4,7 +4,11 @@ A control is a guard, a scheduled job, a CLI module or a skill. They are found b
 globbing, so a new one is held to this suite the moment it lands; a helper that enforces nothing is excused by name
 in NOT_CONTROLS, with the reason.
 """
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -18,6 +22,7 @@ NOT_CONTROLS = {
     "lib/kitchen/environment.py": "tool and schedule probes that doctor prints",
     "lib/kitchen/inventory.py": "lists what the agents can see",
     "lib/kitchen/notify.py": "sends a local notification for the controls that decide to",
+    "lib/kitchen/principles.py": "prints a principle for an agent to read; it decides nothing",
 }
 CANDIDATES = [REPO / "bin" / "kitchen", *REPO.glob(".github/workflows/*.yml"), *REPO.glob("hooks/*"), *REPO.glob("skills/*/SKILL.md"), *REPO.glob("automation/bin/*"), *REPO.glob("lib/kitchen/*.py")]
 CONTROLS = sorted(p for p in CANDIDATES if p.is_file() and p.name != "README.md" and str(p.relative_to(REPO)) not in NOT_CONTROLS)
@@ -30,6 +35,14 @@ CHEF_MODE = REPO / "skills" / "chef-mode" / "SKILL.md"
 OWNER_TYPED = {
     "wait-what": "the owner types it when a reply did not land; no request routes to it",
 }
+LEAVES = REPO / "principles"
+LEAF_LINK = re.compile(r"\]\(principles/([a-z0-9-]+)\.md\)")
+PARENT = re.compile(r"^- \*\*Parent:\*\* `([a-z-]+)`", re.MULTILINE)
+WHEN = re.compile(r"^- \*\*When:\*\* \S", re.MULTILINE)
+RELATIVE_LINK = re.compile(r"\]\((?!https?:)([^)#\s]+)")
+# Claude Code's docs say it re-attaches an invoked skill's first 5,000 tokens after compaction (not observed with a headless
+# /compact, 2026-10-29); the index stays inside that budget either way
+CHEF_MODE_MAX_LINES, CHEF_MODE_MAX_BYTES = 140, 18_000
 
 
 def declared(path: Path) -> list[str]:
@@ -40,6 +53,18 @@ def declared(path: Path) -> list[str]:
 def enforced_by_a_control(controls) -> set[str]:
     """chef-mode names every principle to switch them on; it enforces none, so it cannot vouch for one."""
     return {n for path in controls if path != CHEF_MODE for n in declared(path)}
+
+
+def principle_sections() -> dict[str, str]:
+    text = (REPO / "PRINCIPLES.md").read_text(encoding="utf-8")
+    return dict(zip(HEADING.findall(text), re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]))
+
+
+def chef_mode_index() -> str:
+    """chef-mode's `## Principles` section, or "" when it has none."""
+    text = CHEF_MODE.read_text(encoding="utf-8")
+    match = re.search(r"^## Principles\n(.*?)(?=^## )", text, re.MULTILINE | re.DOTALL)
+    return match.group(1) if match else ""
 
 
 class Principles(unittest.TestCase):
@@ -91,6 +116,55 @@ class Principles(unittest.TestCase):
         self.assertTrue(link.is_symlink(), "a copy would drift: link it to the repo's PRINCIPLES.md")
         self.assertEqual(link.resolve(), (REPO / "PRINCIPLES.md").resolve())
 
+    def test_every_pstack_principle_has_a_leaf_linked_from_principles_md_and_chef_mode(self):
+        files = {p.stem for p in LEAVES.glob("*.md")}
+        self.assertEqual(len(files), 24, "each of pstack's 24 principles gets a leaf in principles/")
+        principles_md = set(LEAF_LINK.findall((REPO / "PRINCIPLES.md").read_text(encoding="utf-8")))
+        self.assertEqual(principles_md, files, "PRINCIPLES.md links a missing leaf, or leaves one out")
+        self.assertEqual(set(LEAF_LINK.findall(chef_mode_index())), files, "chef-mode's index links a missing leaf, or leaves one out")
+
+    def test_every_nested_principle_in_principles_md_is_a_link_to_its_leaf(self):
+        for pid, section in principle_sections().items():
+            nested = re.search(r"^- \*\*Includes \(pstack\):\*\*\n((?:  - .*\n)+)", section, re.MULTILINE)
+            for line in nested.group(1).splitlines() if nested else []:
+                with self.subTest(principle=pid, line=line[:40]):
+                    self.assertRegex(line, r"^  - \[\*[^*]+\*\]\(principles/[a-z0-9-]+\.md\): \S", "one trigger line plus a link to the leaf")
+
+    def test_each_leaf_names_its_parent_and_when_and_stays_short(self):
+        files = sorted(LEAVES.glob("*.md"))
+        self.assertTrue(files, "no leaves in principles/")
+        linked_from = {name: pid for pid, section in principle_sections().items() for name in LEAF_LINK.findall(section)}
+        for path in files:
+            with self.subTest(leaf=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("# "), "starts with its title")
+                self.assertEqual(PARENT.findall(text), [linked_from.get(path.stem)], "its Parent is the section of PRINCIPLES.md that links it")
+                self.assertRegex(text, WHEN, "one `When:` line")
+                self.assertLessEqual(text.count("\n"), 25, "a leaf is the rule in about 20 lines; detail belongs elsewhere")
+                self.assertEqual([t for t in RELATIVE_LINK.findall(text) if not (path.parent / t).exists()], [], "broken link")
+
+    def test_chef_mode_index_lists_every_principle_in_order_with_its_leaves_under_it(self):
+        index = chef_mode_index()
+        self.assertTrue(index, "chef-mode has no `## Principles` index")
+        self.assertEqual(re.findall(r"^- `([a-z-]+)`", index, re.MULTILINE), self.ids)
+        parent_of = {}
+        for block in re.split(r"^(?=- `)", index, flags=re.MULTILINE)[1:]:
+            pid = re.match(r"- `([a-z-]+)`", block).group(1)
+            parent_of.update({name: pid for name in LEAF_LINK.findall(block)})
+        sections = principle_sections()
+        self.assertEqual(parent_of, {name: pid for pid in self.ids for name in LEAF_LINK.findall(sections[pid])},
+                         "a leaf sits under a different parent in chef-mode than in PRINCIPLES.md")
+
+    def test_chef_mode_fits_the_compaction_reattach_budget(self):
+        text = CHEF_MODE.read_text(encoding="utf-8")
+        self.assertLessEqual(text.count("\n"), CHEF_MODE_MAX_LINES)
+        self.assertLessEqual(len(text.encode("utf-8")), CHEF_MODE_MAX_BYTES)
+
+    def test_chef_mode_reaches_the_leaves(self):
+        link = REPO / "skills" / "chef-mode" / "principles"
+        self.assertTrue(link.is_symlink(), "a copy would drift: link it to the repo's principles/")
+        self.assertEqual(link.resolve(), LEAVES.resolve())
+
     def test_every_principle_is_enforced_or_says_rule_only(self):
         text = (REPO / "PRINCIPLES.md").read_text(encoding="utf-8")
         sections = dict(zip(self.ids, re.split(r"^## \d+\. ", text, flags=re.MULTILINE)[1:]))
@@ -101,6 +175,47 @@ class Principles(unittest.TestCase):
                 self.assertTrue(enforced, "no `Enforced by:` line")
                 self.assertTrue(pid in cited or enforced.group(1).startswith("rule only"),
                                 "no control names this principle, and its `Enforced by:` does not start with `rule only`")
+
+
+class PrincipleCommand(unittest.TestCase):
+    """`kitchen principle` reads the real repo's principles; HOME and the kitchen's state stay throwaway."""
+
+    def kitchen(self, *args):
+        with tempfile.TemporaryDirectory() as home:
+            env = {**os.environ, "HOME": home, "KITCHEN_REPO": str(REPO), "KITCHEN_STATE": f"{home}/state",
+                   "KITCHEN_CONFIG": f"{home}/config", "KITCHEN_DENYLIST": f"{home}/no-denylist.txt"}
+            return subprocess.run([sys.executable, str(REPO / "bin" / "kitchen"), *args], env=env, capture_output=True, text=True)
+
+    def test_an_id_prints_only_its_section_of_principles_md(self):
+        result = self.kitchen("principle", "truthful-state")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("## 2. Unknown is never green (`truthful-state`)\n"), result.stdout[:80])
+        self.assertIn("Never invent counts, freshness, progress or success.", result.stdout)
+        self.assertIn("- **Enforced by:** `status` prints `unknown`", result.stdout)
+        self.assertNotIn("(`prove`)", result.stdout)
+        self.assertNotIn("(`no-fallbacks`)", result.stdout)
+
+    def test_a_leaf_name_prints_its_file(self):
+        result = self.kitchen("principle", "explain-the-number")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("# Explain the Number\n"), result.stdout[:80])
+        self.assertIn("Write the decision down before you run.", result.stdout)
+        self.assertEqual(result.stdout, (LEAVES / "explain-the-number.md").read_text(encoding="utf-8"))
+
+    def test_no_name_prints_the_index_chef_mode_carries(self):
+        result = self.kitchen("principle")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("## Principles\n"), result.stdout[:80])
+        self.assertIn("[explain-the-number](principles/explain-the-number.md)", result.stdout)
+        self.assertNotIn("## Playbooks", result.stdout)
+
+    def test_an_unknown_name_fails_and_lists_the_valid_ones(self):
+        result = self.kitchen("principle", "explain-the-numbers")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "", "nothing stands in for an unknown name")
+        self.assertIn("'explain-the-numbers'", result.stderr)
+        self.assertIn("truthful-state", result.stderr)
+        self.assertIn("explain-the-number,", result.stderr)
 
 
 if __name__ == "__main__":

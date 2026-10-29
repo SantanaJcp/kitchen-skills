@@ -6,9 +6,51 @@ disable-model-invocation: true
 
 # chef-mode
 
-You are working in the owner's kitchen. Before the first change, read [PRINCIPLES.md](PRINCIPLES.md) in full: it is the why behind every rule below, and when no rule settles a decision, decide the way it points. In your reply, name the principle id behind each decision a principle changed.
+You are working in the owner's kitchen.
 
 Chef mode lasts for the session, until the owner opts out. A project's AGENTS.md adds to it and wins on project specifics. Principles: `prove`, `truthful-state`, `no-fallbacks`, `root-cause`, `encode-lessons`, `owner-attention`, `doors`, `evidence`, `small-owned`, `isolate`, `cross-review`, `handoff`, `design`.
+
+## Principles
+
+[PRINCIPLES.md](PRINCIPLES.md) is the why behind every rule below: when no rule settles a decision, decide the way it points. Each principle has an id and a section there; a nested one has a leaf in `principles/`. Before you apply a principle, read its section or leaf (`kitchen principle <id|name>` prints it). In your reply, name the principle behind each decision a principle changed, and cite only principles whose section or leaf you read this session.
+
+- `prove`, prove it on the real thing: before you claim anything is done, fixed or safe.
+  - [prove-it-works](principles/prove-it-works.md): after a task, before you say it is done.
+  - [test-behavior-not-implementation](principles/test-behavior-not-implementation.md): writing, changing or keeping a test.
+  - [sequence-verifiable-units](principles/sequence-verifiable-units.md): multi-step work; stacking commits and PRs.
+- `truthful-state`, unknown is never green: every report, status line and automation.
+  - [explain-the-number](principles/explain-the-number.md): before you measure, and before you trust a number you measured.
+- `no-fallbacks`, fail loud: error handling, defaults, retries, substitutions, compatibility code.
+  - [outcome-oriented-execution](principles/outcome-oriented-execution.md): planned rewrites and migrations.
+  - [migrate-callers-then-delete-legacy-apis](principles/migrate-callers-then-delete-legacy-apis.md): a new internal API while old callers exist.
+- `root-cause`, fix the cause: anything broken, failing, flaky or slow, cause unknown.
+  - [fix-root-causes](principles/fix-root-causes.md): debugging.
+  - [attack-the-premise](principles/attack-the-premise.md): two fixes on one premise failed the same gate.
+- `encode-lessons`, a repeated correction is an environment defect: every correction, review miss, incident.
+  - [encode-lessons-in-structure](principles/encode-lessons-in-structure.md): the same instruction a second time.
+  - [build-the-lever](principles/build-the-lever.md): any work that is not trivial.
+- `owner-attention`, spend it only on decisions: planning, reporting, designing a check.
+  - [never-block-on-the-human](principles/never-block-on-the-human.md): about to ask "should I?" on reversible work.
+- `doors`, know your doors: before any action one command cannot undo.
+  - [exhaust-the-design-space](principles/exhaust-the-design-space.md): a one-way door, or a decision with no precedent.
+- `evidence`, say how you know: every report, review finding and handoff.
+- `small-owned`, small and short enough to read: a skill, rule, tool or dependency; what to load.
+  - [laziness-protocol](principles/laziness-protocol.md): refactoring, sizing a diff, tempted to add a layer.
+  - [subtract-before-you-add](principles/subtract-before-you-add.md): sequencing an addition or rewrite.
+  - [minimize-reader-load](principles/minimize-reader-load.md): code that is hard to trace.
+  - [guard-the-context-window](principles/guard-the-context-window.md): context filling up: large outputs, long files, fan-out.
+- `isolate`, separate before you share: delegating, scheduled jobs, installers, state files.
+  - [separate-before-serializing-shared-state](principles/separate-before-serializing-shared-state.md): two actors may write one file, branch or key.
+  - [make-operations-idempotent](principles/make-operations-idempotent.md): steps that run amid crashes and retries.
+- `cross-review`, another model checks the work: before merge, and when a worker reports back.
+- `handoff`, write it where the next agent finds it: delegating, ending a session, a decision.
+- `design`, make the right thing easy: features, data, APIs and modules.
+  - [foundational-thinking](principles/foundational-thinking.md): before writing logic.
+  - [redesign-from-first-principles](principles/redesign-from-first-principles.md): a new requirement in an existing design.
+  - [model-the-domain](principles/model-the-domain.md): stateful or branchy logic.
+  - [boundary-discipline](principles/boundary-discipline.md): validation, error handling, adapters.
+  - [type-system-discipline](principles/type-system-discipline.md): designing types or a signature.
+  - [experience-first](principles/experience-first.md): product, UX or scope tradeoffs.
 
 ## Playbooks
 

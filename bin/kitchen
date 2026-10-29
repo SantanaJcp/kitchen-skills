@@ -23,7 +23,7 @@ REPO = Path(os.environ.get("KITCHEN_REPO") or Path(__file__).resolve().parent.pa
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from kitchen import common, credentials, integrate, inventory, journal, status, transcripts  # noqa: E402
-from kitchen import checkplan, environment, legacy, models  # noqa: E402
+from kitchen import checkplan, environment, legacy, models, principles  # noqa: E402
 # Principles (`kitchen check`): `small-owned`, `doors`, `encode-lessons`. It caps a SKILL.md at MAX_SKILL_LINES lines,
 # keeps private data out of this public repo, and runs the lints and tests.
 MAX_SKILL_LINES = 150
@@ -40,6 +40,7 @@ EXAMPLES = """examples:
   kitchen integrate fix/a fix/b --base origin/dev
   kitchen init ../some-repo   print the instructions your agent follows to set a repo up
   kitchen guards .            put the kitchen's guards in this repo only
+  kitchen principle explain-the-number   read one principle before you apply it
 
 run `kitchen <command> --help` for a command's options."""
 
@@ -512,6 +513,15 @@ def cmd_retro(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_principle(args: argparse.Namespace) -> int:
+    try:
+        print(principles.show(REPO, args.name), end="")
+        return 0
+    except principles.PrincipleError as error:
+        print(f"FAIL  {error}", file=sys.stderr)
+        return 1
+
+
 def cmd_integrate(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     project = args.project or repo.name
@@ -620,6 +630,10 @@ def main() -> int:
     integ.add_argument("--check", action="append", help="check command to run instead of the configured ones (repeatable)")
     integ.add_argument("--recorded", action="store_true", help="run nothing: PASS only if a recorded PASS matches the refs' current SHAs")
     integ.set_defaults(func=cmd_integrate)
+
+    princ = sub.add_parser("principle", help="print one principle's section or leaf, or with no name the index chef-mode carries")
+    princ.add_argument("name", nargs="?", help="a principle id (`prove`) or a leaf name (`explain-the-number`)")
+    princ.set_defaults(func=cmd_principle)
 
     args = parser.parse_args()
     return args.func(args)
