@@ -4,8 +4,9 @@ agent back to its SKILL.md and hand back the `## Principles` index, read from th
 
 A compaction drops chef-mode (measured with Claude Code 2.1.312, across processes), and most loads are a worker reading
 SKILL.md, which no skill hook sees. So this hook reads the session's transcript. Loaded means any of: a `/chef-mode`
-command, a skill expansion from a `chef-mode` folder, a Read of a path ending in chef-mode/SKILL.md, a Codex `<skill>`
-block named chef-mode, or a tool result that carries chef-mode's text. Not loaded: no output. A transcript or input it
+command, a skill expansion from a `chef-mode` folder, a Codex `<skill>` block named chef-mode (each where the tool puts
+it, at the start of a message, so a prompt that quotes one is no load), a Read of a path ending in chef-mode/SKILL.md, or
+a tool call that names such a path and returns chef-mode's text. Not loaded: no output. A transcript or input it
 cannot read: exit 2 with the reason on stderr, the rule every kitchen hook follows; on SessionStart that blocks nothing,
 and Claude Code shows it to the person as a hook error.
 Principles: `handoff` (the agent after a compaction is the next agent), `no-fallbacks` (a gone file or an unreadable
@@ -22,9 +23,10 @@ HOOK = "chef-mode-after-compact"
 LIMIT = 10_000  # Claude Code moves longer additionalContext to a file and shows a 2,000-character preview (hooks docs)
 # chef-mode's first lines; tests/test_hooks.py feeds the real SKILL.md, so an edit that drops one fails there
 MARKERS = ("# chef-mode", "You are working in the owner's kitchen.")
-SLASH = "<command-name>/chef-mode</command-name>"
-BASE_DIR = re.compile(r"^Base directory for this skill: (.+)$", re.MULTILINE)
-CODEX_SKILL = re.compile(r"<name>chef-mode</name>\s*<path>([^<\n]+)</path>")
+# Claude Code writes `<command-message>` first for a skill and `<command-name>` first for a built-in command
+SLASH = re.compile(r"\s*(?:<command-message>chef-mode</command-message>\s*)?<command-name>/chef-mode</command-name>")
+BASE_DIR = re.compile(r"Base directory for this skill: (.+)")
+CODEX_SKILL = re.compile(r"\s*<skill>\s*<name>chef-mode</name>\s*<path>([^<\n]+)</path>")
 PATH_WORD = re.compile(r"""(?<![^\s'"`=(])((?:~|\$HOME|\$\{HOME\})?[^\s'"`;|&<>()$:]*chef-mode/SKILL\.md)(?![\w.-])""")
 INDEX = re.compile(r"^## Principles\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
 CALLS = ("function_call", "custom_tool_call")
@@ -64,17 +66,17 @@ def resolve(word, cwd):
     return os.path.normpath(word)
 
 
-def named_path(call):
-    """The chef-mode/SKILL.md a tool call reads, from its input and the cwd it ran in."""
-    if not call:
-        return None
-    value, cwd = call
-    for text in strings(value):
-        for word in PATH_WORD.findall(text):
-            path = resolve(word, cwd)
-            if path:
-                return path
-    return None
+def named_paths(call):
+    """The chef-mode/SKILL.md paths a tool call names, each resolved from the cwd it ran in or None."""
+    value, cwd = call or (None, None)
+    return [resolve(word, cwd) for text in strings(value) for word in PATH_WORD.findall(text)]
+
+
+def returned(call, result):
+    """(loaded, path): a call that names a chef-mode/SKILL.md and returns chef-mode's text. Text alone is no load: the
+    markers also sit in this hook's source and its tests."""
+    paths = named_paths(call)
+    return bool(paths) and carries(result), next((p for p in paths if p), None)
 
 
 class Transcript:
@@ -88,13 +90,18 @@ class Transcript:
     def user_text(self, text):
         if not isinstance(text, str):
             return
-        if SLASH in text:
+        if SLASH.match(text):
             self.load(None)  # the expansion that follows names the folder
-        for folder in BASE_DIR.findall(text):
-            if os.path.basename(folder.rstrip("/")) == "chef-mode":
-                self.load(resolve(folder.rstrip("/") + "/SKILL.md", None))
-        for path in CODEX_SKILL.findall(text):
-            self.load(resolve(path.strip(), None))
+        folder, skill = BASE_DIR.match(text), CODEX_SKILL.match(text)
+        if folder and os.path.basename(folder.group(1).rstrip("/")) == "chef-mode":
+            self.load(resolve(folder.group(1).rstrip("/") + "/SKILL.md", None))
+        if skill:
+            self.load(resolve(skill.group(1).strip(), None))
+
+    def returns(self, call, result):
+        loaded, path = returned(call, result)
+        if loaded:
+            self.load(path)
 
     def read(self, entry):
         kind, cwd = entry.get("type"), entry.get("cwd")
@@ -112,24 +119,25 @@ class Transcript:
                     path = tool_input.get("file_path") if isinstance(tool_input, dict) and block.get("name") == "Read" else None
                     if isinstance(path, str) and path.endswith("chef-mode/SKILL.md"):
                         self.load(resolve(path, cwd))
-                elif block.get("type") == "tool_result" and carries(block.get("content")):
-                    self.load(named_path(self.calls.get(block.get("tool_use_id"))))
+                elif block.get("type") == "tool_result":
+                    self.returns(self.calls.get(block.get("tool_use_id")), block.get("content"))
         elif kind == "response_item" and isinstance(payload, dict):  # Codex
             if payload.get("type") == "message" and payload.get("role") == "user":
                 for text in strings(payload.get("content")):
                     self.user_text(text)
             elif payload.get("type") in CALLS:
                 self.calls[payload.get("call_id")] = (payload.get("arguments", payload.get("input")), None)
-            elif payload.get("type") in OUTPUTS and carries(payload.get("output")):
-                self.load(named_path(self.calls.get(payload.get("call_id"))))
+            elif payload.get("type") in OUTPUTS:
+                self.returns(self.calls.get(payload.get("call_id")), payload.get("output"))
         elif kind == "event_msg" and isinstance(payload, dict) and isinstance(payload.get("item"), dict):  # Codex
             item = payload["item"]
-            if item.get("type") == "CommandExecution" and carries(item.get("aggregated_output")):
-                self.load(named_path((item.get("command"), item.get("cwd"))))
+            if item.get("type") == "CommandExecution":
+                self.returns((item.get("command"), item.get("cwd")), item.get("aggregated_output"))
 
 
 def scan(path):
-    """(loaded, SKILL.md path or None, unreadable line numbers). Only lines that name chef-mode are parsed."""
+    """(loaded, SKILL.md path or None, unreadable line numbers). Only lines that name chef-mode are parsed: every load
+    above needs those bytes, so a line without them cannot hide one, broken or not."""
     transcript, unreadable = Transcript(), []
     with open(path, "rb") as handle:
         for number, raw in enumerate(handle, 1):

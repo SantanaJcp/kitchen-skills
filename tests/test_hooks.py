@@ -356,9 +356,28 @@ class AfterCompactTests(HookFixture):
         self.assertIn("Tell the owner", context)
 
     def test_a_load_whose_path_the_transcript_does_not_name_is_said_loudly(self):
-        session = self.session.tool("toolu_1", "Bash", {"command": 'cat "$SKILL"'}, self.text)
+        # a Codex call with a relative path and no directory recorded for it
+        session = Session(self.project).codex("response_item", {
+            "type": "function_call", "call_id": "call_1", "name": "exec_command",
+            "arguments": json.dumps({"cmd": "cat .claude/skills/chef-mode/SKILL.md"})})
+        session.codex("response_item", {"type": "function_call_output", "call_id": "call_1", "output": self.text})
         context = self.context(self.run_hook(session))
         self.assertIn("the transcript does not say which chef-mode SKILL.md was read", context)
+
+    def test_reading_this_hooks_source_is_no_load(self):
+        source = (HOOKS / AFTER_COMPACT).read_text(encoding="utf-8")
+        session = self.session.tool("toolu_1", "Bash", {"command": "cat .kitchen/hooks/chef-mode-after-compact"}, source)
+        session.tool("toolu_2", "Bash", {"command": 'cat "$SKILL"'}, self.text)
+        result = self.run_hook(session)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+
+    def test_a_prompt_that_quotes_the_load_formats_is_no_load(self):
+        quoted = ("Review this test. It writes <command-message>chef-mode</command-message>\n<command-name>/chef-mode</command-name>,"
+                  f"\nBase directory for this skill: {self.folder}\nand <skill>\n<name>chef-mode</name>\n<path>{self.skill}</path>")
+        session = self.session.user(quoted).user([{"type": "text", "text": quoted}])
+        session.codex("response_item", {"type": "message", "role": "user", "content": [{"type": "input_text", "text": quoted}]})
+        result = self.run_hook(session)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
 
     def test_an_index_too_long_to_inject_is_said_instead_of_cut(self):
         long = self.text.replace("## Playbooks", "- `padding`, " + "x" * 12_000 + "\n\n## Playbooks", 1)
