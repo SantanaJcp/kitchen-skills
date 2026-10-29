@@ -30,14 +30,14 @@ Never invent counts, freshness, progress or success. A read that failed is `unkn
 
 ## 3. No fallbacks; fail loud (`no-fallbacks`)
 
-When the intended operation fails, surface the failure. No alternative path, substitute value or degraded mode, and no other model standing in for the configured one. If you find an existing fallback, report where it is, when it fires and what it hides; change it only with the owner's approval.
+When the intended operation fails, surface the failure. No alternative path, substitute value or degraded mode, and no other model standing in for the configured one. If you find an existing fallback, report where it is, when it fires and what it hides; change it only with the owner's approval. One exception, the owner's (2026-10-29): a delegated worker whose configured model is unset, or that T3 or the CLI rejects, runs on the session model, and the lead says so aloud in its report. It never applies to a reviewer: a reviewer on the author's model voids `cross-review`.
 
 - **Why:** a fallback turns a failure into a quiet wrong answer that you find much later, in the wrong place, and the system claims it worked. The owner's own rule, from repeated corrections.
 - **When:** error handling, defaults, retries, "just in case" branches, model or tool substitutions, compatibility layers.
 - **Includes (pstack):**
   - *Outcome-Oriented Execution*: optimize for the verified end state, not for smooth intermediate states; temporary compatibility code becomes permanent debt.
   - *Migrate Callers Then Delete Legacy APIs*: move every caller and delete the old path in the same change; no dual paths. If that removes behavior someone relies on, or the API is published, it is a one-way door (`doors`).
-- **Enforced by:** every hook blocks with exit 2 when it cannot read its input or parse the command; `integrate` has no default base; `install` refuses a file it cannot parse or does not manage; `kitchen models` fails, with no default, when a role is not configured. In project code: rule only.
+- **Enforced by:** every hook blocks with exit 2 when it cannot read its input or parse the command; `integrate` has no default base; `install` refuses a file it cannot parse or does not manage; `kitchen models` fails, with no default, when a reviewer is not configured, and `get worker` says on stderr when the worker runs on the session model. In project code: rule only.
 
 ## 4. Fix the cause, not the symptom (`root-cause`)
 

@@ -957,23 +957,90 @@ class ModelsTests(KitchenFixture):
         self.assertIn("reviewer for codex work  not configured", out)
 
     def test_roles_nothing_reads_are_refused(self):
-        result = self.kitchen("models", "set", "worker", "--author", "claude", "--provider", "codex", "--model", "default",
+        result = self.kitchen("models", "set", "explorer", "--author", "claude", "--provider", "codex", "--model", "default",
                               "--effort", "low", "--tier", "standard")
 
         self.assertEqual(result.returncode, 2)
-        self.assertIn("invalid choice: 'worker'", result.stderr)
+        self.assertIn("invalid choice: 'explorer'", result.stderr)
 
     def test_set_refuses_to_drop_tables_it_does_not_read(self):
         config = self.home / "config" / "models.toml"
         config.parent.mkdir(parents=True)
-        config.write_text('[worker]\nprovider = "claude"\nmodel = "default"\neffort = "high"\ntier = "standard"\n')
+        config.write_text('[explorer]\nprovider = "claude"\nmodel = "default"\neffort = "high"\ntier = "standard"\n')
 
         result = self.kitchen("models", "set", "reviewer", "--author", "claude", "--provider", "codex", "--model", "default",
                               "--effort", "low", "--tier", "standard")
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("tables kitchen does not read (worker)", result.stderr)
-        self.assertIn("[worker]", config.read_text())
+        self.assertIn("tables kitchen does not read (explorer)", result.stderr)
+        self.assertIn("[explorer]", config.read_text())
+
+    def worker(self, provider="claude", model="claude-x", effort="high", accounts=None):
+        extra = ("--accounts", accounts) if accounts else ()
+        return self.kitchen("models", "set", "worker", "--provider", provider, "--model", model, "--effort", effort,
+                            "--tier", "standard", *extra)
+
+    def worker_get(self, *flags):
+        result = self.kitchen("models", "get", "worker", *flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_the_job_moves_the_workers_effort_within_low_and_max(self):
+        for configured, job, expected in (("high", "hardest", "xhigh"), ("max", "hardest", "max"), ("high", "judgment", "medium"),
+                                          ("high", "routine", "low"), ("medium", "routine", "low"), ("low", "judgment", "low")):
+            with self.subTest(configured=configured, job=job):
+                self.assertEqual(self.worker(effort=configured).returncode, 0)
+
+                got = json.loads(self.worker_get("--job", job, "--json"))
+
+                self.assertEqual(got["effort"], expected)
+
+    def test_a_batch_alternates_the_workers_accounts_by_index(self):
+        self.worker(accounts="acct-a,acct-b")
+
+        got = [json.loads(self.worker_get("--job", "routine", "--index", str(i), "--t3"))["providerInstanceId"] for i in range(5)]
+        no_index = json.loads(self.worker_get("--job", "routine", "--t3"))["providerInstanceId"]
+
+        self.assertEqual(got, ["acct-a", "acct-b", "acct-a", "acct-b", "acct-a"])
+        self.assertEqual(no_index, "acct-a")
+
+    def test_the_worker_runs_fast_only_when_urgent(self):
+        fast_set = self.kitchen("models", "set", "worker", "--provider", "codex", "--model", "gpt-x", "--effort", "high", "--tier", "fast")
+        self.worker(provider="codex", model="gpt-x")
+
+        calm = json.loads(self.worker_get("--job", "judgment", "--t3"))
+        urgent = json.loads(self.worker_get("--job", "judgment", "--urgent", "--t3"))
+
+        self.assertEqual(fast_set.returncode, 1)
+        self.assertIn("runs fast only when `kitchen models get worker --urgent` asks for it", fast_set.stderr)
+        self.assertEqual(calm["options"]["serviceTier"], "default")
+        self.assertEqual(urgent["options"]["serviceTier"], "priority")
+
+    def test_the_t3_target_for_a_claude_and_a_codex_worker(self):
+        self.worker(provider="claude", model="claude-x", effort="high", accounts="acct-a,acct-b")
+        claude = self.worker_get("--job", "hardest", "--index", "1", "--t3")
+        self.worker(provider="codex", model="gpt-x", effort="medium")
+        codex = self.worker_get("--job", "judgment", "--urgent", "--t3")
+        codex_call = self.worker_get("--job", "judgment", "--command")
+
+        self.assertEqual(json.loads(claude), {"providerInstanceId": "acct-b", "model": "claude-x",
+                                              "options": {"effort": "xhigh", "fastMode": False}})
+        self.assertEqual(json.loads(codex), {"driverKind": "codex", "model": "gpt-x",
+                                             "options": {"reasoningEffort": "low", "serviceTier": "priority"}})
+        self.assertEqual(codex_call, "codex exec --skip-git-repo-check -s workspace-write -m gpt-x "
+                                     "-c 'model_reasoning_effort=\"low\"' -c 'service_tier=\"default\"'")
+
+    def test_an_unset_worker_runs_on_the_session_model_and_an_unset_reviewer_still_fails(self):
+        worker = self.kitchen("models", "get", "worker", "--job", "routine", "--t3")
+        reviewer = self.kitchen("models", "get", "reviewer", "--author", "claude", "--command")
+
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+        self.assertEqual(json.loads(worker.stdout), {})
+        self.assertIn("the worker runs on the session model", worker.stderr)
+        self.assertIn("kitchen models set worker --provider", worker.stderr)
+        self.assertEqual(reviewer.returncode, 1)
+        self.assertEqual(reviewer.stdout, "")
+        self.assertIn("not configured", reviewer.stderr)
 
     def reviewer(self, action, author, provider, model, tier="standard"):
         return self.kitchen("models", action, "reviewer", "--author", author, "--provider", provider, "--model", model,

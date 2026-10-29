@@ -153,7 +153,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     print(f"installed  {len(repo_skills())} skills (chef-mode routes to the rest); "
           "nothing runs until you type /chef-mode (Claude Code) or $chef-mode (Codex)")
     print("next:      in each repo you choose, type /chef-mode init (or run `kitchen init <repo>` for the instructions)")
-    print("next:      kitchen models, to set which model reviews each author's work (each person sets their own)")
+    print("next:      kitchen models, to set which model reviews each author's work and which runs delegated work (each person sets their own)")
     print("next:      kitchen doctor")
     return 0
 
@@ -449,14 +449,24 @@ def cmd_guards(args: argparse.Namespace) -> int:
 def cmd_models(args: argparse.Namespace) -> int:
     try:
         if args.action in ("set", "add", "remove"):
+            if args.action == "add" and args.role not in models.PER_AUTHOR:
+                raise models.ModelsError(f"`{args.role}` is one model: `kitchen models set {args.role}` replaces it")
             if args.action == "remove":
                 models.remove(args.role, args.author, args.provider, args.model)
             else:
                 entry = {"provider": args.provider, "model": args.model, "effort": args.effort, "tier": args.tier}
+                if args.accounts is not None:
+                    if args.role in models.PER_AUTHOR:
+                        raise models.ModelsError(f"--accounts is for the worker; a {args.role} runs on the instance of its provider")
+                    entry["accounts"] = args.accounts.split(",")
                 models.put(args.role, args.author, [entry] if args.action == "set" else models.current(args.role, args.author) + [entry])
-            print(f"{args.action:<11}{args.role} for {args.author} work in {models.path()}")
+            print(f"{args.action:<11}{models.label(args.role, args.author)} in {models.path()}")
             return 0
+        if args.action == "get" and args.role == "worker":
+            return worker_get(args)
         if args.action == "get":
+            if args.job or args.urgent or args.index is not None or args.t3:
+                raise models.ModelsError("--job, --urgent, --index and --t3 are for the worker")
             entries = models.get(args.role, args.author)
             if args.command:
                 print("\n".join(models.shell(models.command(e)) for e in entries))
@@ -468,6 +478,28 @@ def cmd_models(args: argparse.Namespace) -> int:
     except models.ModelsError as error:
         print(f"FAIL  {error}", file=sys.stderr)
         return 1
+
+
+def worker_get(args: argparse.Namespace) -> int:
+    """One delegated worker's target. Unset, it runs on the session model: an empty target, said on stderr (owner, 2026-10-29)."""
+    if not args.job:
+        raise models.ModelsError(f"pass --job {' or --job '.join(models.JOBS)}: the job sets the worker's effort")
+    models.key(args.role, args.author)
+    entry = models.worker(args.job, args.urgent, args.index or 0)
+    if entry is None:
+        print(models.unset_worker(), file=sys.stderr)
+        if not args.command:
+            print("{}" if args.json or args.t3 else "session model")
+        return 0
+    if args.command:
+        print(models.shell(models.command(entry, writes=True)))
+        if entry.get("account"):
+            print(f"note: account {entry['account']} is a T3 provider instance; the CLI call runs on the CLI's own login", file=sys.stderr)
+    elif args.t3:
+        print(json.dumps(models.t3(entry)))
+    else:
+        print(json.dumps(entry) if args.json else models.describe(entry))
+    return 0
 
 
 def cmd_retro(args: argparse.Namespace) -> int:
@@ -541,22 +573,29 @@ def main() -> int:
     guards_cmd.add_argument("--check", action="store_true", help="write nothing; fail while the repo's guards differ from this kitchen's")
     guards_cmd.set_defaults(func=cmd_guards)
 
-    mod = sub.add_parser("models", help="which models review each author's work (the reviewers second-opinion runs), in your own setup")
+    mod = sub.add_parser("models", help="which models review each author's work (the reviewers second-opinion runs) and run delegated work, in your own setup")
     mod_sub = mod.add_subparsers(dest="action")
-    mod_get = mod_sub.add_parser("get", help="print one role's models, one per line; fails, with the command that sets it, when none is configured")
+    mod_get = mod_sub.add_parser("get", help="print one role's models, one per line; an unset reviewer fails with the command that sets it, an unset worker runs on the session model")
     mod_set = mod_sub.add_parser("set", help="set one role to one model, replacing any others")
-    mod_add = mod_sub.add_parser("add", help="add a model to one role; second-opinion runs each, in parallel")
+    mod_add = mod_sub.add_parser("add", help="add a model to one reviewer role; second-opinion runs each, in parallel")
     mod_remove = mod_sub.add_parser("remove", help="remove one model from one role")
     for p_role in (mod_get, mod_set, mod_add, mod_remove):
         p_role.add_argument("role", choices=models.ROLES)
-        p_role.add_argument("--author", required=True, choices=models.AUTHORS, help="who wrote the work; the role runs another family's model")
-    mod_get.add_argument("--json", action="store_true")
-    mod_get.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
+        p_role.add_argument("--author", choices=models.AUTHORS, help="reviewer only, and required there: who wrote the work; the reviewer runs another family's model")
+    get_output = mod_get.add_mutually_exclusive_group()
+    get_output.add_argument("--json", action="store_true")
+    get_output.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
+    get_output.add_argument("--t3", action="store_true", help="worker: print the target JSON for T3's delegate_task")
+    mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: hardest raises the configured effort one step, judgment lowers it one, routine two")
+    mod_get.add_argument("--urgent", action="store_true", help="worker: the fast tier (CI or trunk red, someone blocked now); standard otherwise")
+    mod_get.add_argument("--index", type=int, help="worker: the worker's place in its batch, from 0; picks accounts[index %% len]")
     for p_entry in (mod_set, mod_add):
         p_entry.add_argument("--provider", required=True, choices=models.PROVIDERS)
         p_entry.add_argument("--model", required=True, help="a model id (`<provider>/<id>` for pi), or `default` for that tool's own default")
         p_entry.add_argument("--effort", required=True, choices=models.EFFORTS)
         p_entry.add_argument("--tier", required=True, choices=models.TIERS)
+    mod_set.add_argument("--accounts", help="worker: T3 provider instance ids, comma-separated, in the order a batch alternates them")
+    mod_add.set_defaults(accounts=None)
     mod_remove.add_argument("--provider", required=True, choices=models.PROVIDERS)
     mod_remove.add_argument("--model", help="which one, when more than one runs on that provider")
     mod.set_defaults(func=cmd_models, action=None)
