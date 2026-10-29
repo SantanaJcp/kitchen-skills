@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # catch-me-up
 
-Catch me up on what happened in this conversation since the last message I wrote, then lay out every decision waiting on me so I can make it from your reply alone. Notifications and worker results are not my messages. Assume I remember my last message and nothing after it.
+Catch me up on what happened in this conversation since the last message I wrote before asking you to catch me up, then lay out every decision waiting on me so I can make it from your reply alone. Notifications and worker results are not my messages. Assume I remember my last message and nothing after it.
 
 This is for me, about everything since my last message. `handoff` is written for another agent to continue the work; `wait-what` re-explains only your last message.
 
