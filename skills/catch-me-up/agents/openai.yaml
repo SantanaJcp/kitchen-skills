@@ -1,0 +1,5 @@
+interface:
+  display_name: "Catch Me Up"
+  short_description: "What happened since my last message, and what waits on me"
+policy:
+  allow_implicit_invocation: false

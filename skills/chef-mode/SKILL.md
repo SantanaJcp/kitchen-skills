@@ -22,17 +22,19 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 | A diff ready to merge, any reviewer brief, or anything touching auth, tenant scope, sync, data or migrations | `second-opinion` |
 | A plan or request whose important decisions are still open | `make-me-realize` |
 | Pass the work, or a prompt to paste, to another session, tool or machine | `handoff` |
+| Catch the owner up: "catch me up", "qué pasó", "en qué vamos", "como vamos" | `catch-me-up` |
 | Corrections the owner keeps repeating | `retro` |
 | A project's verify skill may no longer tell the truth | `audit-verification` |
 | A feature, fix or refactor | the work loop below |
 
 ## The work loop
 
-1. Read the project's AGENTS.md and `decisions.md`; do not ask what is already decided there.
-2. Name the data shape first; make the smallest change that does the job (`small-owned`, `design`).
-3. Prove it on the project's own check and verify method (see Verification). A behavior change ships with a test that fails without it.
-4. Review and merge as the door and the project's rung allow (see Doors and the trust ladder). Read `second-opinion` in full before you write any reviewer brief.
-5. Report: what changed, how it was proved, what is left, the decisions owed.
+1. Your first message on a task restates, in your own words, the goal, what is out of scope and the smallest change you expect. Do not wait for confirmation. If the evidence rules out what was asked, show it and stop. Every worker brief and every final report opens with that goal.
+2. Read the project's AGENTS.md and `decisions.md`; do not ask what is already decided there.
+3. Name the data shape first; make the smallest change that does the job (`small-owned`, `design`).
+4. Prove it on the project's own check and verify method (see Verification). A behavior change ships with a test that fails without it.
+5. Review and merge as the door and the project's rung allow (see Doors and the trust ladder). Read `second-opinion` in full before you write any reviewer brief.
+6. Report: what changed, how it was proved, what is left, the decisions owed.
 
 ## Doing the work
 
@@ -55,7 +57,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
   3. `ship`: also land stacks unattended and deploy to the non-production environments the AGENTS.md names.
 - Never deploy to production, publish, or send anything to people without the owner's explicit request in this conversation.
 - A control must buy autonomy: prefer checks the machine runs and reads itself; surface only exceptions, in one line; never add a step the owner must read or approve unless it is a one-way door.
-- When the owner grants a run ("dale hasta que acabes", overnight), first state the scope, the closing condition and what you will not do. Log a checkpoint after each completed step with `kitchen log`. Finish with: done, how it was verified, what is left, decisions owed.
+- When the owner grants a run ("dale hasta que acabes", overnight), first state the scope, the closing condition and what you will not do. Discoveries that support the goal are yours to do; anything else goes in the report. Log a checkpoint after each completed step with `kitchen log`. Finish with: done, how it was verified, what is left, decisions owed.
 
 ## Delegation
 
