@@ -11,13 +11,13 @@ issues, and what it sends.
       pass committed did not ship, and that is one more finding, keyed `unpublished-prose-fixes`.
 
 A finding is a `### <key>: <title>` heading inside the report's `## Findings` section, with its text up to the next
-heading of level 3 or less (fenced code blocks are text). The key is kebab-case and the agent keeps it while the
+heading of level 3 or less (fenced code blocks are text); the section holds nothing else. The key is kebab-case and the agent keeps it while the
 finding is pending, reusing the one `open` listed. An issue carries its key, and the digest of the finding's
 redacted text, in a hidden marker on its first line; each comment the job adds carries the new digest, and the
 last one wins. Matching never searches titles, so a renamed issue still matches.
 <issues.json> is `gh issue list --label <label> --state open --json number,title,body,comments --limit <limit>`;
 a list that reaches <limit> may miss the matching issue, so the plan refuses it. A malformed or empty Findings
-section, a duplicate key, or a key that redaction changed refuses the whole plan (exit 2, saying why): nothing is
+section, text in it outside a finding, a duplicate key, or a key that redaction changed refuses the whole plan (exit 2, saying why): nothing is
 filed from a report the job cannot read exactly.
 Principles: `owner-attention` (one issue per finding, a comment only when it changed), `isolate` (a rerun opens
 nothing new), `truthful-state` (a report the job cannot split is never filed in part).
@@ -75,6 +75,8 @@ def findings(report: str) -> list[tuple[str, str, str]]:
             continue
         if section and found:
             found[-1].append(line)
+        elif section and line.strip():  # a finding without its heading would be dropped, never filed
+            raise Refused(f"the Findings section has text before its first `### <key>: <title>` heading: {line[:80]}")
     if not seen:
         raise Refused("the report has no `## Findings` section")
     if not found:
@@ -143,7 +145,7 @@ def plan(report_path, issues_path, limit, out_dir, header_path, project, unpubli
         action = "create" if not number else "none" if last == mark else "comment"
         folder = Path(out_dir) / str(index)
         folder.mkdir(parents=True)
-        prefix, suffix = f"Audit finding in {project}: ", f" [{key}]"
+        prefix, suffix = scrub(f"Audit finding in {project}: "), f" [{key}]"  # the key survived redaction
         room = TITLE_LIMIT - len(prefix) - len(suffix)
         (folder / "title").write_text(prefix + (title if len(title) <= room else title[: room - 3] + "...") + suffix)
         lead = ("This finding is still pending, and its text changed:" if action == "comment" else

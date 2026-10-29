@@ -2070,7 +2070,9 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         for name, report, reason in (
                 ("no key", "## Findings\n\n### Readers have no assertion\n\ntext\n", "is not `### <kebab-key>: <title>`"),
                 ("no section", "Readers have no assertion.\n", "no `## Findings` section"),
-                ("a key twice", "## Findings\n\n### a-b: one\n\nx\n\n### a-b: two\n\ny\n", "a-b is used twice")):
+                ("a key twice", "## Findings\n\n### a-b: one\n\nx\n\n### a-b: two\n\ny\n", "a-b is used twice"),
+                ("a finding without its heading", "## Findings\n\n- Readers have no assertion.\n\n### a-b: one\n\nx\n",
+                 "text before its first `### <key>: <title>` heading")):
             with self.subTest(name):
                 self.tearDown(); self.setUp()
                 sha = self.churn()
@@ -2088,16 +2090,19 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
 
     def test_the_findings_issue_body_is_redacted_and_cut_under_githubs_limit(self):
         token = "ghp_" + "a" * 30  # built at runtime: the repo never holds a credential shape
+        denylist = Path(self.tmp.name) / "denylist.txt"
+        denylist.write_text("shop\n")  # the project's own name is a private term
         self.churn()
         self.audit_config()
         self.agent("findings", findings=(("readers-no-assertion", f"Readers leak {token}", f"key {token}\n" + "drift line\n" * 8000),))
 
-        result = self.guard_then_audit()
+        result = self.guard_then_audit(KITCHEN_DENYLIST=str(denylist))
 
         self.assertEqual(result.returncode, 0, result.stdout)
         issue = self.issue("readers-no-assertion")
         self.assertLessEqual(len(issue["body"]), 65536)
         self.assertNotIn(token, issue["body"] + issue["title"])
+        self.assertEqual(issue["title"], "Audit finding in [PRIVATE]: Readers leak [REDACTED] [readers-no-assertion]")
         self.assertIn("[REDACTED]", issue["body"])
         self.assertIn("[REDACTED]", issue["title"])
         self.assertIn("Truncated: the full report is on the audit machine", issue["body"])
