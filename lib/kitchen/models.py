@@ -223,13 +223,20 @@ def put_project(project: str, accounts: list[str] | None) -> None:
 
 
 def here(cwd: Path) -> str | None:
-    """The project `cwd` belongs to: the folder of its repository's main checkout, read from the git common dir, so a
-    worktree (T3's are named after the thread) is its repository's project. None outside a git repository."""
-    common_dir = common.git_common_dir(cwd)
-    if common_dir is None:
+    """The project `cwd` belongs to: the folder of its repository's main checkout, so a worktree (T3's are named after
+    the thread) is its repository's project. None outside a git repository. A worktree whose repository keeps its git
+    directory elsewhere (bare, or `--separate-git-dir`) has no main checkout folder to name: an error, never a guess
+    from the git directory's name, which may be another project's."""
+    toplevel = common.git_out(cwd, "rev-parse", "--show-toplevel")
+    if toplevel is None:
         return None
-    found = Path(common_dir)
-    return found.parent.name if found.name == ".git" else found.name.removesuffix(".git")
+    git_dir = Path(common.git_out(cwd, "rev-parse", "--absolute-git-dir")).resolve()
+    common_dir = Path(common.git_common_dir(cwd))
+    if git_dir == common_dir:  # the main checkout
+        return Path(toplevel).name
+    if common_dir.name != ".git":
+        raise ModelsError(f"{toplevel} is a worktree of {common_dir}, which has no main checkout folder to name the project: pass --project <name>")
+    return common_dir.parent.name
 
 
 def pi_lists(model: str) -> None:

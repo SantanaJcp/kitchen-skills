@@ -1101,6 +1101,26 @@ class ModelsTests(KitchenFixture):
 
         self.assertEqual(used, {"personal-a", "personal-b"})
 
+    def test_a_git_directory_named_like_a_project_does_not_make_a_checkout_that_project(self):
+        self.projects_set()
+        garden = self.home / "work" / "garden"
+        for folder in (garden, self.home / "meta"):
+            folder.mkdir(parents=True)
+        git(garden, "init", "-q", "-b", "main", "--separate-git-dir", str(self.home / "meta" / "shop.git"))
+        git(garden, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
+        bare = self.home / "bare" / "shop.git"
+        git(self.home, "clone", "-q", "--bare", str(garden), str(bare))
+        git(bare, "worktree", "add", "-q", str(self.home / "wt" / "t3-5678"), "main")
+
+        separate = json.loads(self.worker_in(garden, "--json").stdout)
+        of_bare = self.kitchen("models", "get", "worker", "--job", "routine", "--t3", cwd=self.home / "wt" / "t3-5678")
+        named = json.loads(self.worker_in(self.home / "wt" / "t3-5678", "--project", "shop", "--json").stdout)
+
+        self.assertEqual((separate["project"], separate["account"]), ("garden", "personal-a"))
+        self.assertEqual((of_bare.returncode, of_bare.stdout), (1, ""))
+        self.assertIn("pass --project <name>", of_bare.stderr)
+        self.assertEqual(named["account"], "work-x")
+
     def test_a_batch_alternates_a_projects_accounts_by_index(self):
         self.projects_set()
 
