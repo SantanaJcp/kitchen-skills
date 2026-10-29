@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""PreToolUse guard: deny `git push` whose destination is dev, main, master or a configured shared branch.
+"""PreToolUse guard: deny `git push` whose destination is dev, main, master or a configured shared branch,
+including a push without a refspec that remote.<name>.push or remote.<name>.mirror sends to one.
 
 Extra shared branches (names or shell globs, one per line) live in ~/.config/kitchen/shared-branches.txt.
 Principles: `doors` (a shared branch changes only on the owner's explicit request)."""
@@ -22,6 +23,8 @@ PUSH_LONG_WITH_VALUE = ("--repo", "--push-option", "--receive-pack", "--exec")
 ALL_BRANCHES = ("--all", "--branches", "--mirror")
 # Config that decides where a push goes. A -c or GIT_CONFIG_* that sets one is not resolved: it blocks.
 PUSH_CONFIG_PREFIXES = ("push.", "remote.", "branch.", "include.", "includeif.")
+# Inherited config sources: shellparse.run_git strips inherited GIT_*, but the agent's git command still reads them.
+INHERITED_CONFIG_VARS = ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG")
 ADVICE = ("Push your own branch instead (`git push -u origin <your-branch>`) and open a pull request. "
           "Shared branches change only on the owner's explicit request, and then the owner runs the push.")
 BY_HAND = ("If this push is meant and safe, write the remote and branch literally (`git push origin <your-branch>`), "
@@ -44,6 +47,8 @@ def shared(branch, patterns):
         if not branch.startswith("refs/heads/"):
             return False  # tags, notes
         branch = branch[len("refs/heads/"):]
+    elif branch.startswith("heads/"):
+        branch = branch[len("heads/"):]  # git expands an unqualified heads/<name> to refs/heads/<name>
     return any(fnmatch.fnmatchcase(branch, p) or fnmatch.fnmatchcase(p, branch) for p in patterns)
 
 
@@ -58,6 +63,18 @@ def current_branch(call):
         return None, None
     upstream = shellparse.run_git(call, "config", "--get", f"branch.{branch}.merge")
     return branch, upstream
+
+
+def configured_push(call):
+    """(mirror remotes, push refspecs) from every remote in git config; None when the config cannot be read.
+    Every remote, not the one git would pick: --repo, a sole non-origin remote, pushRemote and pushDefault
+    all change the pick, and reading them all denies whenever any could reach a shared branch."""
+    pushes = shellparse.git_config_regexp(call, r"^remote\..*\.push$")
+    mirrors = shellparse.git_config_regexp(call, r"^remote\..*\.mirror$", "--bool")
+    if pushes is None or mirrors is None:
+        return None
+    mirrored = [key[len("remote."):-len(".mirror")] for key, value in mirrors if value == "true"]
+    return mirrored, [(key[len("remote."):-len(".push")], value) for key, value in pushes]
 
 
 def parse_push(args):
@@ -97,6 +114,9 @@ def unresolvable(call):
     keys = [key for key, _ in call.config if key == "<unknown>" or key.startswith(PUSH_CONFIG_PREFIXES)]
     if keys:
         return f"`{keys[0]}` is set for this command, and it decides where the push goes."
+    inherited = [name for name in INHERITED_CONFIG_VARS if name in os.environ]
+    if inherited:
+        return f"{inherited[0]} is set in this environment, so git reads config the hook does not replay."
     files = shellparse.config_files(call)
     if files:
         return f"{files[0]} points git at a config file the hook has not read."
@@ -112,11 +132,19 @@ def destinations(call, patterns):
     if positionals and positionals[0].dynamic:
         return ["cannot tell where this push goes: the remote is a variable or a command output. " + BY_HAND]
     refspecs = positionals[1:]
-    reasons = []
     deleting = "d" in shorts or any(abbreviates(name, "--delete") for name in longs)
     if not refspecs:
-        default = shellparse.run_git(call, "config", "--get", "push.default")
         branch, upstream = current_branch(call)
+        # Without a refspec on the command line git uses remote.<name>.mirror, then remote.<name>.push, then push.default.
+        configured = configured_push(call)
+        if configured is None:
+            return ["cannot read this repository's git config, so where a `git push` without a refspec goes is unknown. " + BY_HAND]
+        mirrored, pushes = configured
+        if mirrored:
+            return [f"remote.{mirrored[0]}.mirror is set, so `git push` to it mirrors every local branch, shared ones included."]
+        reasons = [f"remote.{remote}.push is set: {reason}"
+                   for remote, spec in pushes for reason in refspec_reasons(call, [shellparse.Arg(spec)], False, patterns, shorthand=False)]
+        default = shellparse.run_git(call, "config", "--get", "push.default")
         if default == "matching":
             return ["push.default is `matching`, so a bare `git push` updates every branch the remote also has, shared ones included."]
         if branch is None:
@@ -126,6 +154,13 @@ def destinations(call, patterns):
             if name and shared(name, patterns):
                 reasons.append(f"`git push` from branch `{branch}` updates the shared branch `{name.replace('refs/heads/', '', 1)}`.")
         return reasons[:1]
+    return refspec_reasons(call, refspecs, deleting, patterns)
+
+
+def refspec_reasons(call, refspecs, deleting, patterns, shorthand=True):
+    """Reasons these refspecs would, or might, update a shared branch. `shorthand`: the command-line
+    `tag <name>` form applies; a configured refspec list has no such form."""
+    reasons = []
     skip_tag = False
     for spec in refspecs:
         if skip_tag:
@@ -134,7 +169,7 @@ def destinations(call, patterns):
         if spec.dynamic:
             return [f"cannot tell where `{spec.value}` pushes: it is a variable or a command output. " + BY_HAND]
         value = spec.value.lstrip("+")
-        if value == "tag":
+        if shorthand and value == "tag":
             skip_tag = True
             continue
         if deleting:
