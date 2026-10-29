@@ -39,6 +39,6 @@ Only when fixing is authorized; otherwise stop and report the cause.
 
 ## Reply
 
-What broke, the root cause and the evidence that proves it, the fix, the red and green output trimmed to the assertion, and what remains unverified. Then say whether this class of bug can be made impossible, and at which layer: code, guard or lint, hook, or rule.
+What broke, the root cause and the evidence that proves it, the fix, the red and green output trimmed to the assertion, and what remains unverified. Then say whether this class of bug can be made impossible, and at which layer: code, guard or lint, hook, or rule. When the cause took a deep dig to find, propose the cheap, always-on signal (a log line, a status field, an assertion) that would have shown it at first look.
 
 Principles (the kitchen's PRINCIPLES.md): `root-cause`, `prove`.

@@ -13,9 +13,9 @@ Done means you saw the observable result: the app, the command output, the recor
 - **Why:** a wrong "done" costs more than the check, and a test that cannot fail catches nothing. Verification is what turns a prompt into a loop (the video); agents love tautological tests (the video). The kitchen's own review found controls reporting success they had not earned (PR #22).
 - **When:** before you claim anything is done, fixed or safe.
 - **Includes (pstack):**
-  - *Prove It Works*: check the real artifact; script the check and keep its output so anyone can rerun it.
-  - *Test Behavior, Not Implementation*: would the test still pass if every function it imports returned `undefined`? Then it tests nothing. Watch for weak assertions, mock-only tests, self-referential expectations, pinned constants and fixtures asserting fixtures.
-  - *Sequence Work into Verifiable Units*: small units, each ending in a check; do not start the next until it is green.
+  - [*Prove It Works*](principles/prove-it-works.md): after a task, before you say it is done, fixed or safe.
+  - [*Test Behavior, Not Implementation*](principles/test-behavior-not-implementation.md): you write, change or keep a test.
+  - [*Sequence Work into Verifiable Units*](principles/sequence-verifiable-units.md): multi-step work, and how you stack commits and pull requests.
 - **Enforced by:** the init playbook (every `bin/check` command run and seen to pass, the commit tier green twice and red on a planted defect in a file it runs); `kitchen integrate`; the nightly guard; the gardener reruns its verify steps before publishing; the `audit-verification` skill, and the daily audit that runs it only on a green guard and never ships a fix nobody drove live; the Skeptic lens of `second-opinion`.
 
 ## 2. Unknown is never green (`truthful-state`)
@@ -25,7 +25,7 @@ Never invent counts, freshness, progress or success. A read that failed is `unkn
 - **Why:** the owner acts on what the screen says. A `0` that means "could not read" hides the exact failure the screen exists to show: `status` once turned a failed `git status` into `dirty: 0` (PR #22), and a product dashboard showed `0` instead of "unknown" for failed requests.
 - **When:** every report, every status line, every automation you write.
 - **Includes (pstack):**
-  - *Explain the Number*: before trusting a measured number, name what limits it and what else it could be measuring. Ask "why not double?" Keep run count and spread next to it.
+  - [*Explain the Number*](principles/explain-the-number.md): before you measure, and before you trust, report or act on a number you measured.
 - **Enforced by:** `status` prints `unknown`, never `0` or `none`; the nightly records `incomplete` and is never green without steps; `integrate --recorded` reuses a PASS only on the same SHAs and check digest; `retro` prints its coverage line; `second-opinion` treats a missing review as a gap.
 
 ## 3. No fallbacks; fail loud (`no-fallbacks`)
@@ -35,8 +35,8 @@ When the intended operation fails, surface the failure. No alternative path, sub
 - **Why:** a fallback turns a failure into a quiet wrong answer that you find much later, in the wrong place, and the system claims it worked. The owner's own rule, from repeated corrections.
 - **When:** error handling, defaults, retries, "just in case" branches, model or tool substitutions, compatibility layers.
 - **Includes (pstack):**
-  - *Outcome-Oriented Execution*: optimize for the verified end state, not for smooth intermediate states; temporary compatibility code becomes permanent debt.
-  - *Migrate Callers Then Delete Legacy APIs*: move every caller and delete the old path in the same change; no dual paths. If that removes behavior someone relies on, or the API is published, it is a one-way door (`doors`).
+  - [*Outcome-Oriented Execution*](principles/outcome-oriented-execution.md): planned rewrites and migrations with explicit phase boundaries.
+  - [*Migrate Callers Then Delete Legacy APIs*](principles/migrate-callers-then-delete-legacy-apis.md): a new internal API while old callers exist; a one-way door (`doors`) if it removes behavior someone relies on.
 - **Enforced by:** every hook blocks with exit 2 when it cannot read its input or parse the command; `integrate` has no default base; `install` refuses a file it cannot parse or does not manage; `kitchen models` fails, with no default, when a reviewer is not configured, and `get worker` says on stderr when the worker runs on the session model. In project code: rule only.
 
 ## 4. Fix the cause, not the symptom (`root-cause`)
@@ -46,8 +46,8 @@ Reproduce first, red. Form hypotheses that can be falsified. Fix the cause, then
 - **Why:** symptom fixes pile up and the bug comes back somewhere else; agents use a comment as an excuse for a patch. The deck's bug flow: red repro, failing test, minimal fix.
 - **When:** anything broken, failing, flaky or slow whose cause is not known.
 - **Includes (pstack):**
-  - *Fix Root Causes*: ask why until you reach the cause; grep for the pattern and fix every instance; for "fails after restart", suspect stale state first.
-  - *Attack the Premise*: when two fixes that share a premise fail the same gate, write the premise down and test it before a third fix.
+  - [*Fix Root Causes*](principles/fix-root-causes.md): debugging anything broken, failing, flaky or slow.
+  - [*Attack the Premise*](principles/attack-the-premise.md): two fixes that share one premise have failed the same gate.
 - **Enforced by:** the `find-the-cause` skill. Otherwise rule only.
 
 ## 5. A repeated correction is an environment defect (`encode-lessons`)
@@ -57,8 +57,8 @@ If the owner has to say it twice, the environment is wrong, not the session. Fix
 - **Why:** "If someone always trips in the same place, you fix the floor; you don't ask them to be careful" (poteto, in the deck). Correct the environment, not the one agent (the video). Three rules that used to be text are now hooks (PR #31).
 - **When:** every correction, every review miss, every incident.
 - **Includes (pstack):**
-  - *Encode Lessons in Structure*: the second time you write the same instruction, turn it into a check and delete the text.
-  - *Build the Lever*: for repeated or bulk work, build the script, codemod or generator and put it in the diff; "trust me" becomes "run this".
+  - [*Encode Lessons in Structure*](principles/encode-lessons-in-structure.md): you write the same instruction a second time, or a correction repeats.
+  - [*Build the Lever*](principles/build-the-lever.md): any work that is not trivial: edits, migrations, analyses, checks.
 - **Enforced by:** the `retro` skill and the weekly retro job; attack corpora in `tests/corpus/` (a miss found in review becomes a bypass case); `kitchen check`; `tests/test_principles.py`.
 
 ## 6. Spend the owner's attention only on decisions (`owner-attention`)
@@ -68,7 +68,7 @@ The owner's attention is the scarcest resource in the kitchen. On reversible wor
 - **Why:** the owner was the bottleneck: dozens of "how is it going?" and "push it to dev" in one week (the deck), 18 merges approved by hand. "Where am I the bottleneck?" and "sample instead of block" (the video). A control the owner has to read is a cost, not a safeguard: a control must buy autonomy (PR #22).
 - **When:** planning, reporting, designing any check or automation.
 - **Includes (pstack):**
-  - *Never Block on the Human*: proceed on reversible work and let the owner correct afterwards. pstack lets external actions proceed; the kitchen does not: one-way doors (`doors`) and anything sent to people or published still wait for the owner's explicit request.
+  - [*Never Block on the Human*](principles/never-block-on-the-human.md): tempted to ask "should I do X?" on reversible work; never a one-way door, nor anything sent or published.
 - **Enforced by:** the kitchen stays off until the owner types `/chef-mode`, and `install` writes nothing every session reads; `status --exceptions` (prints only non-green, exits 1); notifications only for red, incomplete, blocked or decision; the nightly opens one issue while red and closes it when green; the daily audit files its findings in one issue per finding; the init playbook asks the owner once, only about what the repo cannot answer. Reply format: rule only.
 
 ## 7. Know your doors (`doors`)
@@ -78,7 +78,7 @@ A two-way door is cheap to revert: walk through it. A one-way door is not: schem
 - **Why:** speed is safe only where mistakes are cheap, and autonomy on two-way doors is what the owner can grant. Two-way and one-way PRs came up in the video; the deck set the policy: two-way goes verify, second opinion, merge, and the owner samples; one-way goes two designs, approval, a specific verification. The owner chose the ladder (2026-10-06): more autonomy where trust is earned, so the agent merges what is not critical once a project has its guardrails.
 - **When:** before any action you could not undo with one command.
 - **Includes (pstack):**
-  - *Exhaust the Design Space*: the options for a one-way door must differ in shape; "a second flavor of the first shape does not count".
+  - [*Exhaust the Design Space*](principles/exhaust-the-design-space.md): a one-way door, or a decision with no precedent in the codebase.
 - **Enforced by:** the guards each project carries, `deny-shared-push`, `deny-no-verify`, `deny-recursive-rm` (move to the Trash instead); the rung rules of `chef-mode`; the init playbook prints one-way doors such as rulesets as decisions, never runs them, and the owner merges its pull request; the gardener only opens a PR, within a line budget and outside protected paths; `kitchen check` blocks private data in this public repo.
 
 ## 8. Say how you know (`evidence`)
@@ -96,10 +96,10 @@ Prefer the smallest change that does the job. Skills are workflows, not manuals:
 - **Why:** what an agent does not read, it does not follow. Move the deterministic parts into code and leave only judgment in the skill; skills get smaller as models improve (the video). "If a rule is enough, it is not a skill" (the deck). The kitchen replaced a large suite with a few hundred owned lines (PR #21).
 - **When:** writing a skill, rule or tool; choosing a dependency; deciding what to load.
 - **Includes (pstack):**
-  - *Laziness Protocol*: the most result from the least code; if answering a question means tracing more than three files or layers, flatten it.
-  - *Subtract Before You Add*: remove complexity before building; no speculative guards; delete stubs with nothing in them.
-  - *Minimize Reader Load*: can a new reader answer "where does X come from?" and "what can change X?" in under 30 seconds?
-  - *Guard the Context Window*: route bulk to workers; keep summaries, not raw payloads.
+  - [*Laziness Protocol*](principles/laziness-protocol.md): refactoring, sizing a diff, or tempted to add an abstraction or a layer.
+  - [*Subtract Before You Add*](principles/subtract-before-you-add.md): sequencing an addition, refactor or rewrite.
+  - [*Minimize Reader Load*](principles/minimize-reader-load.md): reviewing or shaping code that is hard to trace.
+  - [*Guard the Context Window*](principles/guard-the-context-window.md): context is filling up: large outputs, long files, repeated reads, a fan-out.
 - **Enforced by:** `kitchen check` (`SKILL.md` at most 150 lines, one-line descriptions, folder name equals `name`); the Minimalist lens of `second-opinion`. Standard library only: rule only.
 
 ## 10. Separate before you share (`isolate`)
@@ -109,8 +109,8 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 - **Why:** instructions are not concurrency control, and a rerun should never become a debugging session. Measured here: `GIT_*` variables leaking from a worktree wrote junk commits and `core.bare=true` into the shared repo (PR #22).
 - **When:** delegating, scheduling jobs, writing installers and state files.
 - **Includes (pstack):**
-  - *Separate Before Serializing Shared State*: remove the shared write target first; serialize only when sharing is a real invariant.
-  - *Make Operations Idempotent*: what happens if it runs twice, or crashed halfway? If the answer depends on leftover state, add reconciliation.
+  - [*Separate Before Serializing Shared State*](principles/separate-before-serializing-shared-state.md): concurrent actors might write the same file, branch, key or state.
+  - [*Make Operations Idempotent*](principles/make-operations-idempotent.md): commands, installers and loops that run amid crashes and retries.
 - **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector); the automation project lock; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`.
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
@@ -136,10 +136,10 @@ Shape the code so the wrong thing is hard to write. Get the data and the scaffol
 - **Why:** agents take the shortcut the code allows; "how do I make the easy thing the right thing?" and "there's really only one way to do something" (the video). The codebase is the agents' memory: every copy of a bad pattern makes the next one likelier.
 - **When:** designing features, data, APIs and modules in a project. The project's AGENTS.md and lint config carry the specifics.
 - **Includes (pstack):**
-  - *Foundational Thinking*: data structures and scaffolding (CI, lint, tests, shared types) first; ask "what if another actor changes this at the same time?"
-  - *Redesign from First Principles*: fold a new requirement in as if it had been there from day one, through every type, doc and example.
-  - *Model the Domain*: a state machine, union or registry instead of an if/else that grows a branch per feature, or two booleans that must stay in sync.
-  - *Boundary Discipline*: validate where data enters the system; keep business logic pure.
-  - *Type System Discipline*: make illegal states unrepresentable; if you can write a comment explaining when a combination of fields is valid, use a sum type.
-  - *Experience First*: fewer, finished features over many rough ones; the next maintainer and the library's importer are users too.
+  - [*Foundational Thinking*](principles/foundational-thinking.md): before writing logic: core types, scaffold before features, shared state.
+  - [*Redesign from First Principles*](principles/redesign-from-first-principles.md): integrating a new requirement into an existing design.
+  - [*Model the Domain*](principles/model-the-domain.md): stateful logic, or code that branches a lot or repeats a shape assumption.
+  - [*Boundary Discipline*](principles/boundary-discipline.md): wiring validation, error handling or framework adapters.
+  - [*Type System Discipline*](principles/type-system-discipline.md): designing types or a signature in any typed language.
+  - [*Experience First*](principles/experience-first.md): product, UX or feature-scope tradeoffs.
 - **Enforced by:** rule only. Each project encodes its own in types and lint (`encode-lessons`).
