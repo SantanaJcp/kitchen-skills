@@ -1004,8 +1004,8 @@ class ModelsTests(KitchenFixture):
         return result.stdout.strip()
 
     def test_the_job_moves_the_workers_effort_within_low_and_max(self):
-        for configured, job, expected in (("high", "hardest", "xhigh"), ("max", "hardest", "max"), ("high", "judgment", "medium"),
-                                          ("high", "routine", "low"), ("medium", "routine", "low"), ("low", "judgment", "low")):
+        for configured, job, expected in (("high", "hardest", "xhigh"), ("max", "hardest", "max"), ("high", "judgment", "high"),
+                                          ("high", "routine", "medium"), ("low", "routine", "low"), ("xhigh", "judgment", "xhigh")):
             with self.subTest(configured=configured, job=job):
                 self.assertEqual(self.worker(effort=configured).returncode, 0)
 
@@ -1044,9 +1044,9 @@ class ModelsTests(KitchenFixture):
         self.assertEqual(json.loads(claude), {"providerInstanceId": "acct-b", "model": "claude-x",
                                               "options": {"effort": "xhigh", "fastMode": False}})
         self.assertEqual(json.loads(codex), {"driverKind": "codex", "model": "gpt-x",
-                                             "options": {"reasoningEffort": "low", "serviceTier": "priority"}})
+                                             "options": {"reasoningEffort": "medium", "serviceTier": "priority"}})
         self.assertEqual(codex_call, "codex exec --skip-git-repo-check -s workspace-write -m gpt-x "
-                                     "-c 'model_reasoning_effort=\"low\"' -c 'service_tier=\"default\"'")
+                                     "-c 'model_reasoning_effort=\"medium\"' -c 'service_tier=\"default\"'")
 
     def test_an_unset_worker_and_an_unset_reviewer_both_run_on_the_session_model(self):
         worker = self.kitchen("models", "get", "worker", "--job", "routine", "--t3")
@@ -1059,6 +1059,139 @@ class ModelsTests(KitchenFixture):
         self.assertEqual(reviewer.returncode, 0, reviewer.stderr)
         self.assertEqual(reviewer.stdout, "")
         self.assertIn("not a cross-model review", reviewer.stderr)
+
+    def git_repo(self, name):
+        """A git repository named `name`, with one commit so it can grow a worktree."""
+        path = self.home / "work" / name
+        path.mkdir(parents=True)
+        git(path, "init", "-q", "-b", "main")
+        git(path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
+        return path
+
+    def worker_in(self, cwd, *flags):
+        result = self.kitchen("models", "get", "worker", "--job", "routine", *flags, cwd=cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def projects_set(self):
+        """Personal accounts by default; `shop` alone may use its own work account."""
+        self.assertEqual(self.worker(accounts="personal-a,personal-b").returncode, 0)
+        project = self.kitchen("models", "set", "worker", "--project", "shop", "--accounts", "work-x,personal-a")
+        self.assertEqual(project.returncode, 0, project.stderr)
+
+    def test_outside_a_repository_and_without_project_the_default_accounts_apply(self):
+        self.projects_set()
+        outside = self.home / "loose"
+        outside.mkdir()
+
+        result = self.worker_in(outside, "--json")
+
+        got = json.loads(result.stdout)
+        self.assertEqual((got["project"], got["accounts_from"], got["account"]), (None, "default", "personal-a"))
+        self.assertIn("not inside a git repository", result.stderr)
+        self.assertIn("default accounts", result.stderr)
+
+    def test_a_projects_accounts_apply_by_flag_or_in_its_checkout_and_a_linked_worktree_needs_the_flag(self):
+        self.projects_set()
+        shop = self.git_repo("shop")
+        worktree = self.home / "elsewhere" / "t3-1234"
+        git(shop, "worktree", "add", "-q", "-b", "feature", str(worktree))
+
+        by_flag = json.loads(self.worker_in(self.home, "--project", "shop", "--json").stdout)
+        by_repo = json.loads(self.worker_in(shop, "--json").stdout)
+        by_worktree = json.loads(self.worker_in(worktree, "--json").stdout)
+        named_worktree = json.loads(self.worker_in(worktree, "--project", "shop", "--json").stdout)
+
+        for got in (by_flag, by_repo, named_worktree):
+            self.assertEqual((got["project"], got["accounts_from"], got["accounts"], got["account"]),
+                             ("shop", "project", ["work-x", "personal-a"], "work-x"))
+        self.assertEqual((by_worktree["project"], by_worktree["accounts_from"], by_worktree["account"]),
+                         ("t3-1234", "default", "personal-a"))
+
+    def test_an_account_listed_only_under_a_project_is_never_used_outside_it(self):
+        self.projects_set()
+        garden = self.git_repo("garden")
+        outside = self.home / "loose"
+        outside.mkdir()
+
+        used = set()
+        for i in range(6):
+            for cwd, flags in ((garden, ()), (outside, ()), (outside, ("--project", "garden")), (self.home, ("--project", "shop2"))):
+                target = json.loads(self.worker_in(cwd, "--index", str(i), "--t3", *flags).stdout)
+                used.add(target["providerInstanceId"])
+
+        self.assertEqual(used, {"personal-a", "personal-b"})
+
+    def test_a_git_directory_named_like_a_project_does_not_make_a_checkout_that_project(self):
+        self.projects_set()
+        garden = self.home / "work" / "garden"
+        for folder in (garden, self.home / "meta"):
+            folder.mkdir(parents=True)
+        git(garden, "init", "-q", "-b", "main", "--separate-git-dir", str(self.home / "meta" / "shop.git"))
+        git(garden, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
+        bare = self.home / "bare" / "shop.git"
+        git(self.home, "clone", "-q", "--bare", str(garden), str(bare))
+        git(bare, "worktree", "add", "-q", str(self.home / "wt" / "t3-5678"), "main")
+
+        # regression (review of #87): a linked worktree of a checkout whose git directory sits in another project's folder
+        git(garden, "worktree", "add", "-q", "-b", "side", str(self.home / "wt" / "t3-9999"))
+
+        separate = json.loads(self.worker_in(garden, "--json").stdout)
+        of_separate = json.loads(self.worker_in(self.home / "wt" / "t3-9999", "--json").stdout)
+        of_bare = json.loads(self.worker_in(self.home / "wt" / "t3-5678", "--json").stdout)
+        named = json.loads(self.worker_in(self.home / "wt" / "t3-5678", "--project", "shop", "--json").stdout)
+
+        self.assertEqual((separate["project"], separate["account"]), ("garden", "personal-a"))
+        for got in (of_separate, of_bare):
+            self.assertEqual((got["accounts_from"], got["account"]), ("default", "personal-a"))
+        self.assertEqual(named["account"], "work-x")
+
+    def test_a_batch_alternates_a_projects_accounts_by_index(self):
+        self.projects_set()
+
+        got = [json.loads(self.worker_in(self.home, "--project", "shop", "--index", str(i), "--t3").stdout)["providerInstanceId"]
+               for i in range(4)]
+
+        self.assertEqual(got, ["work-x", "personal-a", "work-x", "personal-a"])
+
+    def test_the_listing_shows_project_entries_and_remove_drops_one(self):
+        self.projects_set()
+        self.kitchen("models", "set", "worker", "--project", "garden", "--accounts", "personal-b")
+
+        listed = self.kitchen("models").stdout
+        removed = self.kitchen("models", "remove", "worker", "--project", "shop")
+        after = self.kitchen("models").stdout
+        shop = json.loads(self.worker_in(self.home, "--project", "shop", "--json").stdout)
+
+        self.assertIn("worker                   claude claude-x · effort high · tier standard · accounts personal-a, personal-b", listed)
+        self.assertIn("worker in shop           accounts work-x, personal-a", listed)
+        self.assertIn("worker in garden         accounts personal-b", listed)
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertNotIn("worker in shop", after)
+        self.assertIn("worker in garden", after)
+        self.assertIn("worker                   claude claude-x", after)
+        self.assertEqual((shop["accounts_from"], shop["account"]), ("default", "personal-a"))
+
+    def test_resetting_the_default_worker_keeps_the_project_entries(self):
+        self.projects_set()
+
+        self.worker(provider="codex", model="gpt-x", accounts="personal-b")
+        got = json.loads(self.worker_in(self.home, "--project", "shop", "--json").stdout)
+
+        self.assertEqual((got["provider"], got["account"]), ("codex", "work-x"))
+
+    def test_a_project_entry_holds_accounts_only(self):
+        for flags, error in ((("--accounts", "work-x", "--model", "gpt-x"), "a project entry holds only --accounts"),
+                             ((), "pass --accounts"),
+                             (("--accounts", "work-x,work-x"), "listed twice")):
+            with self.subTest(flags=flags):
+                result = self.kitchen("models", "set", "worker", "--project", "shop", *flags)
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(error, result.stderr)
+        reviewer = self.kitchen("models", "set", "reviewer", "--author", "claude", "--project", "shop", "--accounts", "work-x")
+        self.assertEqual(reviewer.returncode, 1)
+        self.assertIn("--project is for the worker", reviewer.stderr)
 
     def reviewer(self, action, author, provider, model, tier="standard"):
         return self.kitchen("models", action, "reviewer", "--author", author, "--provider", provider, "--model", model,

@@ -450,6 +450,14 @@ def cmd_guards(args: argparse.Namespace) -> int:
 
 def cmd_models(args: argparse.Namespace) -> int:
     try:
+        if getattr(args, "project", None) is not None and args.role != "worker":
+            raise models.ModelsError(f"--project is for the worker's accounts; a {args.role} runs on the instance of its provider")
+        if args.action in ("set", "remove") and args.project is not None:
+            return worker_project(args)
+        if args.action in ("set", "remove"):
+            missing = [f"--{f}" for f in (("provider",) if args.action == "remove" else models.FIELDS) if getattr(args, f) is None]
+            if missing:
+                raise models.ModelsError(f"pass {', '.join(missing)}")
         if args.action in ("set", "add", "remove"):
             if args.action == "add" and args.role not in models.PER_AUTHOR:
                 raise models.ModelsError(f"`{args.role}` is one model: `kitchen models set {args.role}` replaces it")
@@ -489,17 +497,32 @@ def cmd_models(args: argparse.Namespace) -> int:
         return 1
 
 
+def worker_project(args: argparse.Namespace) -> int:
+    """`set|remove worker --project <name>`: one project's account list, which holds accounts and nothing else."""
+    given = [f"--{f}" for f in models.FIELDS if getattr(args, f, None) is not None]
+    if given:
+        raise models.ModelsError(f"a project entry holds only --accounts; {', '.join(given)} belong to `{models.set_command('worker', None)}`")
+    if args.action == "set" and args.accounts is None:
+        raise models.ModelsError("pass --accounts <t3-instance-id,...>: a project entry is its account list")
+    models.put_project(args.project, args.accounts.split(",") if args.action == "set" else None)
+    print(f"{args.action:<11}worker in {args.project} in {models.path()}")
+    return 0
+
+
 def worker_get(args: argparse.Namespace) -> int:
     """One delegated worker's target. Unset, it runs on the session model: an empty target, said on stderr (owner, 2026-10-29)."""
     if not args.job:
         raise models.ModelsError(f"pass --job {' or --job '.join(models.JOBS)}: the job sets the worker's effort")
     models.key(args.role, args.author)
-    entry = models.worker(args.job, args.urgent, args.index or 0)
+    project = args.project if args.project is not None else models.here(Path.cwd())
+    entry = models.worker(args.job, args.urgent, args.index or 0, project)
     if entry is None:
         print(models.unset(args.role, None), file=sys.stderr)
         if not args.command:
             print("{}" if args.json or args.t3 else "session model")
         return 0
+    if project is None:
+        print("note: not inside a git repository and no --project: the worker uses the default accounts", file=sys.stderr)
     if args.command:
         print(models.shell(models.command(entry, writes=True)))
         if entry.get("account"):
@@ -600,21 +623,25 @@ def main() -> int:
     for p_role in (mod_get, mod_set, mod_add, mod_remove):
         p_role.add_argument("role", choices=models.ROLES)
         p_role.add_argument("--author", choices=models.AUTHORS, help="reviewer only, and required there: who wrote the work; the reviewer runs another family's model")
+    mod_get.add_argument("--project", help="worker: whose account list to use (default: the repository of the current directory)")
+    mod_set.add_argument("--project", help="worker: set this project's account list, which replaces the default accounts there only")
+    mod_remove.add_argument("--project", help="worker: remove this project's account list")
+    mod_add.set_defaults(project=None)
     get_output = mod_get.add_mutually_exclusive_group()
     get_output.add_argument("--json", action="store_true")
     get_output.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
     get_output.add_argument("--t3", action="store_true", help="print the target JSON for T3's delegate_task, one per line")
-    mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: hardest raises the configured effort one step, judgment lowers it one, routine two")
+    mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: judgment keeps the configured effort, hardest raises it one step, routine lowers it one")
     mod_get.add_argument("--urgent", action="store_true", help="worker: the fast tier (CI or trunk red, someone blocked now); standard otherwise")
     mod_get.add_argument("--index", type=int, help="worker: the worker's place in its batch, from 0; picks accounts[index %% len]")
-    for p_entry in (mod_set, mod_add):
-        p_entry.add_argument("--provider", required=True, choices=models.PROVIDERS)
-        p_entry.add_argument("--model", required=True, help="a model id (`<provider>/<id>` for pi), or `default` for that tool's own default")
-        p_entry.add_argument("--effort", required=True, choices=models.EFFORTS)
-        p_entry.add_argument("--tier", required=True, choices=models.TIERS)
+    for p_entry in (mod_set, mod_add):  # required for add here; for set, unless --project, in cmd_models
+        p_entry.add_argument("--provider", required=p_entry is mod_add, choices=models.PROVIDERS)
+        p_entry.add_argument("--model", required=p_entry is mod_add, help="a model id (`<provider>/<id>` for pi), or `default` for that tool's own default")
+        p_entry.add_argument("--effort", required=p_entry is mod_add, choices=models.EFFORTS)
+        p_entry.add_argument("--tier", required=p_entry is mod_add, choices=models.TIERS)
     mod_set.add_argument("--accounts", help="worker: T3 provider instance ids, comma-separated, in the order a batch alternates them")
     mod_add.set_defaults(accounts=None)
-    mod_remove.add_argument("--provider", required=True, choices=models.PROVIDERS)
+    mod_remove.add_argument("--provider", choices=models.PROVIDERS, help="required, unless --project")
     mod_remove.add_argument("--model", help="which one, when more than one runs on that provider")
     mod.set_defaults(func=cmd_models, action=None)
 
