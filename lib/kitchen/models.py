@@ -5,17 +5,22 @@ set per author family (`--author claude` means the work is Claude's and its revi
 is a list: `set` replaces it with one model, `add` appends another, and second-opinion runs every lens on each, in
 parallel. `worker`, the one chef-mode's Delegation reads for every delegated worker, is one model for any author, plus
 an optional ordered list of accounts (T3 provider instance ids): `get worker --job` adjusts its effort to the job, its
-tier to `--urgent`, and picks `accounts[index % len]`, so a batch alternates accounts with no state. Every entry is
+tier to `--urgent`, and picks `accounts[index % len]`, so a batch alternates accounts with no state. A project may hold
+its own account list (`set worker --project <name> --accounts ...`), which replaces the default list in that project
+alone: the project is `--project`, else the current directory's git top-level folder (a linked worktree, such as T3's,
+gets the default accounts unless `--project` names its project). An account listed only under a project is never picked
+anywhere else, so a client's account serves that client's project only (owner, 2026-10-29). Every entry is
 explicit: provider (the CLI, or T3's provider of that name), model (`default` = that tool's own default), effort and
 service tier.
 
-A reviewer nobody set is an error with the command that sets it, never a default model; a reviewer running the author's
-own family is refused, and so is a pi model whose family kitchen cannot tell. The one exception is the worker's model
-(owner, 2026-10-29): a worker nobody set runs on the session model, and `get worker` says so on stderr with the command
-that sets it. Whether the model exists is learned when it is used: the tool's error is shown as it is. pi alone has no
-such error (it runs the nearest model it knows), so its call is refused unless `pi --list-models` lists the id exactly.
-Principles: `cross-review` (another model reviews), `no-fallbacks` (no stand-in reviewer; the worker's fallback is said
-aloud), `owner-attention` (set once).
+No role has a default model. A role nobody set runs on the session model, and `get` says so on stderr with the command
+that sets it: the one exception to `no-fallbacks` (owner, 2026-10-29), so the reply of a review run that way says it was
+not a cross-model review. A reviewer running the author's own family is still refused when it is set, and so is a pi
+model whose family kitchen cannot tell. Whether the model exists is learned when it is used: the tool's error is shown
+as it is. pi alone has no such error (it runs the nearest model it knows), so its call is refused unless
+`pi --list-models` lists the id exactly.
+Principles: `cross-review` (another model reviews), `no-fallbacks` (no stand-in model; the session-model fallback is
+said aloud), `owner-attention` (set once).
 """
 from __future__ import annotations
 
@@ -34,7 +39,7 @@ PER_AUTHOR = ("reviewer",)  # set per author family; the others hold one entry f
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TIERS = ("standard", "fast")
 FIELDS = ("provider", "model", "effort", "tier")
-JOBS = {"routine": -2, "judgment": -1, "hardest": 1}  # effort steps from the worker's configured one
+JOBS = {"routine": -1, "judgment": 0, "hardest": 1}  # effort steps from the worker's configured one: judgment keeps it (owner, 2026-10-29)
 T3_DRIVERS = {"claude": "claudeAgent", "codex": "codex", "pi": "pi"}  # T3's driverKind for each provider
 WORKER_TOOLS = "Bash,Read,Edit,Write,Grep,Glob"
 # pi runs many vendors' models; the family is the prefix of its model id (`pi --list-models`)
@@ -70,6 +75,14 @@ def key(role: str, author: str | None) -> tuple[str, str | None]:
     if author not in AUTHORS:
         raise ModelsError(f"`{role}` depends on who wrote the work: pass --author {' or --author '.join(AUTHORS)}")
     return (role, author)
+
+
+def check_accounts(accounts, where: str) -> list[str]:
+    if not isinstance(accounts, list) or not all(isinstance(a, str) and a.strip() == a and a for a in accounts):
+        raise ModelsError(f"{where}: accounts is a list of T3 provider instance ids; run `{set_command('worker', None)}`")
+    if len(set(accounts)) < len(accounts):
+        raise ModelsError(f"{where}: an account is listed twice")
+    return accounts
 
 
 def set_command(role: str, author: str | None) -> str:
@@ -109,11 +122,7 @@ def validate(role: str, author: str | None, entry: dict) -> dict:
     if role not in PER_AUTHOR:
         if entry["tier"] == "fast":
             raise ModelsError(f"a {role} runs fast only when `kitchen models get {role} --urgent` asks for it; set --tier standard")
-        accounts = entry.get("accounts", [])
-        if not isinstance(accounts, list) or not all(isinstance(a, str) and a.strip() == a and a for a in accounts):
-            raise ModelsError(f"{role}: accounts is a list of T3 provider instance ids; run `{set_command(role, author)}`")
-        if len(set(accounts)) < len(accounts):
-            raise ModelsError(f"{role}: an account is listed twice")
+        accounts = check_accounts(entry.get("accounts", []), role)
         return {f: entry[f] for f in FIELDS} | ({"accounts": accounts} if accounts else {})
     if family(entry) == author:
         raise ModelsError(f"a {role} for {author}'s work must run another family's model: the author's model does not check its own work")
@@ -124,7 +133,8 @@ def raw(data: dict, role: str, author: str | None) -> list:
     if not isinstance(data.get(role, {}), dict):
         raise ModelsError(f"{path()}: {role} is not a table; fix it or rerun `{set_command(role, author)}`")
     if role not in PER_AUTHOR:
-        return [data[role]] if role in data else []
+        entry = {k: v for k, v in data.get(role, {}).items() if k != "projects"}  # projects: see project_accounts
+        return [entry] if entry else []
     node = data.get(role, {}).get(author)
     if node is None:
         return []
@@ -133,6 +143,19 @@ def raw(data: dict, role: str, author: str | None) -> list:
     if not isinstance(node, list):
         raise ModelsError(f"{path()}: {role}.{author} is neither a table nor a list of tables; fix it or rerun `{set_command(role, author)}`")
     return node
+
+
+def project_accounts(data: dict) -> dict[str, list[str]]:
+    """The worker's per-project account lists, `[worker.projects.<name>] accounts = [...]`, by project name."""
+    node = data.get("worker", {}).get("projects", {}) if isinstance(data.get("worker", {}), dict) else {}
+    if not isinstance(node, dict):
+        raise ModelsError(f"{path()}: worker.projects is not a table; fix it or rerun `kitchen models set worker --project <name> --accounts ...`")
+    out = {}
+    for name, entry in node.items():
+        if not isinstance(entry, dict) or set(entry) != {"accounts"} or not entry["accounts"]:
+            raise ModelsError(f"{path()}: worker.projects.{name} holds one non-empty accounts list and nothing else")
+        out[name] = check_accounts(entry["accounts"], f"worker in {name}")
+    return out
 
 
 def current(role: str, author: str | None) -> list[dict]:
@@ -146,7 +169,8 @@ def get(role: str, author: str | None) -> list[dict]:
     return entries
 
 
-def put(role: str, author: str | None, entries: list[dict]) -> None:
+def put(role: str, author: str | None, entries: list[dict], projects: dict[str, list[str]] | None = None) -> None:
+    """Rewrite the file with `entries` in this role's slot; the worker's project lists stay unless `projects` replaces them."""
     slot = key(role, author)
     if role not in PER_AUTHOR and len(entries) > 1:
         raise ModelsError(f"`{role}` is one model: `kitchen models set {role}` replaces it")
@@ -161,12 +185,15 @@ def put(role: str, author: str | None, entries: list[dict]) -> None:
     slots = [(r, a) for r in ROLES for a in (AUTHORS if r in PER_AUTHOR else (None,))]
     lists = {(r, a): [validate(r, a, e) for e in raw(data, r, a)] for r, a in slots}
     lists[slot] = clean
+    kept = project_accounts(data) if projects is None else projects
     lines = ["# kitchen models: which models do each role. Written by `kitchen models set|add|remove`; each person sets their own.", ""]
     for (role_name, a), values in lists.items():
         for value in values:
             lines.append(f"[[{role_name}.{a}]]" if a else f"[{role_name}]")
             lines += [f"{f} = {json.dumps(value[f])}" for f in (*FIELDS, "accounts") if f in value]
             lines.append("")
+    for name, accounts in kept.items():
+        lines += [f"[worker.projects.{json.dumps(name)}]", f"accounts = {json.dumps(accounts)}", ""]
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("\n".join(lines), encoding="utf-8")
@@ -180,6 +207,29 @@ def remove(role: str, author: str | None, provider: str, model: str | None) -> N
     if len(matches) > 1:
         raise ModelsError(f"more than one {label(role, author)} runs on {provider}: pass --model")
     put(role, author, [e for e in entries if e is not matches[0]])
+
+
+def put_project(project: str, accounts: list[str] | None) -> None:
+    """Set one project's worker accounts, or drop its entry (None); the default worker is left as it is."""
+    if not project or project.strip() != project:
+        raise ModelsError(f"--project is a project name, not {project!r}")
+    lists = project_accounts(load())
+    if accounts is None:
+        if project not in lists:
+            raise ModelsError(f"the worker has no account list for {project}")
+        del lists[project]
+    else:
+        lists[project] = check_accounts(accounts, f"worker in {project}")
+    put("worker", None, current("worker", None), lists)
+
+
+def here(cwd: Path) -> str | None:
+    """The project `cwd` belongs to: its git top-level folder's name; None outside a git repository. A linked worktree
+    (T3's are named after the thread) is a project of its own folder's name, so it gets the default accounts unless
+    `--project` names its project: git does not record a main checkout's folder reliably, and a wrong guess could hand
+    a client's account to another project, while the default accounts are allowed everywhere (owner, 2026-10-29)."""
+    toplevel = common.git_out(cwd, "rev-parse", "--show-toplevel")
+    return Path(toplevel).name if toplevel else None
 
 
 def pi_lists(model: str) -> None:
@@ -216,28 +266,32 @@ def command(entry: dict, writes: bool = False) -> list[str]:
     return argv + ["--effort", entry["effort"]] + (["--permission-mode", "acceptEdits"] if writes else [])
 
 
-def worker(job: str, urgent: bool, index: int) -> dict | None:
+def worker(job: str, urgent: bool, index: int, project: str | None) -> dict | None:
     """The worker for one job: effort moved from the configured one by the job's steps, between low and max; the fast
-    tier only when urgent; the account at `index` in the configured order. None when the worker is not set."""
+    tier only when urgent; the account at `index` in the project's account list when it has one, else in the default
+    list. None when the worker is not set."""
     if job not in JOBS:
         raise ModelsError(f"--job is one of {', '.join(JOBS)}, not {job!r}")
     if index < 0:
         raise ModelsError("--index counts from 0")
-    entries = current("worker", None)
+    data = load()
+    entries = [validate("worker", None, e) for e in raw(data, "worker", None)]
     if not entries:
         return None
     entry = entries[0]
+    lists = project_accounts(data)
     step = min(max(EFFORTS.index(entry["effort"]) + JOBS[job], 0), len(EFFORTS) - 1)
     if urgent and entry["provider"] == "pi":
         raise ModelsError("pi has no service tier, in its CLI or in T3, so the worker cannot run fast: drop --urgent or set another provider")
     out = {f: entry[f] for f in FIELDS} | {"effort": EFFORTS[step], "tier": "fast" if urgent else "standard"}
-    accounts = entry.get("accounts", [])
-    return out | ({"account": accounts[index % len(accounts)]} if accounts else {})
+    accounts = lists[project] if project in lists else entry.get("accounts", [])
+    out |= {"project": project, "accounts_from": "project" if project in lists else "default"}
+    return out | ({"accounts": accounts, "account": accounts[index % len(accounts)]} if accounts else {})
 
 
-def unset_worker() -> str:
-    return (f"worker is not configured in {path()}: the worker runs on the session model; "
-            f"set it with `{set_command('worker', None)}`")
+def unset(role: str, author: str | None) -> str:
+    runs = "the review runs on the session model, so it is not a cross-model review" if role in PER_AUTHOR else f"the {role} runs on the session model"
+    return f"{label(role, author)} is not configured in {path()}: {runs}; set it with `{set_command(role, author)}`"
 
 
 def t3(entry: dict) -> dict:
@@ -265,6 +319,7 @@ def render() -> str:
     try:
         entries = current("worker", None)
         out.append(f"  {'worker':<24} {describe(entries[0])}" if entries else f"  {'worker':<24} not configured: runs on the session model")
+        out += [f"  {'worker in ' + name:<24} accounts {', '.join(accounts)}" for name, accounts in project_accounts(load()).items()]
     except ModelsError as error:
         out.append(f"  {'worker':<24} invalid: {error}")
     for role in PER_AUTHOR:
@@ -274,7 +329,8 @@ def render() -> str:
                 for i, e in enumerate(get(role, author)):
                     out.append(f"  {name if i == 0 else '':<24} {describe(e)}")
             except ModelsError as error:
-                out.append(f"  {name:<24} not configured" if "not configured" in str(error) else f"  {name:<24} invalid: {error}")
+                out.append(f"  {name:<24} not configured: the review runs on the session model, not cross-model"
+                           if "not configured" in str(error) else f"  {name:<24} invalid: {error}")
     return "\n".join(out)
 
 

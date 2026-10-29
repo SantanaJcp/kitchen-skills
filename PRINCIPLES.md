@@ -30,14 +30,14 @@ Never invent counts, freshness, progress or success. A read that failed is `unkn
 
 ## 3. No fallbacks; fail loud (`no-fallbacks`)
 
-When the intended operation fails, surface the failure. No alternative path, substitute value or degraded mode, and no other model standing in for the configured one. If you find an existing fallback, report where it is, when it fires and what it hides; change it only with the owner's approval. One exception, the owner's (2026-10-29): a delegated worker whose configured model is unset, or that T3 or the CLI rejects, runs on the session model, and the lead says so aloud in its report. It never applies to a reviewer: a reviewer on the author's model voids `cross-review`.
+When the intended operation fails, surface the failure. No alternative path, substitute value or degraded mode, and no other model standing in for the configured one. If you find an existing fallback, report where it is, when it fires and what it hides; change it only with the owner's approval. One exception, the owner's (2026-10-29): a delegated worker or a reviewer whose configured model is unset, or that T3 or the CLI rejects or cannot reach, runs on the session model, always said aloud: the lead's report says so, and a review run that way is reported as not cross-model. Configuring a reviewer of the author's own family stays refused.
 
 - **Why:** a fallback turns a failure into a quiet wrong answer that you find much later, in the wrong place, and the system claims it worked. The owner's own rule, from repeated corrections.
 - **When:** error handling, defaults, retries, "just in case" branches, model or tool substitutions, compatibility layers.
 - **Includes (pstack):**
   - [*Outcome-Oriented Execution*](principles/outcome-oriented-execution.md): planned rewrites and migrations with explicit phase boundaries.
   - [*Migrate Callers Then Delete Legacy APIs*](principles/migrate-callers-then-delete-legacy-apis.md): a new internal API while old callers exist; a one-way door (`doors`) if it removes behavior someone relies on.
-- **Enforced by:** every hook blocks with exit 2 when it cannot read its input or parse the command; `integrate` has no default base; `install` refuses a file it cannot parse or does not manage; `kitchen models` fails, with no default, when a reviewer is not configured, and `get worker` says on stderr when the worker runs on the session model. In project code: rule only.
+- **Enforced by:** every hook blocks with exit 2 when it cannot read its input or parse the command; `integrate` has no default base; `install` refuses a file it cannot parse or does not manage; `kitchen models` has no default model: `get` says on stderr, with the command that sets it, when a worker or a reviewer runs on the session model. In project code: rule only.
 
 ## 4. Fix the cause, not the symptom (`root-cause`)
 
@@ -115,11 +115,11 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
 
-The author's model does not review its own work. Risky diffs (auth, tenant scope, sync, data, migrations) always go to the other model. Which model, at what effort and tier, is each person's setup in `kitchen models`, never written here. Two rounds per PR: one open review, then one pass that only reruns the first round's repros. Only P0/P1 the lead confirmed are fixed; the rest is listed in the report. Never upgrade ISSUES, BLOCKED or missing evidence to PASS.
+The author's model does not review its own work. Risky diffs (auth, tenant scope, sync, data, migrations) always go to the other model. Which model, at what effort and tier, is each person's setup in `kitchen models`, never written here. Two rounds per PR: one open review, then one pass that only reruns the first round's repros. Only P0/P1 the lead confirmed are fixed; the rest is listed in the report. Never upgrade ISSUES, BLOCKED or missing evidence to PASS. A reviewer that is not configured or cannot be reached is replaced by the session model only as `no-fallbacks`' said-aloud exception, and that review is reported as not cross-model.
 
 - **Why:** a different model sees what the author is blind to ("the other model reviews", the deck). The budget is the owner's call (PR #22): open-ended rounds kept finding new blockers instead of converging. Three-model panels at maximum effort cost too much for small and medium work (the deck), so the reviewers are configured once in `kitchen models`: one unless the owner adds more, and each added one runs every lens (owner, 2026-10-12).
 - **When:** before merge, and whenever a worker reports back.
-- **Enforced by:** the `second-opinion` skill, with the reviewers taken from each person's `kitchen models` setup; it stops BLOCKED when any of them cannot be reached; `kitchen models` refuses a reviewer whose model is the author's family. Budget and effort: rule only.
+- **Enforced by:** the `second-opinion` skill, with the reviewers taken from each person's `kitchen models` setup; when any of them is not configured or cannot be reached, it runs that reviewer's lenses on the session model and its reply's first line says "not a cross-model review"; `kitchen models` refuses a reviewer whose model is the author's family. Budget and effort: rule only.
 
 ## 12. Write it where the next agent will find it (`handoff`)
 
