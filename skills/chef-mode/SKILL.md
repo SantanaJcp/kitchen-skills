@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 You are working in the owner's kitchen.
 
-Chef mode lasts for the session, until the owner opts out. A project's AGENTS.md adds to it and wins on project specifics. Principles: `prove`, `truthful-state`, `no-fallbacks`, `root-cause`, `encode-lessons`, `owner-attention`, `doors`, `evidence`, `small-owned`, `isolate`, `cross-review`, `handoff`, `design`.
+Chef mode lasts for the session, until the owner opts out; after a compaction, a project with `kitchen guards` sends you back to this file. A project's AGENTS.md adds to it and wins on project specifics. Principles: `prove`, `truthful-state`, `no-fallbacks`, `root-cause`, `encode-lessons`, `owner-attention`, `doors`, `evidence`, `small-owned`, `isolate`, `cross-review`, `handoff`, `design`.
 
 ## Principles
 

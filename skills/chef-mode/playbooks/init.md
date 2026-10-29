@@ -23,7 +23,7 @@ Work in a worktree on a new branch `kitchen/init` from the shared base: in T3 Co
 
 One message of numbered questions. For each: what is there today, one sentence on what yes does, your recommendation. Leave out a piece that already exists and works; say so in one line instead.
 
-1. **Guards.** `kitchen guards .` copies `deny-no-verify`, `deny-shared-push` and `deny-recursive-rm` into `.kitchen/hooks/` and runs them before every shell command, from `.claude/settings.json` and `.codex/hooks.json`. Recommend yes.
+1. **Guards.** `kitchen guards .` copies `deny-no-verify`, `deny-shared-push` and `deny-recursive-rm` into `.kitchen/hooks/` and runs them before every shell command, plus `chef-mode-after-compact`, which brings chef mode back after a compaction, from `.claude/settings.json` and `.codex/hooks.json`. Recommend yes.
 2. **Check contract.** `bin/check` with the tiers `commit` (seconds to a minute), `integrate` (everything a merge needs), `nightly` and `verify-tree`, and `--list`; from [check.sh](init/check.sh), filled with commands this repo really runs. Recommend yes.
 3. **Pre-commit hook.** `.githooks/pre-commit` from [pre-commit.sh](init/pre-commit.sh): a secret scan on the staged changes, then `bin/check commit`. Recommend yes when the commit tier takes under a minute.
 4. **Verify method.** `.agents/skills/verify-<repo>/` from [verify/](init/verify/), with a feature map and a guard test that fails when an entry point is missing from it. Recommend yes when the repo has a UI, an API or a CLI to drive.

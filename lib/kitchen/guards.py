@@ -1,8 +1,8 @@
 """`kitchen guards <repo>`: the kitchen's guards in one project, so they run there and nowhere else.
 
-Copies hooks/ into the repo's .kitchen/hooks/ and runs each guard before every Bash call from .claude/settings.json
-(Claude Code) and .codex/hooks.json (Codex). Both files are merged: the kitchen's handlers are replaced, every other
-key and hook stays. A file that cannot be parsed is an error and nothing is written. `--check` writes nothing and fails
+Copies hooks/ into the repo's .kitchen/hooks/ and runs each guard before every Bash call, and chef-mode-after-compact
+after every compaction (SessionStart `compact`), from .claude/settings.json (Claude Code) and .codex/hooks.json (Codex).
+Both files are merged: the kitchen's handlers are replaced, every other key and hook stays. A file that cannot be parsed is an error and nothing is written. `--check` writes nothing and fails
 while anything differs from what this kitchen would write. Codex runs a new or changed project hook only after the
 person trusts it in `/hooks`, and only in a trusted project.
 
@@ -30,19 +30,24 @@ class GuardsError(Exception):
     pass
 
 
+# Hooks that run after a compaction (SessionStart, source `compact`); every other executable in hooks/ is a Bash guard.
+AFTER_COMPACT = ("chef-mode-after-compact",)
+
+
 @dataclass
 class Tool:
     name: str
     settings: str     # repo-relative file the tool reads project hooks from
-    matcher: str
+    matcher: str      # PreToolUse: the shell tool
+    compact: str      # SessionStart: the compaction source
     root: str         # shell code that sets $r to the project root, or exits 2
 
 
 TOOLS = (
-    Tool("Claude Code", ".claude/settings.json", "Bash",
+    Tool("Claude Code", ".claude/settings.json", "Bash", "compact",
          '[ -n "$CLAUDE_PROJECT_DIR" ] || { echo "kitchen: CLAUDE_PROJECT_DIR is not set" >&2; exit 2; }; r="$CLAUDE_PROJECT_DIR"'),
     # Codex sets no project variable and runs hooks in the session cwd; its docs say to resolve from the git root.
-    Tool("Codex", ".codex/hooks.json", "^Bash$",
+    Tool("Codex", ".codex/hooks.json", "^Bash$", "^compact$",
          'r=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "kitchen: not inside a git repository" >&2; exit 2; }'),
 )
 
@@ -83,24 +88,35 @@ def load(path: Path) -> dict:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise GuardsError(f"{path} is not valid JSON ({error}); fix it, then rerun") from error
     hooks = data.get("hooks", {}) if isinstance(data, dict) else None
-    groups = hooks.get("PreToolUse", []) if isinstance(hooks, dict) else None
-    if not isinstance(groups, list) or not all(isinstance(g, dict) and isinstance(g.get("hooks", []), list) for g in groups):
-        raise GuardsError(f"{path} does not have the shape hooks.PreToolUse[] of {{matcher, hooks: [...]}}; fix it, then rerun")
+    for event in ("PreToolUse", "SessionStart"):
+        groups = hooks.get(event, []) if isinstance(hooks, dict) else None
+        if not isinstance(groups, list) or not all(isinstance(g, dict) and isinstance(g.get("hooks", []), list) for g in groups):
+            raise GuardsError(f"{path} does not have the shape hooks.{event}[] of {{matcher, hooks: [...]}}; fix it, then rerun")
     return data
 
 
+def split(names: list[str]) -> tuple[list[str], list[str]]:
+    """(Bash guards, after-compaction hooks) among the executables in hooks/."""
+    return [n for n in names if n not in AFTER_COMPACT], [n for n in names if n in AFTER_COMPACT]
+
+
 def merged(data: dict, tool: Tool, names: list[str]) -> dict:
-    """data with the kitchen's handlers replaced by one group that runs each guard; nothing else changes."""
+    """data with the kitchen's handlers replaced by one group per event that runs each hook; nothing else changes."""
     result = copy.deepcopy(data)
     hooks = result.get("hooks", {})
-    groups = []
-    for group in hooks.get("PreToolUse", []):
-        kept = [h for h in group.get("hooks", []) if not is_kitchen_handler(h)]
-        if kept or not group.get("hooks"):
-            groups.append({**group, "hooks": kept})
-    groups.append({"matcher": tool.matcher, "hooks": [
-        {"type": "command", "command": command(tool, name), "timeout": TIMEOUT_SECONDS} for name in names]})
-    result["hooks"] = {**hooks, "PreToolUse": groups}
+    guards, after_compact = split(names)
+    for event, matcher, mine in (("PreToolUse", tool.matcher, guards), ("SessionStart", tool.compact, after_compact)):
+        groups = []
+        for group in hooks.get(event, []):
+            kept = [h for h in group.get("hooks", []) if not is_kitchen_handler(h)]
+            if kept or not group.get("hooks"):
+                groups.append({**group, "hooks": kept})
+        if mine:
+            groups.append({"matcher": matcher, "hooks": [
+                {"type": "command", "command": command(tool, name), "timeout": TIMEOUT_SECONDS} for name in mine]})
+        if groups or event in hooks:
+            hooks = {**hooks, event: groups}
+    result["hooks"] = hooks
     return result
 
 
@@ -161,7 +177,8 @@ def run(repo: Path, kitchen: Path, check: bool) -> int:
     apply(repo, changes)
     for rel, _, _ in changes:
         print(f"wrote      {rel}")
-    print(f"OK    guards in {repo}: {', '.join(n for n, (_, m) in kitchen_files(kitchen).items() if m == 0o755)}"
+    guards, after_compact = split([n for n, (_, m) in kitchen_files(kitchen).items() if m == 0o755])
+    print(f"OK    guards in {repo}: {', '.join(guards)}; after a compaction: {', '.join(after_compact) or 'none'}"
           + ("" if changes else " (already current)"))
     print("next:  commit them; Claude Code loads them in a session started at the repo root; "
           "in Codex, trust the project and open /hooks once to approve them (Codex skips a new or changed hook until then)")

@@ -127,7 +127,7 @@ Every brief stands alone: goal, scope, exact branch or SHA, how to verify, and a
 
 - **Why:** the next agent has no memory of this conversation, and asking a decision already made spends the owner's attention twice. Past transcripts are the process materialized (the video); the `retro` skill mines them.
 - **When:** delegating, ending a session, taking a decision.
-- **Enforced by:** the init playbook (`decisions.md`, and a `## Verify` section in the project's AGENTS.md); `status` shows owed decisions, checkpoints, and what an older install left in the global setup; the `handoff` skill.
+- **Enforced by:** the init playbook (`decisions.md`, and a `## Verify` section in the project's AGENTS.md); `status` shows owed decisions, checkpoints, and what an older install left in the global setup; the `handoff` skill; `chef-mode-after-compact`, which `kitchen guards` installs: after a compaction drops chef-mode, it sends the agent back to its `SKILL.md` with the principles index.
 
 ## 13. Make the right thing the easy thing (`design`)
 
