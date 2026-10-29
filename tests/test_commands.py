@@ -986,8 +986,8 @@ class ModelsTests(KitchenFixture):
         return result.stdout.strip()
 
     def test_the_job_moves_the_workers_effort_within_low_and_max(self):
-        for configured, job, expected in (("high", "hardest", "xhigh"), ("max", "hardest", "max"), ("high", "judgment", "medium"),
-                                          ("high", "routine", "low"), ("medium", "routine", "low"), ("low", "judgment", "low")):
+        for configured, job, expected in (("high", "hardest", "xhigh"), ("max", "hardest", "max"), ("high", "judgment", "high"),
+                                          ("high", "routine", "medium"), ("low", "routine", "low"), ("xhigh", "judgment", "xhigh")):
             with self.subTest(configured=configured, job=job):
                 self.assertEqual(self.worker(effort=configured).returncode, 0)
 
@@ -1026,9 +1026,9 @@ class ModelsTests(KitchenFixture):
         self.assertEqual(json.loads(claude), {"providerInstanceId": "acct-b", "model": "claude-x",
                                               "options": {"effort": "xhigh", "fastMode": False}})
         self.assertEqual(json.loads(codex), {"driverKind": "codex", "model": "gpt-x",
-                                             "options": {"reasoningEffort": "low", "serviceTier": "priority"}})
+                                             "options": {"reasoningEffort": "medium", "serviceTier": "priority"}})
         self.assertEqual(codex_call, "codex exec --skip-git-repo-check -s workspace-write -m gpt-x "
-                                     "-c 'model_reasoning_effort=\"low\"' -c 'service_tier=\"default\"'")
+                                     "-c 'model_reasoning_effort=\"medium\"' -c 'service_tier=\"default\"'")
 
     def test_an_unset_worker_runs_on_the_session_model_and_an_unset_reviewer_still_fails(self):
         worker = self.kitchen("models", "get", "worker", "--job", "routine", "--t3")
@@ -1073,7 +1073,7 @@ class ModelsTests(KitchenFixture):
         self.assertIn("not inside a git repository", result.stderr)
         self.assertIn("default accounts", result.stderr)
 
-    def test_a_projects_accounts_apply_in_it_by_flag_or_by_the_current_repository(self):
+    def test_a_projects_accounts_apply_by_flag_or_in_its_checkout_and_a_linked_worktree_needs_the_flag(self):
         self.projects_set()
         shop = self.git_repo("shop")
         worktree = self.home / "elsewhere" / "t3-1234"
@@ -1082,10 +1082,13 @@ class ModelsTests(KitchenFixture):
         by_flag = json.loads(self.worker_in(self.home, "--project", "shop", "--json").stdout)
         by_repo = json.loads(self.worker_in(shop, "--json").stdout)
         by_worktree = json.loads(self.worker_in(worktree, "--json").stdout)
+        named_worktree = json.loads(self.worker_in(worktree, "--project", "shop", "--json").stdout)
 
-        for got in (by_flag, by_repo, by_worktree):
+        for got in (by_flag, by_repo, named_worktree):
             self.assertEqual((got["project"], got["accounts_from"], got["accounts"], got["account"]),
                              ("shop", "project", ["work-x", "personal-a"], "work-x"))
+        self.assertEqual((by_worktree["project"], by_worktree["accounts_from"], by_worktree["account"]),
+                         ("t3-1234", "default", "personal-a"))
 
     def test_an_account_listed_only_under_a_project_is_never_used_outside_it(self):
         self.projects_set()
@@ -1112,13 +1115,17 @@ class ModelsTests(KitchenFixture):
         git(self.home, "clone", "-q", "--bare", str(garden), str(bare))
         git(bare, "worktree", "add", "-q", str(self.home / "wt" / "t3-5678"), "main")
 
+        # regression (review of #87): a linked worktree of a checkout whose git directory sits in another project's folder
+        git(garden, "worktree", "add", "-q", "-b", "side", str(self.home / "wt" / "t3-9999"))
+
         separate = json.loads(self.worker_in(garden, "--json").stdout)
-        of_bare = self.kitchen("models", "get", "worker", "--job", "routine", "--t3", cwd=self.home / "wt" / "t3-5678")
+        of_separate = json.loads(self.worker_in(self.home / "wt" / "t3-9999", "--json").stdout)
+        of_bare = json.loads(self.worker_in(self.home / "wt" / "t3-5678", "--json").stdout)
         named = json.loads(self.worker_in(self.home / "wt" / "t3-5678", "--project", "shop", "--json").stdout)
 
         self.assertEqual((separate["project"], separate["account"]), ("garden", "personal-a"))
-        self.assertEqual((of_bare.returncode, of_bare.stdout), (1, ""))
-        self.assertIn("pass --project <name>", of_bare.stderr)
+        for got in (of_separate, of_bare):
+            self.assertEqual((got["accounts_from"], got["account"]), ("default", "personal-a"))
         self.assertEqual(named["account"], "work-x")
 
     def test_a_batch_alternates_a_projects_accounts_by_index(self):

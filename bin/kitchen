@@ -623,7 +623,7 @@ def main() -> int:
     get_output.add_argument("--json", action="store_true")
     get_output.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
     get_output.add_argument("--t3", action="store_true", help="worker: print the target JSON for T3's delegate_task")
-    mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: hardest raises the configured effort one step, judgment lowers it one, routine two")
+    mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: judgment keeps the configured effort, hardest raises it one step, routine lowers it one")
     mod_get.add_argument("--urgent", action="store_true", help="worker: the fast tier (CI or trunk red, someone blocked now); standard otherwise")
     mod_get.add_argument("--index", type=int, help="worker: the worker's place in its batch, from 0; picks accounts[index %% len]")
     for p_entry in (mod_set, mod_add):  # required for add here; for set, unless --project, in cmd_models

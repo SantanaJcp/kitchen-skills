@@ -7,9 +7,9 @@ parallel. `worker`, the one chef-mode's Delegation reads for every delegated wor
 an optional ordered list of accounts (T3 provider instance ids): `get worker --job` adjusts its effort to the job, its
 tier to `--urgent`, and picks `accounts[index % len]`, so a batch alternates accounts with no state. A project may hold
 its own account list (`set worker --project <name> --accounts ...`), which replaces the default list in that project
-alone: the project is `--project`, else the repository of the current directory (its main checkout's folder, so every
-worktree is the same project). An account listed only under a project is never picked anywhere else, so a client's
-account serves that client's project only (owner, 2026-10-29). Every entry is
+alone: the project is `--project`, else the current directory's git top-level folder (a linked worktree, such as T3's,
+gets the default accounts unless `--project` names its project). An account listed only under a project is never picked
+anywhere else, so a client's account serves that client's project only (owner, 2026-10-29). Every entry is
 explicit: provider (the CLI, or T3's provider of that name), model (`default` = that tool's own default), effort and
 service tier.
 
@@ -38,7 +38,7 @@ PER_AUTHOR = ("reviewer",)  # set per author family; the others hold one entry f
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TIERS = ("standard", "fast")
 FIELDS = ("provider", "model", "effort", "tier")
-JOBS = {"routine": -2, "judgment": -1, "hardest": 1}  # effort steps from the worker's configured one
+JOBS = {"routine": -1, "judgment": 0, "hardest": 1}  # effort steps from the worker's configured one: judgment keeps it (owner, 2026-10-29)
 T3_DRIVERS = {"claude": "claudeAgent", "codex": "codex", "pi": "pi"}  # T3's driverKind for each provider
 WORKER_TOOLS = "Bash,Read,Edit,Write,Grep,Glob"
 # pi runs many vendors' models; the family is the prefix of its model id (`pi --list-models`)
@@ -223,20 +223,12 @@ def put_project(project: str, accounts: list[str] | None) -> None:
 
 
 def here(cwd: Path) -> str | None:
-    """The project `cwd` belongs to: the folder of its repository's main checkout, so a worktree (T3's are named after
-    the thread) is its repository's project. None outside a git repository. A worktree whose repository keeps its git
-    directory elsewhere (bare, or `--separate-git-dir`) has no main checkout folder to name: an error, never a guess
-    from the git directory's name, which may be another project's."""
+    """The project `cwd` belongs to: its git top-level folder's name; None outside a git repository. A linked worktree
+    (T3's are named after the thread) is a project of its own folder's name, so it gets the default accounts unless
+    `--project` names its project: git does not record a main checkout's folder reliably, and a wrong guess could hand
+    a client's account to another project, while the default accounts are allowed everywhere (owner, 2026-10-29)."""
     toplevel = common.git_out(cwd, "rev-parse", "--show-toplevel")
-    if toplevel is None:
-        return None
-    git_dir = Path(common.git_out(cwd, "rev-parse", "--absolute-git-dir")).resolve()
-    common_dir = Path(common.git_common_dir(cwd))
-    if git_dir == common_dir:  # the main checkout
-        return Path(toplevel).name
-    if common_dir.name != ".git":
-        raise ModelsError(f"{toplevel} is a worktree of {common_dir}, which has no main checkout folder to name the project: pass --project <name>")
-    return common_dir.parent.name
+    return Path(toplevel).name if toplevel else None
 
 
 def pi_lists(model: str) -> None:
