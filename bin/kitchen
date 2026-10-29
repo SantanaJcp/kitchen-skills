@@ -182,10 +182,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         try:
             reviewers = models.get("reviewer", author)
         except models.ModelsError as error:
-            warnings.append(f"second-opinion on {author}'s work will stop BLOCKED: {error}")
+            warnings.append(f"second-opinion on {author}'s work will run on the session model, not cross-model: {error}")
             continue
         if any(e["provider"] == "pi" for e in reviewers) and not environment.on_path("pi"):
-            warnings.append(f"`pi` is not on PATH: a reviewer for {author} work runs on it, so second-opinion outside T3 will stop BLOCKED")
+            warnings.append(f"`pi` is not on PATH: a reviewer for {author} work runs on it, so second-opinion outside T3 "
+                            f"will run its lenses on the session model, not cross-model")
 
     on_path = shutil.which("kitchen", path=os.environ.get("PATH", ""))
     if not on_path or Path(on_path).resolve() != (REPO / "bin" / "kitchen").resolve():
@@ -466,11 +467,18 @@ def cmd_models(args: argparse.Namespace) -> int:
         if args.action == "get" and args.role == "worker":
             return worker_get(args)
         if args.action == "get":
-            if args.job or args.urgent or args.index is not None or args.t3:
-                raise models.ModelsError("--job, --urgent, --index and --t3 are for the worker")
-            entries = models.get(args.role, args.author)
+            if args.job or args.urgent or args.index is not None:
+                raise models.ModelsError("--job, --urgent and --index are for the worker")
+            entries = models.current(args.role, args.author)
+            if not entries:  # the review runs on the session model, said on stderr (owner, 2026-10-29)
+                print(models.unset(args.role, args.author), file=sys.stderr)
+                if not args.command:
+                    print("{}" if args.t3 else "[]" if args.json else "session model")
+                return 0
             if args.command:
                 print("\n".join(models.shell(models.command(e)) for e in entries))
+            elif args.t3:
+                print("\n".join(json.dumps(models.t3(e)) for e in entries))
             else:
                 print(json.dumps(entries) if args.json else "\n".join(models.describe(e) for e in entries))
             return 0
@@ -488,7 +496,7 @@ def worker_get(args: argparse.Namespace) -> int:
     models.key(args.role, args.author)
     entry = models.worker(args.job, args.urgent, args.index or 0)
     if entry is None:
-        print(models.unset_worker(), file=sys.stderr)
+        print(models.unset(args.role, None), file=sys.stderr)
         if not args.command:
             print("{}" if args.json or args.t3 else "session model")
         return 0
@@ -595,7 +603,7 @@ def main() -> int:
     get_output = mod_get.add_mutually_exclusive_group()
     get_output.add_argument("--json", action="store_true")
     get_output.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
-    get_output.add_argument("--t3", action="store_true", help="worker: print the target JSON for T3's delegate_task")
+    get_output.add_argument("--t3", action="store_true", help="print the target JSON for T3's delegate_task, one per line")
     mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: hardest raises the configured effort one step, judgment lowers it one, routine two")
     mod_get.add_argument("--urgent", action="store_true", help="worker: the fast tier (CI or trunk red, someone blocked now); standard otherwise")
     mod_get.add_argument("--index", type=int, help="worker: the worker's place in its batch, from 0; picks accounts[index %% len]")
