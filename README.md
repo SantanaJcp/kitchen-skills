@@ -111,6 +111,7 @@ Every skill is manual: `/name` in Claude Code, `$name` in Codex, or read by chef
 | `catch-me-up` | "Qué pasó": what happened since your last message, and what waits on you |
 | `retro` | Weekly: turn repeated corrections into environment fixes |
 | `wait-what` | The last answer did not land |
+| `sharpen` | Before a task: make it deeper, not bigger, and rewrite the prompt |
 | `audit-verification` | Periodically: prove a project's verify skill still tells the truth |
 
 ## Check

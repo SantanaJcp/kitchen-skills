@@ -34,6 +34,7 @@ NAME = re.compile(r"`([a-z][a-z-]*)`")
 CHEF_MODE = REPO / "skills" / "chef-mode" / "SKILL.md"
 OWNER_TYPED = {
     "wait-what": "the owner types it when a reply did not land; no request routes to it",
+    "sharpen": "the owner types it on a prompt of their own; no request routes to it",
 }
 LEAVES = REPO / "principles"
 LEAF_LINK = re.compile(r"\]\(principles/([a-z0-9-]+)\.md\)")

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Sharpen"
+  short_description: "Deeper, not bigger: rewrite my prompt the way a top professional would ask it"
+policy:
+  allow_implicit_invocation: false
