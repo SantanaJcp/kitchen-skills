@@ -11,7 +11,8 @@
 #     knew of the run (measured on systemd 262), so run-job reads the new InvocationID and the MainPID while the unit
 #     runs. A failed unit stays loaded: its new InvocationID proves it ran, ExecMainCode and ExecMainStatus are its exit.
 #   macOS: launchctl kickstart -p, then launchctl print every RUN_JOB_POLL_SECONDS (default 5) until the job is no
-#     longer running and its run count passed the one before the start; its last exit code is the job's exit. launchd
+#     longer running and its run count is one past the one before the start; its last exit code is the job's exit (a
+#     second run in between would own that code, so run-job then says the exit is not known). launchd
 #     counts the job as running while its main process lives, and that process (the job's supervisor, or the retro's
 #     bash) exits only after the job and every process it left in the clone are gone.
 # Refuses, and exits 69 without starting anything, when the job is not installed or already running, or when the unit
@@ -73,7 +74,10 @@ case "$(uname)" in
     else
       [ "$(prop InvocationID)" != "$before" ] && [ -n "$(prop InvocationID)" ] ||
         refuse "$UNIT did not start (no new invocation): see systemctl --user status $UNIT"
-      code="$(prop ExecMainCode)" status="$(prop ExecMainStatus)" pid="$(prop ExecMainPID)"
+      main="$(prop ExecMainPID)"
+      [ -z "$pid" ] || [ "$main" = "$pid" ] ||
+        refuse "$UNIT ran again (main pid $main, not this run's $pid) before its exit was read; this run's exit is not known" 70
+      code="$(prop ExecMainCode)" status="$(prop ExecMainStatus)" pid="$main"
       case "$code" in
         1) rc="$status" ;;            # exited
         2|3) rc=$((128 + status)) ;;  # killed or dumped by signal $status
@@ -96,7 +100,9 @@ case "$(uname)" in
     while :; do
       printed="$(launchctl print "$TARGET" 2>/dev/null)" || refuse "$UNIT was unloaded while it ran; its result is not known" 70
       now_runs="$(field runs)"
-      if [ "${now_runs:-0}" -gt "$runs" ]; then
+      if [ "${now_runs:-0}" -gt $((runs + 1)) ]; then  # launchd keeps only the last run's exit: it would not be this run's
+        refuse "$UNIT ran again before run-job read this run's exit ($((now_runs - runs)) runs since the start); this run's exit is not known" 70
+      elif [ "${now_runs:-0}" -gt "$runs" ]; then
         [ "$(field state)" = running ] || break
       elif [ $((SECONDS - kicked)) -ge 60 ]; then
         refuse "$UNIT did not start: launchd counts no new run 60s after kickstart"

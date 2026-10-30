@@ -2333,7 +2333,7 @@ case "$1" in
     if [ "$rc" = 0 ]; then
       rm -f "$s/InvocationID" "$s/ExecMainPID" "$s/ExecMainCode" "$s/ExecMainStatus"; echo inactive > "$s/active"
     else
-      echo "$pid" > "$s/ExecMainPID"; echo 1 > "$s/ExecMainCode"; echo "$rc" > "$s/ExecMainStatus"; echo failed > "$s/active"
+      echo "${FAKE_OTHER_PID:-$pid}" > "$s/ExecMainPID"; echo 1 > "$s/ExecMainCode"; echo "$rc" > "$s/ExecMainStatus"; echo failed > "$s/active"
       exit 1
     fi ;;
 esac
@@ -2350,7 +2350,7 @@ case "$1" in
   kickstart)
     plist="$HOME/Library/LaunchAgents/${3##*/}.plist"
     read -r -a program <<< "$(python3 -c 'import plistlib, sys; print(" ".join(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"]))' "$plist")"
-    rm -f "$s/pid"; touch "$s/running"; echo $(( $(cat "$s/runs" 2>/dev/null || echo 0) + 1 )) > "$s/runs"
+    rm -f "$s/pid"; touch "$s/running"; echo $(( $(cat "$s/runs" 2>/dev/null || echo 0) + 1 + ${FAKE_OTHER_RUN:-0} )) > "$s/runs"
     ( "${program[@]}" & pid=$!; echo "$pid" > "$s/pid"; wait "$pid"; echo $? > "$s/exit"; rm "$s/running" ) >/dev/null 2>&1 &
     until [ -s "$s/pid" ]; do sleep 0.01; done
     cat "$s/pid" ;;
@@ -2565,6 +2565,18 @@ class TriggeredJobTests(AutomationFixture):
         self.assertEqual(result.returncode, 69, result.stdout)
         self.assertIn("did not start", result.stderr)
         self.assertNotIn("exited", result.stdout)
+
+    def test_an_exit_another_run_left_in_between_is_never_reported_as_this_runs(self):
+        for system, other in (("Linux", {"FAKE_OTHER_PID": "999999"}), ("Darwin", {"FAKE_OTHER_RUN": "1"})):
+            with self.subTest(system=system):
+                shutil.rmtree(self.manager, ignore_errors=True)
+                self.install_stub(system)
+
+                result = self.trigger("daily-audit", "shop", STUB_EXIT="3", **other)
+
+                self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+                self.assertIn("this run's exit is not known", result.stderr)
+                self.assertNotIn(" exited ", result.stdout)
 
     def test_run_job_refuses_the_nightly_guard(self):
         result = self.trigger("nightly-guard", "shop")
