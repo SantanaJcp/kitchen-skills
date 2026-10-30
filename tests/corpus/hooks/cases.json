@@ -2019,6 +2019,70 @@
       "expect": "allow",
       "cwd": "kitchen",
       "limit": "a body file named by a variable set elsewhere cannot be read before the call runs."
+    },
+    {
+      "id": "r1-repo-option-before-group",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh --repo o/r pr create --title x --body-file /tmp/pr-body.md",
+      "expect": "deny",
+      "review": "round 1, P1: options before the group"
+    },
+    {
+      "id": "r1-short-repo-option-before-group",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh -R o/r issue comment 3 -F /tmp/comment.md",
+      "expect": "deny",
+      "review": "round 1, P1: options before the group"
+    },
+    {
+      "id": "r1-body-file-before-group",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh --body-file /tmp/pr-body.md pr create --title x",
+      "expect": "deny",
+      "review": "round 1, P1: gh reads options anywhere (measured with gh 2.103)"
+    },
+    {
+      "id": "r1-stdin-through-sh-c",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "sh -c 'gh pr create --title x --body-file -' < /tmp/pr-body.md",
+      "expect": "deny",
+      "review": "round 1, P1: a nested shell inherits stdin"
+    },
+    {
+      "id": "r1-stdin-through-eval",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "eval 'git commit -F -' < /tmp/commit-msg",
+      "expect": "deny",
+      "review": "round 1, P1: a nested shell inherits stdin"
+    },
+    {
+      "id": "r1-stdin-through-nested-shells",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "bash -c \"sh -c 'git commit -F -'\" < /tmp/commit-msg",
+      "expect": "deny",
+      "review": "round 1, P1: a nested shell inherits stdin"
+    },
+    {
+      "id": "r1-inner-stdin-wins",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "sh -c 'git commit -F - < msg.txt' < /tmp/input.txt",
+      "expect": "allow",
+      "review": "round 1, control: the last redirection of stdin is the one that counts"
+    },
+    {
+      "id": "group-stdin-redirect",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "( gh pr create --title x --body-file - ) < /tmp/pr-body.md",
+      "expect": "allow",
+      "limit": "a redirection on a `( … )` or `{ … }` group is not passed to the commands inside it."
     }
   ]
 }

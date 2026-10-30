@@ -606,7 +606,7 @@ class Extractor:
                     quoted = [shlex.quote(a.value) if not a.dynamic else '"$__kitchen_unknown"' for a in tail]
                     sub = Extractor()
                     sub.script(" ".join([text] + quoted), cwd, {**variables, "__kitchen_unknown": None}, depth + 1)
-                    self.out.extend(sub.out)
+                    self.out.extend(inherit(sub.out, cmd))
                     return
                 elif arg.value.startswith("-") and "i" in arg.value[1:] and not arg.value.startswith("--"):
                     clean, env = True, {}
@@ -649,14 +649,23 @@ class Extractor:
                     return
                 sub = Extractor()
                 sub.script(script.value, cmd.cwd, child_variables(cmd), depth + 1)
-                self.out.extend(sub.out)
+                self.out.extend(inherit(sub.out, cmd))
         elif name == "eval":
             if any(a.dynamic for a in rest):
                 self.out.append(Cmd([Arg("eval", dynamic=True)], cmd.cwd, cmd.env))
                 return
             sub = Extractor()
             sub.script(" ".join(a.value for a in rest), cmd.cwd, variables, depth + 1)
-            self.out.extend(sub.out)
+            self.out.extend(inherit(sub.out, cmd))
+
+
+
+def inherit(inner: list, outer: Cmd) -> list:
+    """The commands of a script that `outer` runs (sh -c, eval, env -S) also get its redirections: its stdin and stdout
+    are theirs. Theirs come after, so the last one for a descriptor still wins."""
+    for cmd in inner:
+        cmd.redirects = outer.redirects + cmd.redirects
+    return inner
 
 
 def commands(text: str, cwd: str | None) -> list[Cmd]:

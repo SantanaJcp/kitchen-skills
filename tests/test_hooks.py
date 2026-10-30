@@ -238,12 +238,13 @@ class PrivatePublishTests(HookFixture):
                 elsewhere = self.guard('git commit -m "fine"', self.repo("feat/x"), env)
                 self.assertEqual((elsewhere.returncode, elsewhere.stderr), (0, ""))
 
-    def test_a_body_file_it_can_read_is_scanned(self):
+    def test_a_file_it_can_read_is_scanned_however_it_reaches_the_command(self):
         kitchen = self.kitchen_checkout()
         (kitchen / "notes").mkdir()
         (kitchen / "notes" / "pr.md").write_text("Built for Acmecorp.\n")
         for command in ("gh pr create --title x --body-file notes/pr.md", "git commit -F notes/pr.md",
-                        "cd notes && gh issue comment 3 -F pr.md"):
+                        "cd notes && gh issue comment 3 -F pr.md", "gh pr create --title x --body-file - < notes/pr.md",
+                        "cat notes/pr.md | git commit -F -", "sh -c 'git commit -F -' < notes/pr.md"):
             with self.subTest(command):
                 result = self.guard(command, kitchen)
                 self.assertEqual(result.returncode, 2, result.stderr)
