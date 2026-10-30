@@ -1,0 +1,5 @@
+interface:
+  display_name: "Formal Verification"
+  short_description: "Model-check a project's riskiest promise and keep the check in step with the code"
+policy:
+  allow_implicit_invocation: false

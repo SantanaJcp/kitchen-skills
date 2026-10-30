@@ -16,7 +16,7 @@ Done means you saw the observable result: the app, the command output, the recor
   - [*Prove It Works*](principles/prove-it-works.md): after a task, before you say it is done, fixed or safe.
   - [*Test Behavior, Not Implementation*](principles/test-behavior-not-implementation.md): you write, change or keep a test.
   - [*Sequence Work into Verifiable Units*](principles/sequence-verifiable-units.md): multi-step work, and how you stack commits and pull requests.
-- **Enforced by:** the init playbook (every `bin/check` command run and seen to pass, the commit tier green twice and red on a planted defect in a file it runs); `kitchen integrate`; the nightly guard; the gardener reruns its verify steps before publishing; the `audit-verification` skill, and the daily audit that runs it only on a green guard and never ships a fix nobody drove live; the Skeptic lens of `second-opinion`.
+- **Enforced by:** the init playbook (every `bin/check` command run and seen to pass, the commit tier green twice and red on a planted defect in a file it runs); `kitchen integrate`; the nightly guard; the gardener reruns its verify steps before publishing; the `audit-verification` skill, and the daily audit that runs it only on a green guard and never ships a fix nobody drove live; the `formal-verification` skill, whose every property goes red on a named mirrored mutation before it counts; the Skeptic lens of `second-opinion`.
 
 ## 2. Unknown is never green (`truthful-state`)
 
@@ -142,4 +142,4 @@ Shape the code so the wrong thing is hard to write. Get the data and the scaffol
   - [*Boundary Discipline*](principles/boundary-discipline.md): wiring validation, error handling or framework adapters.
   - [*Type System Discipline*](principles/type-system-discipline.md): designing types or a signature in any typed language.
   - [*Experience First*](principles/experience-first.md): product, UX or feature-scope tradeoffs.
-- **Enforced by:** rule only. Each project encodes its own in types and lint (`encode-lessons`).
+- **Enforced by:** the `formal-verification` skill writes a project's riskiest promise as a model of states and steps, cited to the code, and checks it; otherwise rule only. Each project encodes its own in types and lint (`encode-lessons`).
