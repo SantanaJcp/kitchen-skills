@@ -7,6 +7,11 @@ place by run_id.
   record.py <file> audit <status> <detail> <sha> <baseline> <run_id> <log> <started> [warning...]
   record.py <file> close-stale <current-run-id>
   record.py <file> mark-survivors <run-id> <pids>
+  record.py <file> find <started-at-or-after> <pid>
+
+`find` prints the newest line of one run as it is in the file: the run whose run_id ends in -<pid> (lib/common.sh takes it
+from the job's main process) and that started at or after the given time, in the jobs' format. Prints nothing, and exits
+1, when no line matches.
 
 A run writes "running" when it starts and replaces that line when it ends. A "running" line left by a
 run that was killed (SIGKILL cannot be trapped) is closed as "incomplete" by the next run that holds
@@ -74,6 +79,14 @@ def main() -> int:
                              warnings=[*entry.get("warnings", []),
                                        f"survivors {pids} still held files in the clone after TERM and KILL"])
         save(path, entries)
+        return 0
+    if action == "find":
+        started, pid = args
+        found = [entry for entry in entries if isinstance(entry, dict) and str(entry.get("run_id", "")).endswith(f"-{pid}")
+                 and str(entry.get("started") or "") >= started]
+        if not found:
+            return 1
+        print(json.dumps(found[-1]))
         return 0
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     if action == "gardener":

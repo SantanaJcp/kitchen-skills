@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import platform
+import plistlib
 import random
 import re
 import shutil
@@ -2305,6 +2306,283 @@ class LinuxScheduleTests(AutomationFixture):
         self.assertEqual(result.returncode, 2)
         self.assertIn("loginctl enable-linger", result.stderr)
         self.assertFalse(units.exists())
+
+
+# A user systemd manager and launchd, faked from what they were measured to do (systemd 262, 2026-10-30). A start runs
+# the unit's program with its own pid and a new invocation id, shown as MainPID while it runs; `start --wait` returns 1
+# for any failure. A unit that ended inactive is unloaded, so its invocation and exit are gone; a failed one keeps them in
+# ExecMainCode/ExecMainStatus/ExecMainPID. launchd counts runs and keeps the last exit code.
+FAKE_SYSTEMCTL = r"""echo "systemctl $*" >> "$CALLS"
+s="$FAKE_MANAGER"; mkdir -p "$s"
+[ "$1" = --user ] && shift
+case "$1" in
+  is-active) state="$(cat "$s/active" 2>/dev/null || echo inactive)"; echo "$state"; [ "$state" != inactive ] || exit 3 ;;
+  show)
+    shift; value=0; props=()
+    while [ $# -gt 1 ]; do case "$1" in -p) props+=("$2"); shift 2 ;; --value) value=1; shift ;; *) shift ;; esac; done
+    for p in "${props[@]}"; do v="$(cat "$s/$p" 2>/dev/null)"; if [ "$value" = 1 ]; then echo "$v"; else echo "$p=$v"; fi; done ;;
+  start)
+    unit="${@: -1}"
+    [ "${FAKE_NO_START:-0}" = 0 ] || exit 1
+    read -r -a program <<< "$(sed -n 's/^ExecStart=//p' "$XDG_CONFIG_HOME/systemd/user/$unit")"
+    echo "invocation-$RANDOM$RANDOM" > "$s/InvocationID"
+    "${program[@]}" & pid=$!
+    echo "$pid" > "$s/MainPID"; echo activating > "$s/active"
+    wait "$pid"; rc=$?
+    echo 0 > "$s/MainPID"
+    if [ "$rc" = 0 ]; then
+      rm -f "$s/InvocationID" "$s/ExecMainPID" "$s/ExecMainCode" "$s/ExecMainStatus"; echo inactive > "$s/active"
+    else
+      echo "${FAKE_OTHER_PID:-$pid}" > "$s/ExecMainPID"; echo 1 > "$s/ExecMainCode"; echo "$rc" > "$s/ExecMainStatus"; echo failed > "$s/active"
+      exit 1
+    fi ;;
+esac
+"""
+FAKE_LAUNCHCTL = r"""echo "launchctl $*" >> "$CALLS"
+s="$FAKE_MANAGER"; mkdir -p "$s"
+case "$1" in
+  bootstrap) touch "$s/loaded" ;;
+  print)
+    [ -f "$s/loaded" ] || exit 113
+    state="not running"; [ ! -f "$s/running" ] || state=running
+    printf '%s = {\n\tstate = %s\n\truns = %s\n\tlast exit code = %s\n}\n' "$2" "$state" "$(cat "$s/runs" 2>/dev/null || echo 0)" \
+      "$(cat "$s/exit" 2>/dev/null || echo '(never exited)')" ;;
+  kickstart)
+    plist="$HOME/Library/LaunchAgents/${3##*/}.plist"
+    read -r -a program <<< "$(python3 -c 'import plistlib, sys; print(" ".join(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"]))' "$plist")"
+    rm -f "$s/pid"; touch "$s/running"; echo $(( $(cat "$s/runs" 2>/dev/null || echo 0) + 1 + ${FAKE_OTHER_RUN:-0} )) > "$s/runs"
+    ( "${program[@]}" & pid=$!; echo "$pid" > "$s/pid"; wait "$pid"; echo $? > "$s/exit"; rm "$s/running" ) >/dev/null 2>&1 &
+    until [ -s "$s/pid" ]; do sleep 0.01; done
+    cat "$s/pid" ;;
+esac
+"""
+# Stands in for an agent job: the record line lib/common.sh's run id would give it (<time>-<its pid>), then its exit.
+STUB_JOB = r"""started="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+if [ "${STUB_RECORD:-1}" = 1 ]; then
+  mkdir -p "$KITCHEN_STATE/audit"
+  printf '{"ts": "%s", "started": "%s", "status": "findings", "detail": "report /r/report.md", "run_id": "%s-%s", "log": "/l/audit.log"}\n' \
+    "$started" "$started" "$(date -u +%Y%m%dT%H%M%SZ)" "$$" >> "$KITCHEN_STATE/audit/$1.jsonl"
+fi
+sleep "${STUB_SECONDS:-0.3}"
+exit "${STUB_EXIT:-0}"
+"""
+
+
+class TriggeredJobTests(AutomationFixture):
+    """install-schedule --triggered and run-job, on both platforms: uname, the unit manager and npm are faked, and HOME
+    and XDG_CONFIG_HOME are throwaway."""
+
+    SYSTEMS = ("Linux", "Darwin")
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp.name) / "home"
+        self.manager = Path(self.tmp.name) / "manager"
+        self.configure([])
+        self.fake("npm", 'echo "npm $*" >> "$CALLS"')
+        self.fake("loginctl", "echo yes")
+
+    def on(self, system):
+        self.fake("uname", f"echo {system}")
+        self.fake("systemctl", FAKE_SYSTEMCTL)
+        self.fake("launchctl", FAKE_LAUNCHCTL)
+
+    def env(self, **extra):
+        return {**self.job_env(), "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"),
+                "FAKE_MANAGER": str(self.manager), "RUN_JOB_POLL_SECONDS": "0.05",
+                "PATH": f"{self.bin}:{os.environ['PATH']}", **extra}
+
+    def install(self, system, *args):
+        self.on(system)
+        return subprocess.run(["bash", str(AUTOMATION / "bin" / "install-schedule"), *args], env=self.env(),
+                              capture_output=True, text=True)
+
+    def installed(self, system):
+        folder = self.home / (".config/systemd/user" if system == "Linux" else "Library/LaunchAgents")
+        return {p.name: p.read_bytes() for p in sorted(folder.iterdir())} if folder.is_dir() else {}
+
+    def test_triggered_install_writes_the_service_and_no_timer_on_linux(self):
+        result = self.install("Linux", "--triggered", "--audit", "shop")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(self.installed("Linux")), ["kitchen-shop-daily-audit.service"])
+        service = self.installed("Linux")["kitchen-shop-daily-audit.service"].decode()
+        self.assertIn("PrivateTmp=yes", service)
+        self.assertIn(f"ExecStart=/bin/bash {AUTOMATION}/bin/daily-audit shop", service)
+        self.assertNotIn("enable", self.calls_log())
+
+    def test_triggered_install_writes_a_plist_without_a_calendar_on_macos(self):
+        result = self.install("Darwin", "--triggered", "--gardener", "shop")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(self.installed("Darwin")), ["com.kitchen.shop.weekly-gardener.plist"])
+        job = plistlib.loads(self.installed("Darwin")["com.kitchen.shop.weekly-gardener.plist"])
+        self.assertEqual(job["ProgramArguments"], ["/bin/bash", f"{AUTOMATION}/bin/weekly-gardener", "shop"])
+        self.assertEqual(job["ProcessType"], "Standard")
+        self.assertNotIn("StartCalendarInterval", job)
+        self.assertNotIn("RunAtLoad", job)
+        self.assertIn(f"launchctl bootstrap gui/{os.getuid()}", self.calls_log())
+
+    def test_a_triggered_rerun_is_byte_identical(self):
+        for system in self.SYSTEMS:
+            for job in (["--audit", "shop"], ["--gardener", "shop"], ["--retro"]):
+                with self.subTest(system=system, job=job):
+                    first = self.install(system, "--triggered", *job)
+                    before = self.installed(system)
+                    second = self.install(system, "--triggered", *job)
+
+                    self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+                    self.assertEqual(self.installed(system), before)
+
+    def test_switching_a_job_between_timed_and_triggered_leaves_nothing_of_the_other_form(self):
+        result = self.install("Linux", "--audit", "shop")
+        self.assertEqual(sorted(self.installed("Linux")), ["kitchen-shop-daily-audit.service", "kitchen-shop-daily-audit.timer"])
+
+        result = self.install("Linux", "--triggered", "--audit", "shop")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sorted(self.installed("Linux")), ["kitchen-shop-daily-audit.service"])
+        self.assertIn("systemctl --user disable --now kitchen-shop-daily-audit.timer", self.calls_log())
+        result = self.install("Linux", "--audit", "shop")
+        self.assertEqual(sorted(self.installed("Linux")), ["kitchen-shop-daily-audit.service", "kitchen-shop-daily-audit.timer"])
+
+        self.install("Darwin", "--retro")
+        self.assertIn("StartCalendarInterval", plistlib.loads(self.installed("Darwin")["com.kitchen.retro.plist"]))
+        result = self.install("Darwin", "--triggered", "--retro")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("StartCalendarInterval", plistlib.loads(self.installed("Darwin")["com.kitchen.retro.plist"]))
+        self.install("Darwin", "--retro")
+        self.assertIn("StartCalendarInterval", plistlib.loads(self.installed("Darwin")["com.kitchen.retro.plist"]))
+
+    def test_the_nightly_guard_cannot_be_installed_triggered(self):
+        for system in self.SYSTEMS:
+            for args in (["--triggered", "--guard", "shop"], ["--triggered", "shop"], ["shop", "--triggered"]):
+                with self.subTest(system=system, args=args):
+                    result = self.install(system, *args)
+
+                    self.assertEqual(result.returncode, 2, result.stdout)
+                    self.assertIn("the nightly guard stays on its timer", result.stderr)
+                    self.assertEqual(self.installed(system), {})
+        self.assertNotIn("ctl", self.calls_log())
+
+    def install_stub(self, system, job="daily-audit", project="shop"):
+        """The job's unit as install-schedule writes it, running a stub instead of the real job."""
+        self.on(system)
+        self.manager.mkdir(exist_ok=True)
+        stub = self.write_script("stub-job", STUB_JOB)
+        label = f"{project}.{job}"
+        if system == "Linux":
+            units = self.home / ".config" / "systemd" / "user"
+            units.mkdir(parents=True, exist_ok=True)
+            (units / f"kitchen-{label.replace('.', '-')}.service").write_text(f"[Service]\nType=oneshot\nExecStart=/bin/bash {stub} {project}\n")
+        else:
+            agents = self.home / "Library" / "LaunchAgents"
+            agents.mkdir(parents=True, exist_ok=True)
+            (agents / f"com.kitchen.{label}.plist").write_bytes(plistlib.dumps({"Label": f"com.kitchen.{label}",
+                                                                                "ProgramArguments": ["/bin/bash", str(stub), project]}))
+            (self.manager / "loaded").touch()
+
+    def trigger(self, *args, **env):
+        return subprocess.run(["bash", str(AUTOMATION / "bin" / "run-job"), *args], env=self.env(**env),
+                              capture_output=True, text=True, timeout=60)
+
+    def test_run_job_exits_with_the_jobs_status_and_prints_this_runs_record_line(self):
+        record = self.state / "audit" / "shop.jsonl"
+        for system in self.SYSTEMS:
+            for code in (0, 3):
+                with self.subTest(system=system, code=code):
+                    shutil.rmtree(self.manager, ignore_errors=True)
+                    self.install_stub(system)
+                    record.parent.mkdir(parents=True, exist_ok=True)
+                    older = {"ts": "2026-10-01T04:00:00+00:00", "started": "2026-10-01T04:00:00+00:00", "status": "clean",
+                             "run_id": "20261001T040000Z-1", "log": "/old.log"}
+                    record.write_text(json.dumps(older) + "\n")
+
+                    result = self.trigger("daily-audit", "shop", STUB_EXIT=str(code))
+
+                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    self.assertIn(f" exited {code}\n", result.stdout)
+                    self.assertIn(f"record: {record}\n", result.stdout)
+                    line = json.loads(record.read_text().splitlines()[-1])
+                    self.assertIn(f"result: {json.dumps(line)}\n", result.stdout)
+                    self.assertEqual(line["status"], "findings")
+                    self.assertIn("log: /l/audit.log\n", result.stdout)
+
+    def test_run_job_that_exited_0_without_a_record_line_of_its_own_is_not_green(self):
+        for system in self.SYSTEMS:
+            with self.subTest(system=system):
+                shutil.rmtree(self.manager, ignore_errors=True)
+                self.install_stub(system)
+
+                result = self.trigger("daily-audit", "shop", STUB_RECORD="0")
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("result: none", result.stdout)
+                self.assertIn("nothing proves what it did", result.stderr)
+
+    def test_a_busy_skip_is_reported_as_not_run(self):
+        for system in self.SYSTEMS:
+            with self.subTest(system=system):
+                shutil.rmtree(self.manager, ignore_errors=True)
+                self.install_stub(system)
+
+                result = self.trigger("daily-audit", "shop", STUB_RECORD="0", STUB_EXIT="75")
+
+                self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+                self.assertIn("did not run and recorded nothing", result.stdout)
+                self.assertNotIn("result:", result.stdout)
+
+    def test_run_job_refuses_a_job_that_is_not_installed(self):
+        for system in self.SYSTEMS:
+            with self.subTest(system=system):
+                self.on(system)
+
+                result = self.trigger("daily-audit", "shop")
+
+                self.assertEqual(result.returncode, 69, result.stdout)
+                self.assertIn("is not installed: automation/bin/install-schedule --triggered --audit shop", result.stderr)
+                self.assertNotIn("start", self.calls_log())
+
+    def test_run_job_refuses_a_job_that_is_already_running(self):
+        for system in self.SYSTEMS:
+            with self.subTest(system=system):
+                shutil.rmtree(self.manager, ignore_errors=True)
+                self.install_stub(system)
+                (self.manager / ("active" if system == "Linux" else "running")).write_text("activating\n")
+
+                result = self.trigger("daily-audit", "shop")
+
+                self.assertEqual(result.returncode, 69, result.stdout)
+                self.assertIn("already", result.stderr)
+                self.assertNotIn("start", self.calls_log())
+                self.assertFalse((self.state / "audit" / "shop.jsonl").exists())
+
+    def test_run_job_refuses_a_unit_that_did_not_start(self):
+        self.install_stub("Linux")
+
+        result = self.trigger("daily-audit", "shop", FAKE_NO_START="1")
+
+        self.assertEqual(result.returncode, 69, result.stdout)
+        self.assertIn("did not start", result.stderr)
+        self.assertNotIn("exited", result.stdout)
+
+    def test_an_exit_another_run_left_in_between_is_never_reported_as_this_runs(self):
+        for system, other in (("Linux", {"FAKE_OTHER_PID": "999999"}), ("Darwin", {"FAKE_OTHER_RUN": "1"})):
+            with self.subTest(system=system):
+                shutil.rmtree(self.manager, ignore_errors=True)
+                self.install_stub(system)
+
+                result = self.trigger("daily-audit", "shop", STUB_EXIT="3", **other)
+
+                self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+                self.assertIn("this run's exit is not known", result.stderr)
+                self.assertNotIn(" exited ", result.stdout)
+
+    def test_run_job_refuses_the_nightly_guard(self):
+        result = self.trigger("nightly-guard", "shop")
+
+        self.assertEqual(result.returncode, 64, result.stdout)
+        self.assertIn("the nightly guard stays on its own timer", result.stderr)
 
 
 class ShimTests(AutomationFixture):

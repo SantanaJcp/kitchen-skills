@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Starts an installed agent job in its own unit, waits for it to end, and reports what that run left.
+# Principles: `truthful-state` (no exit 0 without a run of its own and its record), `isolate` (the job runs in its unit,
+# never as a child of whoever asked).
+# Usage: run-job daily-audit <project> | weekly-gardener <project> | weekly-retro
+# The job must be installed (bin/install-schedule, usually --triggered): its systemd service on Linux, its launchd job on
+# macOS. run-job never runs the job's script itself, so the job keeps its unit's isolation (PrivateTmp on Linux), its
+# sandbox, its log and its exit status. Stopping run-job does not stop the job: the job runs on in its unit.
+#   Linux: systemctl --user start --wait, which returns when the unit is inactive again, 0 only for a clean exit. A
+#     unit that ends inactive is unloaded at once (nothing references a triggered service), and with it what systemd
+#     knew of the run (measured on systemd 262), so run-job reads the new InvocationID and the MainPID while the unit
+#     runs. A failed unit stays loaded: its new InvocationID proves it ran, ExecMainCode and ExecMainStatus are its exit.
+#   macOS: launchctl kickstart -p, then launchctl print every RUN_JOB_POLL_SECONDS (default 5) until the job is no
+#     longer running and its run count is one past the one before the start; its last exit code is the job's exit (a
+#     second run in between would own that code, so run-job then says the exit is not known). launchd
+#     counts the job as running while its main process lives, and that process (the job's supervisor, or the retro's
+#     bash) exits only after the job and every process it left in the clone are gone.
+# Refuses, and exits 69 without starting anything, when the job is not installed or already running, or when the unit
+# could not be started. Otherwise it exits with the job's own status (a job killed by signal N: 128+N), after printing:
+#   run-job: <unit> exited <code>
+#   record: <the job's record>, and result: <this run's line of it>   (the audit and the gardener)
+#   log: <this run's log>
+# A busy skip (75) never held the project lock and wrote no record. A run that exited 0 without a record line or log of
+# its own exits 1: nothing proves what it did.
+set -euo pipefail
+
+AUTOMATION="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_ROOT="${KITCHEN_STATE:-$HOME/.local/state/kitchen}"
+POLL="${RUN_JOB_POLL_SECONDS:-5}"
+refuse() { echo "run-job: $1" >&2; exit "${2:-69}"; }
+
+JOB="${1:-}"
+case "$JOB" in
+  daily-audit|weekly-gardener)
+    [ $# -eq 2 ] && [ -n "$2" ] || refuse "usage: run-job $JOB <project>" 64
+    PROJECT="$2" RECORD="$STATE_ROOT/${JOB#*-}/$2.jsonl" INSTALL="--${JOB#*-} $2" ;;
+  weekly-retro)
+    [ $# -eq 1 ] || refuse "usage: run-job weekly-retro" 64
+    PROJECT="" RECORD="" INSTALL="--retro" ;;
+  nightly-guard) refuse "the nightly guard stays on its own timer; run-job starts only the agent jobs" 64 ;;
+  *) refuse "usage: run-job daily-audit <project> | weekly-gardener <project> | weekly-retro" 64 ;;
+esac
+NAME="${PROJECT:+$PROJECT.}$JOB"
+[ "$JOB" != weekly-retro ] || NAME=retro
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"  # the jobs' own format for `started`
+RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"            # and for their run ids and log names
+
+case "$(uname)" in
+  Linux)
+    UNIT="kitchen-${NAME//./-}.service"
+    [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$UNIT" ] ||
+      refuse "$UNIT is not installed: automation/bin/install-schedule --triggered $INSTALL"
+    state="$(systemctl --user is-active "$UNIT" 2>/dev/null || true)"
+    case "$state" in
+      inactive|failed) ;;
+      "") refuse "cannot read the state of $UNIT from systemctl --user" ;;
+      *) refuse "$UNIT is already $state: a run is in progress; its result goes to its record when it ends" ;;
+    esac
+    prop() { systemctl --user show -p "$1" --value "$UNIT"; }
+    before="$(prop InvocationID)"
+    echo "run-job: starting $UNIT at $STARTED_AT"
+    systemctl --user start --wait "$UNIT" & waiter=$!
+    pid=""
+    while kill -0 "$waiter" 2>/dev/null; do  # this run's invocation and main pid, before an unload takes them
+      seen="$(systemctl --user show -p InvocationID -p MainPID "$UNIT" 2>/dev/null || true)"
+      now="$(sed -n 's/^InvocationID=//p' <<< "$seen")" main="$(sed -n 's/^MainPID=//p' <<< "$seen")"
+      if [ -n "$now" ] && [ "$now" != "$before" ] && [ "${main:-0}" != 0 ]; then pid="$main"; break; fi
+      sleep 0.05
+    done
+    waited=0; wait "$waiter" || waited=$?
+    if [ "$waited" = 0 ]; then
+      [ -n "$pid" ] || refuse "$UNIT ended before run-job saw it run, so no line of its record can be told to be this run's" 70
+      rc=0
+    else
+      [ "$(prop InvocationID)" != "$before" ] && [ -n "$(prop InvocationID)" ] ||
+        refuse "$UNIT did not start (no new invocation): see systemctl --user status $UNIT"
+      main="$(prop ExecMainPID)"
+      [ -z "$pid" ] || [ "$main" = "$pid" ] ||
+        refuse "$UNIT ran again (main pid $main, not this run's $pid) before its exit was read; this run's exit is not known" 70
+      code="$(prop ExecMainCode)" status="$(prop ExecMainStatus)" pid="$main"
+      case "$code" in
+        1) rc="$status" ;;            # exited
+        2|3) rc=$((128 + status)) ;;  # killed or dumped by signal $status
+        *) refuse "$UNIT ran but its exit is unknown (ExecMainCode=$code)" 70 ;;
+      esac
+    fi ;;
+  Darwin)
+    UNIT="com.kitchen.$NAME"
+    TARGET="gui/$(id -u)/$UNIT"
+    [ -f "$HOME/Library/LaunchAgents/$UNIT.plist" ] ||
+      refuse "$UNIT is not installed: automation/bin/install-schedule --triggered $INSTALL"
+    printed="$(launchctl print "$TARGET" 2>/dev/null)" || refuse "$UNIT is not loaded: launchctl bootstrap gui/$(id -u) $HOME/Library/LaunchAgents/$UNIT.plist"
+    field() { sed -n "s/^[[:space:]]*$1 = //p" <<< "$printed" | head -1; }
+    [ "$(field state)" != running ] || refuse "$UNIT is already running: a run is in progress; its result goes to its record when it ends"
+    runs="$(field runs)"; runs="${runs:-0}"
+    echo "run-job: starting $UNIT at $STARTED_AT"
+    pid="$(launchctl kickstart -p "$TARGET")" || refuse "launchctl kickstart $TARGET failed"
+    [[ "$pid" =~ ^[0-9]+$ ]] || refuse "launchctl kickstart printed no pid for $UNIT ('$pid')"
+    kicked="$SECONDS"
+    while :; do
+      printed="$(launchctl print "$TARGET" 2>/dev/null)" || refuse "$UNIT was unloaded while it ran; its result is not known" 70
+      now_runs="$(field runs)"
+      if [ "${now_runs:-0}" -gt $((runs + 1)) ]; then  # launchd keeps only the last run's exit: it would not be this run's
+        refuse "$UNIT ran again before run-job read this run's exit ($((now_runs - runs)) runs since the start); this run's exit is not known" 70
+      elif [ "${now_runs:-0}" -gt "$runs" ]; then
+        [ "$(field state)" = running ] || break
+      elif [ $((SECONDS - kicked)) -ge 60 ]; then
+        refuse "$UNIT did not start: launchd counts no new run 60s after kickstart"
+      fi
+      sleep "$POLL"
+    done
+    signal="$(field 'last terminating signal' | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p')"
+    exit_code="$(field 'last exit code')"
+    if [ -n "$signal" ]; then rc=$((128 + signal))
+    elif [[ "$exit_code" =~ ^[0-9]+$ ]]; then rc="$exit_code"
+    else refuse "$UNIT ran but its exit is unknown (last exit code: ${exit_code:-none})" 70
+    fi ;;
+  *) refuse "run-job supports macOS (launchd) and Linux (systemd) only" ;;
+esac
+
+echo "run-job: $UNIT exited $rc"
+if [ "$rc" = 75 ]; then
+  echo "run-job: busy: another job of the project held its lock for the whole wait, so this one did not run and recorded nothing"
+  exit 75
+fi
+# This run's evidence: the record line whose run id the job took from its main process (lib/common.sh: <time>-<pid>),
+# started after run-job did; the retro keeps no record, only its log, named by its start time.
+if [ -n "$RECORD" ]; then
+  echo "record: $RECORD"
+  line="$(python3 "$AUTOMATION/lib/record.py" "$RECORD" find "$STARTED_AT" "$pid" || true)"
+  if [ -n "$line" ]; then
+    echo "result: $line"
+    log="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1]).get("log") or "")' "$line")"
+  else
+    echo "result: none: no line of $RECORD comes from this run"
+    log=""
+  fi
+else
+  log=""
+  for candidate in "$STATE_ROOT/retro/logs"/retro-*.log; do
+    [ -f "$candidate" ] || continue
+    name="${candidate##*/retro-}"
+    [[ "${name%.log}" < "$RUN_STAMP" ]] || log="$candidate"
+  done
+  [ -n "$log" ] && line="$log" || line=""
+fi
+echo "log: ${log:-none from this run}"
+if [ "$rc" = 0 ] && [ -z "$line" ]; then
+  echo "run-job: $UNIT exited 0 but left no ${RECORD:+record line}${RECORD:-log} of its own, so nothing proves what it did" >&2
+  exit 1
+fi
+exit "$rc"

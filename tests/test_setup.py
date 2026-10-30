@@ -157,8 +157,8 @@ class EnvironmentDoctorTests(unittest.TestCase):
     def test_a_launchagent_present_but_not_loaded_is_flagged(self):
         agents = self.root / "Library" / "LaunchAgents"
         agents.mkdir(parents=True)
-        for label in ("com.kitchen.shop.nightly-guard", "com.kitchen.shop.weekly-gardener"):
-            (agents / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label}))
+        for label in ("com.kitchen.shop.nightly-guard", "com.kitchen.shop.weekly-gardener"):  # timed, as install-schedule writes them
+            (agents / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label, "StartCalendarInterval": {"Hour": 2}}))
         self.fake("launchctl", 'printf "PID\\tStatus\\tLabel\\n-\\t0\\tcom.kitchen.shop.nightly-guard\\n-\\t0\\tcom.apple.x\\n"')
 
         with mock.patch.dict(os.environ, {"PATH": str(self.bin)}):
@@ -238,6 +238,48 @@ class EnvironmentDoctorTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": str(self.bin), "XDG_CONFIG_HOME": ""}):
             self.assertEqual(environment().schedules("Linux", self.root), [])
         self.assertFalse(probed.exists())
+
+    def test_a_triggered_job_shows_as_triggered_with_its_last_run_not_as_a_missing_timer(self):
+        state = self.root / "state"
+        (state / "audit").mkdir(parents=True)
+        (state / "audit" / "shop.jsonl").write_text(json.dumps({"ts": "2026-10-30T04:12:00+00:00", "status": "findings"}) + "\n")
+        audit = ["/bin/bash", "/k/automation/bin/daily-audit", "shop"]
+        units = self.root / ".config" / "systemd" / "user"
+        units.mkdir(parents=True)
+        (units / "kitchen-shop-daily-audit.service").write_text(f"[Service]\nExecStart={' '.join(audit)}\n")
+        (units / "kitchen-retro.service").write_text("[Service]\nExecStart=/bin/bash /k/automation/bin/weekly-retro\n")
+        agents = self.root / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True)
+        (agents / "com.kitchen.shop.daily-audit.plist").write_bytes(plistlib.dumps({"Label": "com.kitchen.shop.daily-audit",
+                                                                                     "ProgramArguments": audit}))
+        (agents / "com.kitchen.retro.plist").write_bytes(plistlib.dumps({"Label": "com.kitchen.retro", "ProgramArguments": ["true"],
+                                                                         "StartCalendarInterval": {"Hour": 7}}))
+        self.fake("launchctl", 'printf "PID\\tStatus\\tLabel\\n-\\t0\\tcom.kitchen.shop.daily-audit\\n-\\t0\\tcom.kitchen.retro\\n"')
+        self.fake("systemd-run", 'echo \'ssss "mako" "emersion" "1.9" "1.2"\'')
+        triggered = "triggered (no timer: automation/bin/run-job starts it); last run:"
+        audit_run = f"findings at 2026-10-30T04:12:00+00:00 ({state / 'audit' / 'shop.jsonl'})"
+
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin), "XDG_CONFIG_HOME": "", "KITCHEN_STATE": str(state)}):
+            linux = environment().schedules("Linux", self.root)
+            mac = environment().schedules("Darwin", self.root)
+
+        self.assertEqual(linux, [("INFO", f"job kitchen-retro.service {triggered} no run logged"),
+                                 ("INFO", f"job kitchen-shop-daily-audit.service {triggered} {audit_run}"),
+                                 ("INFO", "notification server mako answers on the kitchen timers' session bus")])
+        self.assertEqual(mac, [("INFO", "schedule com.kitchen.retro loaded"),
+                               ("INFO", f"job com.kitchen.shop.daily-audit {triggered} {audit_run}")])
+
+    def test_a_nightly_guard_without_its_timer_is_flagged(self):
+        units = self.root / ".config" / "systemd" / "user"
+        units.mkdir(parents=True)
+        (units / "kitchen-shop-nightly-guard.service").write_text("[Service]\nExecStart=/bin/bash /k/automation/bin/nightly-guard shop\n")
+        self.fake("systemd-run", 'echo \'ssss "mako" "emersion" "1.9" "1.2"\'')
+
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin), "XDG_CONFIG_HOME": ""}):
+            report = environment().schedules("Linux", self.root)
+
+        self.assertIn(("WARN", "kitchen-shop-nightly-guard.service has no timer, and the nightly guard runs only on its own: "
+                               "`automation/bin/install-schedule --guard shop`"), report)
 
     def test_unreadable_launchctl_is_reported_not_skipped(self):
         agents = self.root / "Library" / "LaunchAgents"

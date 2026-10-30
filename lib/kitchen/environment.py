@@ -1,11 +1,18 @@
-"""What `kitchen doctor` checks outside the links: agent CLIs, the automation's tools, the scheduled jobs and whether their notifications can reach a server."""
+"""What `kitchen doctor` checks outside the links: agent CLIs, the automation's tools, the scheduled jobs and whether their notifications can reach a server.
+A job installed `--triggered` (automation/bin/install-schedule) has no timer: whatever starts it with automation/bin/run-job,
+a T3 scheduled task for one, holds its schedule. It shows as triggered with its last run, read from what the job left."""
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
 import subprocess
 from pathlib import Path
+
+from .common import state_dir
+
+RECORDS = {"daily-audit": "audit", "weekly-gardener": "gardener"}  # the job's record; the retro keeps only run logs
 
 
 def on_path(name: str) -> str | None:
@@ -46,6 +53,69 @@ def run(*args: str) -> subprocess.CompletedProcess | None:
         return None
 
 
+def units_dir(h: Path) -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or h / ".config") / "systemd" / "user"
+
+
+def job_of(args: list) -> tuple[str, str | None]:
+    """The job and project a unit runs, from its program: /bin/bash <kitchen>/automation/bin/<job> [project]."""
+    return (Path(str(args[1])).name if len(args) > 1 else ""), (str(args[2]) if len(args) > 2 else None)
+
+
+def triggered_jobs(system: str, h: Path) -> list[tuple[str, str, str | None]]:
+    """(label, job, project) of each kitchen job installed without a schedule of its own: a systemd service without its
+    timer, or a launchd job without StartCalendarInterval. Read from the files install-schedule writes."""
+    found = []
+    if system == "Linux":
+        for service in sorted(units_dir(h).glob("kitchen-*.service")):
+            if service.with_suffix(".timer").exists():
+                continue
+            try:
+                lines = service.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            start = next((line.split("=", 1)[1].split() for line in lines if line.startswith("ExecStart=")), [])
+            found.append((service.name, *job_of(start)))
+    elif system == "Darwin":
+        for plist in sorted((h / "Library" / "LaunchAgents").glob("com.kitchen.*.plist")):
+            try:
+                job = plistlib.loads(plist.read_bytes())
+            except (OSError, plistlib.InvalidFileException, ValueError):
+                continue  # launchd() reports it
+            if "StartCalendarInterval" not in job and isinstance(job.get("Label"), str):
+                found.append((job["Label"], *job_of(job.get("ProgramArguments") or [])))
+    return found
+
+
+def last_run(job: str, project: str | None) -> str:
+    """A triggered job's last run, from what the job left: its record, or the retro's newest run log."""
+    if job == "weekly-retro":
+        logs = sorted((state_dir() / "retro" / "logs").glob("retro-*.log"))
+        if not logs:
+            return "no run logged"
+        ends = [line.split(" retro end: ", 1)[1] for line in logs[-1].read_text(errors="replace").splitlines()
+                if " retro end: " in line]
+        return f"{logs[-1]}, {ends[-1] if ends else 'no end line: running, or killed'}"
+    if job not in RECORDS or not project:
+        return f"unknown: {job or 'its program'} is not a job run-job starts"
+    path = state_dir() / RECORDS[job] / f"{project}.jsonl"
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.is_file() else []
+    if not lines:
+        return f"no run recorded in {path}"
+    try:
+        run = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return f"unknown: the last line of {path} is not JSON"
+    return f"{run.get('status')} at {run.get('ts')} ({path})"
+
+
+def triggered_line(label: str, job: str, project: str | None) -> tuple[str, str]:
+    if job == "nightly-guard":
+        return ("WARN", f"{label} has no timer, and the nightly guard runs only on its own: "
+                        f"`automation/bin/install-schedule --guard {project}`")
+    return ("INFO", f"job {label} triggered (no timer: automation/bin/run-job starts it); last run: {last_run(job, project)}")
+
+
 def schedules(system: str, h: Path) -> list[tuple[str, str]]:
     if system == "Darwin":
         return launchd(h)
@@ -62,6 +132,7 @@ def launchd(h: Path) -> list[tuple[str, str]]:
     if listing is None or listing.returncode != 0:
         return [("WARN", f"cannot read `launchctl list`, so {len(plists)} kitchen schedules were not checked")]
     loaded = {line.split("\t")[-1].strip() for line in listing.stdout.splitlines()[1:] if line.strip()}
+    triggered = {label: (job, project) for label, job, project in triggered_jobs("Darwin", h)}
     report = []
     for plist in plists:
         try:
@@ -72,7 +143,9 @@ def launchd(h: Path) -> list[tuple[str, str]]:
         if not isinstance(label, str) or not label:
             report.append(("WARN", f"{plist} has no Label, so launchd cannot load it"))
             continue
-        if label in loaded:
+        if label in loaded and label in triggered:
+            report.append(triggered_line(label, *triggered[label]))
+        elif label in loaded:
             report.append(("INFO", f"schedule {label} loaded"))
         else:
             report.append(("WARN", f"{plist} is present but not loaded by launchctl: load it with "
@@ -81,11 +154,11 @@ def launchd(h: Path) -> list[tuple[str, str]]:
 
 
 def systemd(h: Path) -> list[tuple[str, str]]:
-    units = Path(os.environ.get("XDG_CONFIG_HOME") or h / ".config") / "systemd" / "user"
-    timers = sorted(units.glob("kitchen-*.timer"))
-    if not timers:
+    timers = sorted(units_dir(h).glob("kitchen-*.timer"))
+    triggered = triggered_jobs("Linux", h)
+    if not timers and not triggered:
         return []
-    report = []
+    report = [triggered_line(*job) for job in triggered]
     for timer in timers:
         active = run("systemctl", "--user", "is-active", timer.name)
         if active is None:

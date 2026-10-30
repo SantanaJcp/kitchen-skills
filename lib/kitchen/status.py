@@ -24,6 +24,10 @@ runs too. It is the owner's private config, which the jobs already execute every
 its output discarded and a deadline (KITCHEN_ENV_TIMEOUT_SECONDS, default 5). A non-zero exit or the deadline is
 `unknown`, never `not configured`.
 
+A gardener or audit installed `--triggered` on this machine (automation/bin/install-schedule) says `triggered` on its
+line: it has no timer, and whatever starts it with automation/bin/run-job, a T3 scheduled task for one, holds its schedule.
+Its record is read and judged as a timed one's, overdue included.
+
 A project whose gardener or nightly runs on another host says so in integrate.toml, `gardener = "remote:<host-label>"`
 or `nightly = "remote:<host-label>"`: that line is then informational, `remote (<host-label>): not read here`. Never
 green, never an exception.
@@ -33,6 +37,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import platform
 import re
 import signal
 import subprocess
@@ -40,7 +45,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from . import integrate, journal
+from . import environment, integrate, journal
 from .common import config_dir, git, git_common_dir, git_out, home, now, parse_ts, state_dir
 
 OWED_DECISION = re.compile(r"^\s*- \[ \]", re.MULTILINE)
@@ -333,6 +338,7 @@ def project(repo: Path, since) -> dict:
     entry, config_error = settings(name)
     base = resolve_base(repo, base_of(name, entry, config_error))
     common_dir = git_common_dir(repo)
+    triggered_here = {job for _, job, project in environment.triggered_jobs(platform.system(), home()) if project == name}
 
     return {
         "name": name,
@@ -346,8 +352,8 @@ def project(repo: Path, since) -> dict:
         "prunable_worktrees": prunable,
         "pull_requests": pull_requests(repo),
         "nightly": nightly_state(env, run, head, up, repo, base, entry, config_error),
-        "gardener": gardener(name, entry, config_error, env),
-        "audit": audit(name, env),
+        "gardener": {**gardener(name, entry, config_error, env), "triggered": "weekly-gardener" in triggered_here},
+        "audit": {**audit(name, env), "triggered": "daily-audit" in triggered_here},
         "journal": journal.read(since=since, project=common_dir, repo=toplevel),
         "decisions": decisions(repo, base),
     }
@@ -443,7 +449,7 @@ def gardener_line(run: dict) -> str:
         return f"gardener   not configured ({run['not_configured']})"
     if "no_record" in run:
         return (f"gardener   ✗ no record on this host ({run['no_record']}; if it runs on another host,"
-                f" set gardener = \"remote:<host-label>\" in {integrate.config_path()})")
+                f" set gardener = \"remote:<host-label>\" in {integrate.config_path()}){triggered(run)}")
     if "setting_error" in run:
         return f"gardener   {UNKNOWN}: {run['setting_error']}"
     if "remote" in run:
@@ -452,7 +458,11 @@ def gardener_line(run: dict) -> str:
     detail = f": {run['detail']}" if run.get("detail") else ""
     warnings = f" · warnings: {'; '.join(map(str, run['warnings']))}" if run.get("warnings") else ""
     overdue = f" · overdue: last record {duration(run['age_seconds'])} ago, cadence weekly plus a day" if run["overdue"] is True else ""
-    return f"gardener   {mark} {run.get('status')}{detail} · {duration(run['age_seconds'])} ago{overdue}{warnings}"
+    return f"gardener   {mark} {run.get('status')}{detail} · {duration(run['age_seconds'])} ago{overdue}{warnings}{triggered(run)}"
+
+
+def triggered(run: dict) -> str:
+    return " · triggered: no timer, run-job starts it" if run.get("triggered") else ""
 
 
 def gardener_green(run: dict) -> bool:
@@ -469,7 +479,7 @@ def audit_line(run: dict) -> str:
     if "not_configured" in run:
         return f"audit      not configured ({run['not_configured']})"
     if "no_record" in run:
-        return f"audit      ✗ no record ({run['no_record']})"
+        return f"audit      ✗ no record ({run['no_record']}){triggered(run)}"
     if "setting_error" in run:
         return f"audit      {UNKNOWN}: {run['setting_error']}"
     mark = "✓" if audit_green(run) else "✗"
@@ -477,7 +487,7 @@ def audit_line(run: dict) -> str:
     detail = f": {run['detail']}" if run.get("detail") else ""
     warnings = f" · warnings: {'; '.join(map(str, run['warnings']))}" if run.get("warnings") else ""
     overdue = f" · overdue: last record {duration(run['age_seconds'])} ago, cadence daily plus a day" if run["overdue"] is True else ""
-    return f"audit      {mark} {run.get('status')}{on}{detail} · {duration(run['age_seconds'])} ago{overdue}{warnings}"
+    return f"audit      {mark} {run.get('status')}{on}{detail} · {duration(run['age_seconds'])} ago{overdue}{warnings}{triggered(run)}"
 
 
 def audit_green(run: dict) -> bool:
