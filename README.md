@@ -113,6 +113,7 @@ Every skill is manual: `/name` in Claude Code, `$name` in Codex, or read by chef
 | `wait-what` | The last answer did not land |
 | `sharpen` | Before a task: make it deeper, not bigger, and rewrite the prompt |
 | `audit-verification` | Periodically: prove a project's verify skill still tells the truth |
+| `formal-verification` | A promise tests rarely reach: model-check it, leave a `formal-<area>` skill, keep it in step with the code |
 
 ## Check
 

@@ -67,6 +67,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 | Catch the owner up: "catch me up", "qué pasó", "en qué vamos", "como vamos" | `catch-me-up` |
 | Corrections the owner keeps repeating | `retro` |
 | A project's verify skill may no longer tell the truth | `audit-verification` |
+| A promise tests rarely reach (concurrency, retries, ordering, permissions, money, sync): "model-check", "prove this invariant", "verificación formal", "formal verification"; code changed under a `formal-<area>` skill | `formal-verification` |
 | A feature, fix or refactor | the work loop below |
 
 ## The work loop
