@@ -786,9 +786,9 @@ class IntegrateTests(ProjectFixture):
         git(self.source, "checkout", "-q", "main")
         self.configure(f"checks = [{json.dumps(self.CHECK)}]")
 
-    def configure(self, body, project="shop"):
+    def configure(self, body, project="shop", base="main"):
         (self.home / "config").mkdir(exist_ok=True)
-        (self.home / "config" / "integrate.toml").write_text(f"[projects.{project}]\nbase = \"main\"\n{body}\n")
+        (self.home / "config" / "integrate.toml").write_text(f"[projects.{project}]\nbase = \"{base}\"\n{body}\n")
 
     def integrate(self, *args, env_extra=None):
         return self.kitchen("integrate", "--repo", str(self.source), *args, env_extra=env_extra)
@@ -908,6 +908,35 @@ class IntegrateTests(ProjectFixture):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.records()[-1]["branches"], [{"ref": "pr:7", "sha": self.sha("feature-a")}])
         self.assertNotIn("pull", subprocess.run(["git", "-C", str(self.source), "for-each-ref"], capture_output=True, text=True).stdout)
+
+    def test_a_check_that_compares_against_origin_sees_the_base_it_merges_onto_without_a_fetch(self):
+        git(self.source, "update-ref", "refs/remotes/origin/main", self.sha("main"))
+        git(self.source, "checkout", "-q", "main")
+        (self.source / "local-only").write_text("x\n")
+        git(self.source, "add", ".")
+        git(self.source, "commit", "-q", "-m", "local main moves past origin/main")
+        git(self.source, "remote", "add", "origin", str(self.home / "unreachable.git"))
+        base = self.sha("origin/main")
+        self.assertNotEqual(base, self.sha("main"))
+        self.configure(f'checks = ["test \\"$(git rev-parse origin/main)\\" = {base}", "git merge-base HEAD origin/main"]', base="origin/main")
+
+        result = self.integrate("feature-a", "feature-b")
+        recorded = self.integrate("feature-a", "feature-b", "--recorded")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.records()[-1]["vector"], [base, self.sha("feature-a"), self.sha("feature-b")])
+        self.assertEqual(recorded.returncode, 0, recorded.stdout)
+
+    def test_a_base_given_as_a_sha_or_a_local_branch_creates_no_origin_ref(self):
+        git(self.source, "update-ref", "refs/remotes/origin/main", self.sha("main"))
+        self.configure('checks = ["test -z \\"$(git for-each-ref refs/remotes)\\""]')
+
+        for base in (self.sha("main"), "main"):
+            with self.subTest(base=base):
+                result = self.integrate("feature-a", "--base", base)
+
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.records()[-1]["vector"][0], self.sha("main"))
 
 
 class ModelsTests(KitchenFixture):
