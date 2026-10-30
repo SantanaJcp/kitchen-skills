@@ -2344,13 +2344,15 @@ case "$1" in
   bootstrap) touch "$s/loaded" ;;
   print)
     [ -f "$s/loaded" ] || exit 113
+    # like launchd, the first print after a kickstart shows the spawn's transition, xpcproxy (measured on macOS)
     state="not running"; [ ! -f "$s/running" ] || state=running
+    if [ -f "$s/spawning" ]; then state=xpcproxy; rm -f "$s/spawning"; fi
     printf '%s = {\n\tstate = %s\n\truns = %s\n\tlast exit code = %s\n}\n' "$2" "$state" "$(cat "$s/runs" 2>/dev/null || echo 0)" \
       "$(cat "$s/exit" 2>/dev/null || echo '(never exited)')" ;;
   kickstart)
     plist="$HOME/Library/LaunchAgents/${3##*/}.plist"
     read -r -a program <<< "$(python3 -c 'import plistlib, sys; print(" ".join(plistlib.load(open(sys.argv[1], "rb"))["ProgramArguments"]))' "$plist")"
-    rm -f "$s/pid"; touch "$s/running"; echo $(( $(cat "$s/runs" 2>/dev/null || echo 0) + 1 + ${FAKE_OTHER_RUN:-0} )) > "$s/runs"
+    rm -f "$s/pid"; touch "$s/running" "$s/spawning"; echo $(( $(cat "$s/runs" 2>/dev/null || echo 0) + 1 + ${FAKE_OTHER_RUN:-0} )) > "$s/runs"
     ( "${program[@]}" & pid=$!; echo "$pid" > "$s/pid"; wait "$pid"; echo $? > "$s/exit"; rm "$s/running" ) >/dev/null 2>&1 &
     until [ -s "$s/pid" ]; do sleep 0.01; done
     cat "$s/pid" ;;
