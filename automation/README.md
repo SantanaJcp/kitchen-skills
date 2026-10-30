@@ -22,10 +22,10 @@ An agent job (the audit, the gardener, the retro) can run on a T3 Code scheduled
 A job installed by another local user runs in that user's unit, while T3 runs as you. In that user's `~/.ssh/authorized_keys`, add a key of your own that only this machine can use and that can start only that user's jobs:
 
 ```
-from="127.0.0.1,::1",restrict,command="case \"$SSH_ORIGINAL_COMMAND\" in 'daily-audit <project>'|'weekly-gardener <project>') exec <kitchen>/automation/bin/run-job $SSH_ORIGINAL_COMMAND;; *) echo refused >&2; exit 64;; esac" ssh-ed25519 AAAA...
+from="127.0.0.1,::1",restrict,command="case \"$SSH_ORIGINAL_COMMAND\" in 'daily-audit <project>') exec <kitchen>/automation/bin/run-job daily-audit <project>;; 'weekly-gardener <project>') exec <kitchen>/automation/bin/run-job weekly-gardener <project>;; *) echo refused >&2; exit 64;; esac" ssh-ed25519 AAAA...
 ```
 
-Give it a `Host` entry in your `~/.ssh/config` (`HostName localhost`, that `User`, `IdentityFile` the key, `IdentitiesOnly yes`, `BatchMode yes`), and the prompt's command becomes `ssh <host> daily-audit <project>`. sshd runs the forced command whatever command is asked for. Any other command gets `refused`, including one chained with `;` or `$(…)`, and `restrict` turns off the pty and forwarding.
+Give it a `Host` entry in your `~/.ssh/config` (`HostName localhost`, that `User`, `HostKeyAlias <alias>`, `IdentityFile` the key, `IdentitiesOnly yes`, `BatchMode yes`). `BatchMode` cannot ask you to trust the host key, so trust it from the machine's own file first: `echo "<alias> $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)" >> ~/.ssh/known_hosts`. The prompt's command then becomes `ssh <host> daily-audit <project>`. sshd runs the forced command whatever command is asked for, through the user's login shell. Each job gets its own branch with literal arguments, so the line does not depend on that shell splitting words (zsh, macOS's default, does not). Any other command gets `refused`, including one chained with `;` or `$(…)`, and `restrict` turns off the pty and forwarding.
 
 A T3 scheduled task runs only while T3 runs; a launchd or systemd timer runs with T3 closed. A run T3 missed shows in `kitchen status` as `overdue`, as with a timer. `kitchen doctor` shows a triggered job as `triggered`, with its last run from its record (the retro's, from its newest log). `kitchen status` adds `triggered` to the audit and gardener lines and judges their records as before.
 
