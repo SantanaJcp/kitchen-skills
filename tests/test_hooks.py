@@ -4,6 +4,8 @@ Each case is sent as the JSON payload Claude Code and Codex write on stdin; a gu
 with exit 2 and an actionable message on stderr. HOME, TMPDIR and the kitchen config are throwaway; HOME is created
 outside /tmp so "outside the temp dir" means something on Linux too.
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -12,15 +14,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / "hooks"
 CORPUS = json.loads((Path(__file__).resolve().parent / "corpus" / "hooks" / "cases.json").read_text(encoding="utf-8"))
-GUARDS = ("deny-no-verify", "deny-shared-push", "deny-recursive-rm")
+GUARDS = ("deny-no-verify", "deny-shared-push", "deny-recursive-rm", "deny-private-publish")
 AFTER_COMPACT = "chef-mode-after-compact"  # blocks nothing, so it has no attack corpus: AfterCompactTests below
 CHEF_MODE = ROOT / "skills" / "chef-mode" / "SKILL.md"
-# Each block names its way out: what to do instead.
-ADVICE = {"deny-no-verify": "Run it without", "deny-shared-push": "Push your own branch", "deny-recursive-rm": "trash "}
+# Each block names its way out: what to do instead. A case with its own `advice` names a different way out.
+ADVICE = {"deny-no-verify": "Run it without", "deny-shared-push": "Push your own branch", "deny-recursive-rm": "trash ",
+          "deny-private-publish": "on stdin"}
 GIT_ID = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test", "GIT_COMMITTER_NAME": "t",
           "GIT_COMMITTER_EMAIL": "t@example.test"}
 
@@ -37,6 +41,8 @@ class HookFixture(unittest.TestCase):
         for folder in (self.home, self.tmpdir, self.config):
             folder.mkdir()
         (self.config / "shared-branches.txt").write_text("\n".join(CORPUS["defaults"]["shared_branches_file"]) + "\n")
+        self.denylist = root / "denylist.txt"  # invented terms; never the real ~/.config/kitchen/denylist.txt
+        self.denylist.write_text("\n".join(CORPUS["defaults"]["denylist"]) + "\n")
         self.repos = {}
 
     def tearDown(self):
@@ -61,8 +67,19 @@ class HookFixture(unittest.TestCase):
             self.repos[key] = path
         return self.repos[key]
 
+    def kitchen_checkout(self):
+        """A git repo with the files deny-private-publish recognizes the kitchen by."""
+        path = self.home / "projects" / "kitchen"
+        if not path.exists():
+            subprocess.run(["git", "init", "-q", str(path)], check=True, env=clean_env(), capture_output=True)
+            for rel in ("bin/kitchen", "lib/kitchen/common.py"):
+                (path / rel).parent.mkdir(parents=True, exist_ok=True)
+                (path / rel).write_text("")
+        return path
+
     def env(self):
-        return clean_env(HOME=str(self.home), TMPDIR=str(self.tmpdir), KITCHEN_CONFIG=str(self.config))
+        return clean_env(HOME=str(self.home), TMPDIR=str(self.tmpdir), KITCHEN_CONFIG=str(self.config),
+                         KITCHEN_DENYLIST=str(self.denylist))
 
     def run_guard(self, guard, payload, python=None):
         command = [python, str(HOOKS / guard)] if python else [str(HOOKS / guard)]
@@ -78,6 +95,8 @@ class HookFixture(unittest.TestCase):
         defaults = CORPUS["defaults"]
         if case.get("cwd", defaults["cwd"]) == "tmp":
             return self.tmpdir
+        if case.get("cwd") == "kitchen":
+            return self.kitchen_checkout()
         return self.repo(case.get("branch", defaults["branch"]), case.get("upstream"), case.get("push_default"), case.get("push_config"))
 
 
@@ -99,15 +118,19 @@ class HookCorpusTests(HookFixture):
 
     def test_corpus(self):
         for case in CORPUS["cases"]:
-            result = self.run_guard(case["guard"], self.payload(case["command"], self.case_cwd(case)))
+            payload = self.payload(case.get("command"), self.case_cwd(case))
+            if "tool_name" in case:  # a tool that is not the shell
+                payload.update(tool_name=case["tool_name"], tool_input=case["tool_input"])
+            result = self.run_guard(case["guard"], payload)
+            what = case.get("command", case.get("tool_name"))
             with self.subTest(case["id"], guard=case["guard"], kind=case["kind"]):
                 if case["expect"] == "deny":
-                    self.assertEqual(result.returncode, 2, f"{case['command']!r} was allowed")
+                    self.assertEqual(result.returncode, 2, f"{what!r} was allowed")
                     self.assertIn(f"Blocked by the kitchen hook {case['guard']}", result.stderr)
                     if "unterminated" not in case["id"]:
-                        self.assertIn(ADVICE[case["guard"]], result.stderr)
+                        self.assertIn(case.get("advice", ADVICE[case["guard"]]), result.stderr)
                 else:
-                    self.assertEqual((result.returncode, result.stderr), (0, ""), f"{case['command']!r} was blocked")
+                    self.assertEqual((result.returncode, result.stderr), (0, ""), f"{what!r} was blocked")
 
 
 class SharedPushConfigTests(HookFixture):
@@ -160,6 +183,97 @@ class SharedPushConfigTests(HookFixture):
         self.assertIn("remote.fork.push", result.stderr)
 
 
+def load_hook(name):
+    """A hook as a module, for the one test that compares its code with lib/: hooks have no .py suffix."""
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(HOOKS / name))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    path = list(sys.path)
+    sys.modules[loader.name] = module
+    try:
+        loader.exec_module(module)
+    finally:
+        sys.path[:] = path
+        del sys.modules[loader.name]
+    return module
+
+
+class PrivatePublishTests(HookFixture):
+    """Where deny-private-publish reads the denylist from, what a denylist it cannot read does, and that it matches as
+    `kitchen check` does. The corpus covers the commands."""
+
+    COMMIT = 'git commit -m "Ship the Acmecorp export"'
+
+    def guard(self, command, cwd, env=None):
+        payload = json.dumps(self.payload(command, cwd))
+        return subprocess.run([str(HOOKS / "deny-private-publish")], input=payload, capture_output=True, text=True,
+                              env=env or self.env(), timeout=30)
+
+    def test_no_denylist_means_no_scan(self):
+        result = self.guard(self.COMMIT, self.kitchen_checkout(), {**self.env(), "KITCHEN_DENYLIST": str(self.home / "none.txt")})
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_without_KITCHEN_DENYLIST_it_reads_the_one_in_home(self):
+        default = self.home / ".config" / "kitchen" / "denylist.txt"
+        default.parent.mkdir(parents=True)
+        default.write_text("Acmecorp\n")
+        result = self.guard(self.COMMIT, self.kitchen_checkout(), {k: v for k, v in self.env().items() if k != "KITCHEN_DENYLIST"})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("holds `Acmecorp`, from the private denylist", result.stderr)
+
+    def test_a_denylist_that_cannot_be_read_blocks_in_the_kitchen_only(self):
+        broken = self.home / "broken.txt"
+        broken.write_bytes(b"Acme\xffcorp\n")
+        cases = {"not UTF-8": broken}
+        if os.geteuid() != 0:  # root reads a file whatever its mode
+            locked = self.home / "locked.txt"
+            locked.write_text("Acmecorp\n")
+            locked.chmod(0)
+            cases["no read permission"] = locked
+        for label, path in cases.items():
+            env = {**self.env(), "KITCHEN_DENYLIST": str(path)}
+            with self.subTest(label):
+                result = self.guard('git commit -m "fine"', self.kitchen_checkout(), env)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("cannot read the private denylist", result.stderr)
+                elsewhere = self.guard('git commit -m "fine"', self.repo("feat/x"), env)
+                self.assertEqual((elsewhere.returncode, elsewhere.stderr), (0, ""))
+
+    def test_a_body_file_it_can_read_is_scanned(self):
+        kitchen = self.kitchen_checkout()
+        (kitchen / "notes").mkdir()
+        (kitchen / "notes" / "pr.md").write_text("Built for Acmecorp.\n")
+        for command in ("gh pr create --title x --body-file notes/pr.md", "git commit -F notes/pr.md",
+                        "cd notes && gh issue comment 3 -F pr.md"):
+            with self.subTest(command):
+                result = self.guard(command, kitchen)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("holds `Acmecorp`", result.stderr)
+
+    def test_this_checkout_is_recognized_as_the_kitchen(self):
+        # the guard knows the kitchen by two of its files; renaming one would turn the scan off without a sound
+        for cwd in (ROOT, ROOT / "hooks"):
+            with self.subTest(cwd=cwd.name):
+                result = self.guard(self.COMMIT, cwd)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("holds `Acmecorp`", result.stderr)
+
+    def test_it_reads_the_denylist_as_kitchen_check_does(self):
+        denylist = self.home / "tricky.txt"
+        denylist.write_bytes("# a comment\n\n   \n  # indented, so a term\nAcmecorp\n  zorblat  \r\nC++ shop\nÑandú\nfoo.bar\n".encode())
+        guard = load_hook("deny-private-publish")
+        sys.path.insert(0, str(ROOT / "lib"))
+        try:
+            from kitchen import common
+        finally:
+            sys.path.pop(0)
+        with mock.patch.dict(os.environ, {"KITCHEN_DENYLIST": str(denylist)}):
+            mine, kitchen_check = guard.private_terms(), common.private_terms()
+        self.assertEqual(len(kitchen_check), 6)
+        self.assertEqual([(p.pattern, p.flags) for p in mine], [(p.pattern, p.flags) for p in kitchen_check])
+        with mock.patch.dict(os.environ, {"KITCHEN_DENYLIST": str(self.home / "none.txt")}):
+            self.assertEqual((guard.private_terms(), common.private_terms()), (None, None))
+
+
 class HookPayloadTests(HookFixture):
     def test_codex_payload_with_an_argv_command_is_checked(self):
         payload = {"session_id": "s", "turn_id": "t", "model": "gpt", "cwd": str(self.home), "hook_event_name": "PreToolUse",
@@ -205,7 +319,8 @@ class HookPayloadTests(HookFixture):
     @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system python3")
     def test_guards_run_on_the_system_python(self):
         """The hooks run on whatever python3 the agent finds; macOS ships 3.9 at /usr/bin/python3."""
-        cases = {"deny-no-verify": "git commit -n -m x", "deny-shared-push": "git push origin dev", "deny-recursive-rm": "rm -rf ~"}
+        cases = {"deny-no-verify": "git commit -n -m x", "deny-shared-push": "git push origin dev", "deny-recursive-rm": "rm -rf ~",
+                 "deny-private-publish": "gh pr create --body-file /tmp/pr-body.md"}
         for guard, command in cases.items():
             with self.subTest(guard):
                 result = self.run_guard(guard, self.payload(command, self.home), python="/usr/bin/python3")

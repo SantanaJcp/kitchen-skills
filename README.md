@@ -56,13 +56,14 @@ Moving from an older install: `install` moves a rules file an older install gene
 
 ## Agent hooks
 
-Three rules that used to be text are now guards, per project: they run only in repos that carry them in `.kitchen/hooks/`, from that repo's `.claude/settings.json` and `.codex/hooks.json` (`kitchen guards <repo>` puts them there). Each one blocks with a message that says what to do instead:
+Rules that used to be text, or lessons from incidents, are now guards, per project: they run only in repos that carry them in `.kitchen/hooks/`, from that repo's `.claude/settings.json` and `.codex/hooks.json` (`kitchen guards <repo>` puts them there). Each one blocks with a message that says what to do instead:
 
 | Guard | Blocks |
 |---|---|
 | `deny-no-verify` | `git commit --no-verify` or `-n`, `--no-verify` on push, merge and other hooked commands, a `core.hooksPath` or `include.*` override on the command line, and, on `git commit`, options that come from a variable, a command output or `xargs` |
 | `deny-shared-push` | `git push` to `dev`, `main`, `master` or a branch listed in `~/.config/kitchen/shared-branches.txt` (names or globs), including a bare `git push` from such a branch, `--all` and `--mirror`. Abbreviated options are read as the full one (`--mir` is `--mirror`). A push whose destination cannot be known statically blocks too: the matching refspec `:`, a remote from a variable or command output, arguments from `xargs`, or a `-c`/`GIT_CONFIG_*` that sets `push.*`, `remote.*`, `branch.*` or `include.*` |
 | `deny-recursive-rm` | recursive `rm` on anything outside `/tmp` or `$TMPDIR`; use `trash <path>` instead |
+| `deny-private-publish` | `gh pr` and `gh issue` `create`, `edit`, `comment` (and `gh pr review`, `merge`) or `git commit` reading its text from a fixed path in `/tmp`, `/var/tmp` or `/private/tmp`, as a body file, stdin or through `cat`: another local user may own that file. Send the text on stdin instead (`--body-file -` or `git commit -F -` with a heredoc). In a kitchen checkout only, also a publish command whose text holds a term from the private denylist (`KITCHEN_DENYLIST`, else `~/.config/kitchen/denylist.txt`), matched as `kitchen check` does |
 
 They read through `VAR=x` prefixes, `command`, `env`, `sudo`, `xargs`, `find -exec`, `sh -c`, `eval`, subshells, `$(...)` and heredocs. The attack corpus in `tests/corpus/hooks/cases.json` lists what each guard blocks, what it allows, and the evasions it cannot see (git aliases, scripts in files, commands piped into a shell), so a gap is written down, not hidden. A guard that cannot read its input, parse the command or even load blocks with exit 2 (the only code both tools treat as a block) rather than passing silently.
 

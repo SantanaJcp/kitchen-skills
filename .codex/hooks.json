@@ -11,6 +11,11 @@
           },
           {
             "type": "command",
+            "command": "sh -c 'r=$(git rev-parse --show-toplevel 2>/dev/null) || { echo \"kitchen: not inside a git repository\" >&2; exit 2; }; s=\"$r/.codex/hooks.json\"; h=\"$r/.kitchen/hooks/deny-private-publish\"; [ -e \"$s\" ] || [ -L \"$s\" ] || exit 0; [ -x \"$h\" ] || { echo \"kitchen: guard missing: $h\" >&2; exit 2; }; \"$h\"; c=$?; [ $c -eq 0 ] || [ $c -eq 2 ] || { echo \"kitchen: guard $h failed with exit $c\" >&2; exit 2; }; exit $c'",
+            "timeout": 30
+          },
+          {
+            "type": "command",
             "command": "sh -c 'r=$(git rev-parse --show-toplevel 2>/dev/null) || { echo \"kitchen: not inside a git repository\" >&2; exit 2; }; s=\"$r/.codex/hooks.json\"; h=\"$r/.kitchen/hooks/deny-recursive-rm\"; [ -e \"$s\" ] || [ -L \"$s\" ] || exit 0; [ -x \"$h\" ] || { echo \"kitchen: guard missing: $h\" >&2; exit 2; }; \"$h\"; c=$?; [ $c -eq 0 ] || [ $c -eq 2 ] || { echo \"kitchen: guard $h failed with exit $c\" >&2; exit 2; }; exit $c'",
             "timeout": 30
           },

@@ -5,6 +5,11 @@
     "branch": "feat/x",
     "shared_branches_file": [
       "release/*"
+    ],
+    "denylist": [
+      "# invented terms for the deny-private-publish cases",
+      "Acmecorp",
+      "zorblat"
     ]
   },
   "cases": [
@@ -1464,6 +1469,556 @@
       "command": "$(echo git) push origin dev",
       "expect": "allow",
       "limit": "a command name produced by a substitution is not known; only a dynamic git subcommand or argument blocks."
+    },
+    {
+      "id": "pr-92-heredoc-then-body-file",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "cat > /tmp/pr-body.md <<'EOF'\nAdds the guard.\nEOF\ngh pr create --title \"Add the guard\" --body-file /tmp/pr-body.md",
+      "expect": "deny",
+      "review": "PR #92: the heredoc write failed on another user's file and gh published that file"
+    },
+    {
+      "id": "pr-create-short-option",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr create -t x -F /tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "pr-create-attached-equals",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr create --title x --body-file=/tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "pr-new-alias",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr new --body-file /tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "pr-edit",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr edit 12 --body-file /tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "pr-comment-attached-short",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr comment 12 -F/tmp/comment.md",
+      "expect": "deny"
+    },
+    {
+      "id": "pr-review",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr review 12 --comment -F /tmp/review.md",
+      "expect": "deny"
+    },
+    {
+      "id": "pr-merge-body",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr merge 12 --squash --body-file /tmp/merge.md",
+      "expect": "deny"
+    },
+    {
+      "id": "issue-create-var-tmp",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh issue create --title x --body-file /var/tmp/issue.md",
+      "expect": "deny"
+    },
+    {
+      "id": "issue-edit-private-tmp",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh issue edit 3 --body-file /private/tmp/issue.md",
+      "expect": "deny"
+    },
+    {
+      "id": "issue-comment-deep-path",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh issue comment 3 --body-file /tmp/kitchen/a/b/comment.md",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-file-short",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit -F /tmp/commit-msg-4711",
+      "expect": "deny",
+      "review": "2026-10-30: git commit -F on a fixed /tmp name failed the same way"
+    },
+    {
+      "id": "commit-file-long",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit --file /tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-file-long-equals",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit --file=/tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-file-abbreviated",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit --fil /tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-file-attached",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit -F/tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-cluster",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit -aF /tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-cluster-attached",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit -aF/tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "chained-after-add",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "git add -A && git commit -F /tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "inside-sh-c",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "sh -c 'gh pr create --body-file /tmp/pr-body.md'",
+      "expect": "deny"
+    },
+    {
+      "id": "inside-bash-lc",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "bash -lc 'git commit -F /tmp/commit-msg'",
+      "expect": "deny"
+    },
+    {
+      "id": "env-wrapper",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "env GH_REPO=o/r gh pr create --body-file /tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "command-wrapper",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "command gh pr create --body-file /tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "repo-flag-before-subcommand",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh pr -R o/r create --body-file /tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "double-slash",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh pr create --body-file //tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "dot-dot-into-tmp",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh pr create --body-file /var/../tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "relative-after-cd",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "cd /tmp && gh pr create --body-file pr-body.md",
+      "expect": "allow",
+      "limit": "a relative path is not judged, even after a `cd` into /tmp: it names a project file wherever the project is checked out."
+    },
+    {
+      "id": "git-C-into-tmp",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "git -C /tmp commit -F commit-msg",
+      "expect": "allow",
+      "limit": "a relative path is not judged, even under `git -C /tmp`."
+    },
+    {
+      "id": "variable-set-in-the-call",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "B=/tmp/pr-body.md; gh pr create --body-file \"$B\"",
+      "expect": "deny"
+    },
+    {
+      "id": "stdin-redirected-from-tmp",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh pr create --title x --body-file - < /tmp/pr-body.md",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-stdin-redirected-from-tmp",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "git commit -F - < /tmp/commit-msg",
+      "expect": "deny"
+    },
+    {
+      "id": "cat-piped-into-stdin",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "cat /tmp/pr-body.md | gh pr create --title x --body-file -",
+      "expect": "deny"
+    },
+    {
+      "id": "cat-in-command-output",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "gh pr create --title x --body \"$(cat /tmp/pr-body.md)\"",
+      "expect": "deny"
+    },
+    {
+      "id": "commit-message-from-cat",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "git commit -m \"$(cat /tmp/commit-msg)\"",
+      "expect": "deny"
+    },
+    {
+      "id": "xargs-keeps-the-visible-path",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "echo 12 | xargs gh pr comment --body-file /tmp/comment.md",
+      "expect": "deny"
+    },
+    {
+      "id": "stdin-heredoc",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "gh pr create --title x --body-file - <<'EOF'\nThe incident wrote /tmp/pr-body.md.\nEOF",
+      "expect": "allow"
+    },
+    {
+      "id": "commit-stdin-heredoc",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -F - <<'EOF'\nFix the guard\n\nIt reads /tmp paths.\nEOF",
+      "expect": "allow"
+    },
+    {
+      "id": "mktemp-dir-variable",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "D=$(mktemp -d)\ncat > \"$D/body.md\" <<'EOF'\nx\nEOF\ngh pr create --title x --body-file \"$D/body.md\"",
+      "expect": "allow"
+    },
+    {
+      "id": "mktemp-file-variable",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "F=$(mktemp); git commit -F \"$F\"",
+      "expect": "allow"
+    },
+    {
+      "id": "command-output-path",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "gh pr create --title x --body-file \"$(mktemp)\"",
+      "expect": "allow"
+    },
+    {
+      "id": "path-in-the-repo",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "gh pr create --title x --body-file docs/pr.md",
+      "expect": "allow"
+    },
+    {
+      "id": "path-in-git-dir",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -F .git/COMMIT_EDITMSG",
+      "expect": "allow"
+    },
+    {
+      "id": "message-mentions-tmp",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -m \"Fix /tmp handling\"",
+      "expect": "allow"
+    },
+    {
+      "id": "message-value-is-F",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -mF /tmp/notes.txt",
+      "expect": "allow"
+    },
+    {
+      "id": "not-a-publish-command",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "gh pr view 12 > /tmp/view.txt && gh run view 5 --log > /tmp/run.log",
+      "expect": "allow"
+    },
+    {
+      "id": "grep-fixed-strings",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git grep -F /tmp/pr-body.md",
+      "expect": "allow"
+    },
+    {
+      "id": "cat-of-a-log-then-plain-commit",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "cat /tmp/build.log && git commit -m fix",
+      "expect": "allow"
+    },
+    {
+      "id": "variable-from-an-earlier-call",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "gh pr create --title x --body-file \"$PR_BODY\"",
+      "expect": "allow",
+      "limit": "a path in a variable set by an earlier shell call is not known to the guard."
+    },
+    {
+      "id": "copied-out-of-tmp-first",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "cp /tmp/pr-body.md pr-body.md && gh pr create --title x --body-file pr-body.md",
+      "expect": "allow",
+      "limit": "text copied out of /tmp before it is published is not traced."
+    },
+    {
+      "id": "read-with-dollar-redirect",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "gh pr create --title x --body \"$(< /tmp/pr-body.md)\"",
+      "expect": "allow",
+      "limit": "`$(< file)` runs no command, so the parser records no read."
+    },
+    {
+      "id": "read-with-another-tool",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "head -c 60000 /tmp/pr-body.md | gh pr create --title x --body-file -",
+      "expect": "allow",
+      "limit": "only `cat` is read as a reader of the published text."
+    },
+    {
+      "id": "gh-api",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "gh api repos/o/r/pulls -f title=x -F body=@/tmp/pr-body.md",
+      "expect": "allow",
+      "limit": "`gh api` is not read: it publishes through raw API fields."
+    },
+    {
+      "id": "gh-release-notes",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "gh release create v1 --notes-file /tmp/notes.md",
+      "expect": "allow",
+      "limit": "only pr and issue texts and commit messages are read; release notes are not."
+    },
+    {
+      "id": "gh-alias",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "gh prc --body-file /tmp/pr-body.md",
+      "expect": "allow",
+      "limit": "gh aliases are not read: an alias `prc = pr create` hides the command."
+    },
+    {
+      "id": "mcp-tool",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "tool_name": "mcp__github__create_pull_request",
+      "tool_input": {
+        "owner": "o",
+        "repo": "r",
+        "title": "x",
+        "body": "Built for Acmecorp"
+      },
+      "expect": "allow",
+      "cwd": "kitchen",
+      "limit": "a tool that is not the shell, such as an MCP tool, never reaches a Bash guard."
+    },
+    {
+      "id": "term-in-commit-message",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit -m \"Ship the Acmecorp export\"",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it",
+      "review": "PR #97: a PR body in the public repo named a client project"
+    },
+    {
+      "id": "term-in-pr-title",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr create --title \"Acmecorp fix\" --body-file - <<'EOF'\nok\nEOF",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-in-pr-heredoc",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh pr create --title x --body-file - <<'EOF'\nBuilt for Acmecorp.\nEOF",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-in-commit-heredoc",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "git commit -F - <<'EOF'\nFix\n\nFor the Zorblat team.\nEOF",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-in-issue-comment",
+      "guard": "deny-private-publish",
+      "kind": "positive",
+      "command": "gh issue comment 3 --body \"see zorblat\"",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-split-by-quotes",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "git commit -m \"Acme\"\"corp\"",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-in-ansi-c-escape",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "git commit -m $'for Acme\\x63orp'",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-inside-sh-c",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "sh -c 'git commit -m \"for Acmecorp\"'",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-lowercase-term-in-capitals",
+      "guard": "deny-private-publish",
+      "kind": "bypass",
+      "command": "git commit -m \"ZORBLAT support\"",
+      "expect": "deny",
+      "cwd": "kitchen",
+      "advice": "Remove it"
+    },
+    {
+      "id": "term-outside-the-kitchen",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -m \"Ship the Acmecorp export\"",
+      "expect": "allow"
+    },
+    {
+      "id": "term-pr-outside-the-kitchen",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "gh pr create --title \"Acmecorp fix\" --body-file - <<'EOF'\nBuilt for Acmecorp.\nEOF",
+      "expect": "allow"
+    },
+    {
+      "id": "term-inside-a-longer-word",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -m \"the Acmecorpus\"",
+      "expect": "allow",
+      "cwd": "kitchen"
+    },
+    {
+      "id": "capitalized-term-in-lowercase",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -m \"an acmecorp-like name\"",
+      "expect": "allow",
+      "cwd": "kitchen"
+    },
+    {
+      "id": "term-in-a-command-that-publishes-nothing",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "grep -rn Acmecorp . ; echo zorblat",
+      "expect": "allow",
+      "cwd": "kitchen"
+    },
+    {
+      "id": "clean-commit-in-the-kitchen",
+      "guard": "deny-private-publish",
+      "kind": "negative",
+      "command": "git commit -m \"Add the guard\"",
+      "expect": "allow",
+      "cwd": "kitchen"
+    },
+    {
+      "id": "term-built-by-a-command",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "git commit -m \"$(printf 'Acme%s' corp)\"",
+      "expect": "allow",
+      "cwd": "kitchen",
+      "limit": "text a command prints while the call runs is not known to the guard."
+    },
+    {
+      "id": "term-in-a-file-named-by-a-variable",
+      "guard": "deny-private-publish",
+      "kind": "known-limit",
+      "command": "gh pr create --title x --body-file \"$PR_BODY\"",
+      "expect": "allow",
+      "cwd": "kitchen",
+      "limit": "a body file named by a variable set elsewhere cannot be read before the call runs."
     }
   ]
 }

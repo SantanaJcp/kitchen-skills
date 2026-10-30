@@ -24,6 +24,7 @@ MAX_DEPTH = 8
 OPS = sorted([";;&", ";&", "&>>", "<<-", "<<<", "&&", "||", ";;", "|&", ">>", "<<", ">&", "<&", "&>", ">|", "<>",
               ";", "&", "|", "(", ")", "<", ">"], key=len, reverse=True)
 REDIRECTS = {">>", "<<", "<<-", "<<<", ">&", "<&", "&>", "&>>", ">|", "<>", "<", ">"}
+INLINE_TEXT = {"<<", "<<-", "<<<"}  # the word after these is a heredoc delimiter or a here-string, not a file
 KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "fi", "done", "esac"}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish"}
 NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -332,6 +333,7 @@ class Cmd:
     env: dict = field(default_factory=dict)  # VAR=value prefixes: name -> Arg
     more_args: bool = False  # xargs / find -exec append operands the hook cannot see
     clean: bool = False      # runs without the inherited environment (env -i, sudo)
+    redirects: list = field(default_factory=list)  # [(operator, Arg)]: the files its redirections name, as in `< body.md`
 
     @property
     def name(self) -> str | None:
@@ -449,29 +451,32 @@ class Extractor:
         stack: list[tuple[str | None, dict]] = []
         variables = dict(variables)
         words: list[Word] = []
-        skip_next = False
+        redirects: list = []
+        pending = None  # the redirection operator whose target is the next word
         for token in tokens + [Op(";")]:
             if isinstance(token, Word):
-                if skip_next:
-                    skip_next = False
+                if pending is not None:
                     for kind, text in token.segs:
                         if kind == "sub":
                             self.tokens(text, cwd, variables, depth + 1)
+                    if pending not in INLINE_TEXT:
+                        redirects.append((pending, expand(token, variables)[0]))
+                    pending = None
                     continue
                 words.append(token)
                 continue
-            skip_next = token.text in REDIRECTS
-            if token.text in REDIRECTS:
+            pending = token.text if token.text in REDIRECTS else None
+            if pending is not None:
                 continue
             if words:
-                cwd = self.simple(words, cwd, variables, depth)
-                words = []
+                cwd = self.simple(words, cwd, variables, depth, redirects)
+            words, redirects = [], []
             if token.text == "(":
                 stack.append((cwd, dict(variables)))
             elif token.text == ")" and stack:
                 cwd, variables = stack.pop()
 
-    def simple(self, words: list, cwd: str | None, variables: dict, depth: int) -> str | None:
+    def simple(self, words: list, cwd: str | None, variables: dict, depth: int, redirects: list) -> str | None:
         """Record one simple command; return the cwd for the commands after it."""
         args, env = [], {}
         for word in words:
@@ -496,7 +501,8 @@ class Extractor:
                 variables[name] = value if value is TEMP else (None if value.dynamic else value.value)
             return cwd
         prefix = {k: (Arg(temp_path()) if v is TEMP else v) for k, v in env.items()}
-        self.resolve(Cmd(args, cwd, {**exported_env(variables), **prefix}, clean=bool(variables.get(CLEAN))), variables, depth)
+        self.resolve(Cmd(args, cwd, {**exported_env(variables), **prefix}, clean=bool(variables.get(CLEAN)),
+                         redirects=list(redirects)), variables, depth)
         name = args[0].value if not args[0].dynamic else None
         if name in ("export", "local", "declare", "typeset", "readonly"):
             exports = name == "export" or any(a.value.startswith("-") and "x" in a.value for a in args[1:])
@@ -535,7 +541,7 @@ class Extractor:
                 clean = changes.get("clean", False)
                 base = {} if clean else cmd.env
                 self.resolve(Cmd(new_argv, changes.get("cwd", cmd.cwd), {**base, **changes.get("env", {})},
-                                 changes.get("more_args", cmd.more_args), cmd.clean or clean), variables, depth + 1)
+                                 changes.get("more_args", cmd.more_args), cmd.clean or clean, cmd.redirects), variables, depth + 1)
 
         def skip_options(args, with_value=(), stop_on=()):
             i = 0
@@ -785,8 +791,9 @@ def payload_command(raw: str) -> tuple[str | None, str | None]:
     return command, cwd if isinstance(cwd, str) and cwd else None
 
 
-def main(guard: str, check) -> None:
-    """Run one guard over the payload on stdin: exit 0 to allow, exit 2 with the reason to block.
+def main(guard: str, check, raw: bool = False) -> None:
+    """Run one guard over the payload on stdin: exit 0 to allow, exit 2 with the reason to block. With raw, the check
+    also gets the command string as the agent wrote it, heredoc bodies included.
 
     A guard that cannot read its input or parse the command blocks: Claude Code and Codex treat only exit 2
     as a block, so any other failure (a traceback exits 1) would let the command run."""
@@ -799,7 +806,8 @@ def main(guard: str, check) -> None:
     if command is None:
         sys.exit(0)
     try:
-        reasons = check(commands(command, cwd))
+        parsed = commands(command, cwd)
+        reasons = check(parsed, command) if raw else check(parsed)
     except ParseError as error:
         block(guard, f"cannot parse this command to check it ({error}). Fix the quoting, or split it into simpler commands.")
         return

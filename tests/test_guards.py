@@ -10,11 +10,11 @@ from tests.test_hooks import Session, numbered
 from tests.test_kitchen import KITCHEN, KitchenFixture
 
 ROOT = KITCHEN.parent.parent
-GUARDS = ["deny-no-verify", "deny-recursive-rm", "deny-shared-push"]
+GUARDS = ["deny-no-verify", "deny-private-publish", "deny-recursive-rm", "deny-shared-push"]
 AFTER_COMPACT = "chef-mode-after-compact"
 PUSH = {"tool_name": "Bash", "hook_event_name": "PreToolUse", "tool_input": {"command": "git push origin HEAD:main"}}
 PROBES = {"deny-shared-push": "git push origin HEAD:main", "deny-no-verify": "git commit --no-verify -m x",
-          "deny-recursive-rm": "rm -rf /kitchen-probe"}
+          "deny-recursive-rm": "rm -rf /kitchen-probe", "deny-private-publish": "gh pr create --body-file /tmp/kitchen-probe.md"}
 
 
 class GuardsFixture(KitchenFixture):
@@ -60,7 +60,7 @@ class GuardsTests(GuardsFixture):
         codex = [self.run_handler(h, subdir) for h in self.handlers(self.codex)]  # Codex: no project variable, a subdirectory cwd
 
         for results in (claude, codex):
-            self.assertEqual(sorted(r.returncode for r in results), [0, 0, 2], [r.stderr for r in results])
+            self.assertEqual(sorted(r.returncode for r in results), [0] * (len(GUARDS) - 1) + [2], [r.stderr for r in results])
             self.assertTrue(any("Blocked by the kitchen hook" in r.stderr for r in results))
 
     def test_each_guard_blocks_its_own_probe_through_its_handler_in_both_tools(self):
@@ -112,7 +112,7 @@ class GuardsTests(GuardsFixture):
         results = [self.run_handler(h, self.project) for h in self.handlers(self.codex)]
 
         self.assertIn("kitchen: guard missing", "".join(r.stderr for r in results))
-        self.assertEqual(sorted(r.returncode for r in results), [0, 0, 2])
+        self.assertEqual(sorted(r.returncode for r in results), [0] * (len(GUARDS) - 1) + [2])
 
     def test_a_handler_lets_everything_through_on_a_branch_without_the_settings(self):
         self.kitchen("guards", str(self.project))

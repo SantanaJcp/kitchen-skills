@@ -79,7 +79,7 @@ A two-way door is cheap to revert: walk through it. A one-way door is not: schem
 - **When:** before any action you could not undo with one command.
 - **Includes (pstack):**
   - [*Exhaust the Design Space*](principles/exhaust-the-design-space.md): a one-way door, or a decision with no precedent in the codebase.
-- **Enforced by:** the guards each project carries, `deny-shared-push`, `deny-no-verify`, `deny-recursive-rm` (move to the Trash instead); the rung rules of `chef-mode`; the init playbook prints one-way doors such as rulesets as decisions, never runs them, and the owner merges its pull request; the gardener only opens a PR, within a line budget and outside protected paths; `kitchen check` blocks private data in this public repo.
+- **Enforced by:** the guards each project carries, `deny-shared-push`, `deny-no-verify`, `deny-recursive-rm` (move to the Trash instead), `deny-private-publish` (no text from a fixed temp file, no denylisted term in what the kitchen publishes); the rung rules of `chef-mode`; the init playbook prints one-way doors such as rulesets as decisions, never runs them, and the owner merges its pull request; the gardener only opens a PR, within a line budget and outside protected paths; `kitchen check` blocks private data in this public repo.
 
 ## 8. Say how you know (`evidence`)
 
@@ -111,7 +111,7 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 - **Includes (pstack):**
   - [*Separate Before Serializing Shared State*](principles/separate-before-serializing-shared-state.md): concurrent actors might write the same file, branch, key or state.
   - [*Make Operations Idempotent*](principles/make-operations-idempotent.md): commands, installers and loops that run amid crashes and retries.
-- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector); the automation project lock; `run-job` starts a job in its own unit, never as a child of the agent that asked; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`.
+- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector); the automation project lock; `run-job` starts a job in its own unit, never as a child of the agent that asked; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`; `deny-private-publish` blocks publishing text from a fixed path in a temp directory every local user shares.
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
 
