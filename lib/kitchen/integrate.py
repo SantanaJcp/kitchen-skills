@@ -11,6 +11,9 @@ Check commands and the base live outside the repo, in ~/.config/kitchen/integrat
   base = "origin/main"
   checks = ["bin/kitchen check"]
 There is no default base: without `base` there or --base, integrate fails.
+Checks that compare against `origin/<base>` see the base the batch merges onto: when the base is the remote-tracking
+ref origin/<branch>, the clone gets refs/remotes/origin/<branch> at the base SHA, copied from the source, never fetched.
+A base given as a SHA or a local branch creates no origin/ ref.
 Nothing it runs inherits GIT_* (or KITCHEN_REPO): a caller inside a git hook must not leak into the clone.
 """
 from __future__ import annotations
@@ -92,6 +95,12 @@ def resolve(repo: Path, ref: str) -> str:
     return result.stdout.strip()
 
 
+def remote_base_ref(repo: Path, base: str) -> str | None:
+    """refs/remotes/origin/<branch> when the base names that remote-tracking ref; None for a SHA or a local branch."""
+    full = git(repo, "rev-parse", "--symbolic-full-name", base).stdout.strip()
+    return full if full.startswith("refs/remotes/origin/") else None
+
+
 def resolve_pr(repo: Path, number: str, clone: Path) -> str:
     """Fetch refs/pull/<n>/head from the repo's origin into the disposable clone only."""
     url = git(repo, "remote", "get-url", "origin")
@@ -149,6 +158,11 @@ def integrate(repo: Path, base: str, refs: list[str], project: str, checks_overr
             checkout = git(clone, "checkout", "-q", "--detach", record["base"]["sha"])
             if checkout.returncode != 0:
                 raise IntegrateError(f"cannot check out base: {checkout.stderr.strip()}")
+            remote_ref = remote_base_ref(repo, base)
+            if remote_ref:
+                pinned = git(clone, "update-ref", remote_ref, record["base"]["sha"])
+                if pinned.returncode != 0:
+                    raise IntegrateError(f"cannot create {remote_ref} in the clone: {pinned.stderr.strip()}")
             merge_env = {**env, "GIT_AUTHOR_NAME": "kitchen integrate", "GIT_AUTHOR_EMAIL": "integrate@kitchen.invalid",
                          "GIT_COMMITTER_NAME": "kitchen integrate", "GIT_COMMITTER_EMAIL": "integrate@kitchen.invalid",
                          "GIT_AUTHOR_DATE": FIXED_DATE, "GIT_COMMITTER_DATE": FIXED_DATE}
