@@ -48,13 +48,18 @@ def target_problem(arg, cwd, roots):
     return f"`rm -r {arg.value}` is outside the temp dir. "
 
 
+def abbreviates(option, full):
+    """getopt accepts any unambiguous prefix of a long option: --rec is --recursive."""
+    return len(option) > 2 and full.startswith(option)
+
+
 def rm_targets(args):
     recursive, targets, options_done = False, [], False
     for arg in args:
         if not options_done and not arg.dynamic and arg.value == "--":
             options_done = True
         elif not options_done and not arg.dynamic and arg.value.startswith("--"):
-            recursive = recursive or arg.value == "--recursive"
+            recursive = recursive or abbreviates(arg.value, "--recursive")
         elif not options_done and not arg.dynamic and arg.value.startswith("-") and len(arg.value) > 1:
             recursive = recursive or "r" in arg.value or "R" in arg.value
         else:

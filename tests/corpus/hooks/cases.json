@@ -824,6 +824,34 @@
       "expect": "deny"
     },
     {
+      "id": "abbreviated-long-option",
+      "guard": "deny-recursive-rm",
+      "kind": "bypass",
+      "command": "rm --rec src",
+      "expect": "deny"
+    },
+    {
+      "id": "abbreviated-long-option-one-letter",
+      "guard": "deny-recursive-rm",
+      "kind": "bypass",
+      "command": "rm --r src",
+      "expect": "deny"
+    },
+    {
+      "id": "abbreviated-long-option-two-letters",
+      "guard": "deny-recursive-rm",
+      "kind": "bypass",
+      "command": "rm --re src",
+      "expect": "deny"
+    },
+    {
+      "id": "abbreviated-long-option-after-path",
+      "guard": "deny-recursive-rm",
+      "kind": "bypass",
+      "command": "rm src --recu",
+      "expect": "deny"
+    },
+    {
       "id": "one-target-outside",
       "guard": "deny-recursive-rm",
       "kind": "positive",
@@ -1103,6 +1131,20 @@
       "guard": "deny-recursive-rm",
       "kind": "negative",
       "command": "command -v rm",
+      "expect": "allow"
+    },
+    {
+      "id": "long-option-dir",
+      "guard": "deny-recursive-rm",
+      "kind": "negative",
+      "command": "rm --dir emptydir",
+      "expect": "allow"
+    },
+    {
+      "id": "long-option-verbose",
+      "guard": "deny-recursive-rm",
+      "kind": "negative",
+      "command": "rm --verbose file.txt",
       "expect": "allow"
     },
     {
