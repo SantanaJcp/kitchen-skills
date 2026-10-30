@@ -27,6 +27,7 @@ set -euo pipefail
 AUTOMATION="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_ROOT="${KITCHEN_STATE:-$HOME/.local/state/kitchen}"
 POLL="${RUN_JOB_POLL_SECONDS:-5}"
+TRANSITION="${RUN_JOB_TRANSITION_SECONDS:-60}"  # macOS: longest a run may sit in a launchd state other than running
 refuse() { echo "run-job: $1" >&2; exit "${2:-69}"; }
 
 JOB="${1:-}"
@@ -91,7 +92,11 @@ case "$(uname)" in
       refuse "$UNIT is not installed: automation/bin/install-schedule --triggered $INSTALL"
     printed="$(launchctl print "$TARGET" 2>/dev/null)" || refuse "$UNIT is not loaded: launchctl bootstrap gui/$(id -u) $HOME/Library/LaunchAgents/$UNIT.plist"
     field() { sed -n "s/^[[:space:]]*$1 = //p" <<< "$printed" | head -1; }
-    [ "$(field state)" != running ] || refuse "$UNIT is already running: a run is in progress; its result goes to its record when it ends"
+    # launchd reports a run in progress as running or as a transition such as xpcproxy (measured on macOS, 2026-10-30:
+    # the first print after kickstart said xpcproxy); only "not running" means no run is in progress
+    state="$(field state)"
+    [ -n "$state" ] || refuse "cannot read the state of $UNIT from launchctl print"
+    [ "$state" = "not running" ] || refuse "$UNIT is already $state: a run is in progress; its result goes to its record when it ends"
     runs="$(field runs)"; runs="${runs:-0}"
     echo "run-job: starting $UNIT at $STARTED_AT"
     pid="$(launchctl kickstart -p "$TARGET")" || refuse "launchctl kickstart $TARGET failed"
@@ -103,7 +108,15 @@ case "$(uname)" in
       if [ "${now_runs:-0}" -gt $((runs + 1)) ]; then  # launchd keeps only the last run's exit: it would not be this run's
         refuse "$UNIT ran again before run-job read this run's exit ($((now_runs - runs)) runs since the start); this run's exit is not known" 70
       elif [ "${now_runs:-0}" -gt "$runs" ]; then
-        [ "$(field state)" = running ] || break
+        state="$(field state)"
+        case "$state" in
+          "not running") break ;;
+          running) since="" ;;
+          "") refuse "cannot read the state of $UNIT from launchctl print while it runs; its result is not known" 70 ;;
+          *) since="${since:-$SECONDS}"  # a transition such as xpcproxy is short; one that lasts is reported, never waited out
+             [ $((SECONDS - since)) -lt "$TRANSITION" ] ||
+               refuse "$UNIT stayed in launchd state '$state' for ${TRANSITION}s; its result is not known" 70 ;;
+        esac
       elif [ $((SECONDS - kicked)) -ge 60 ]; then
         refuse "$UNIT did not start: launchd counts no new run 60s after kickstart"
       fi
