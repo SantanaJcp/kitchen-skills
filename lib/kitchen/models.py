@@ -15,10 +15,8 @@ service tier.
 
 No role has a default model. A role nobody set runs on the session model, and `get` says so on stderr with the command
 that sets it: the one exception to `no-fallbacks` (owner, 2026-10-29), so the reply of a review run that way says it was
-not a cross-model review. A reviewer running the author's own family is still refused when it is set, and so is a pi
-model whose family kitchen cannot tell. Whether the model exists is learned when it is used: the tool's error is shown
-as it is. pi alone has no such error (it runs the nearest model it knows), so its call is refused unless
-`pi --list-models` lists the id exactly.
+not a cross-model review. A reviewer running the author's own family is still refused when it is set. Whether the model
+exists is learned when it is used: the tool's error is shown as it is.
 Principles: `cross-review` (another model reviews), `no-fallbacks` (no stand-in model; the session-model fallback is
 said aloud), `owner-attention` (set once).
 """
@@ -26,25 +24,21 @@ from __future__ import annotations
 
 import json
 import shlex
-import subprocess
 import tomllib
 from pathlib import Path
 
 from kitchen import common
 
 AUTHORS = ("claude", "codex")  # who wrote the work
-PROVIDERS = ("claude", "codex", "pi")  # what runs a role
+PROVIDERS = ("claude", "codex")  # what runs a role
 ROLES = ("reviewer", "worker")
 PER_AUTHOR = ("reviewer",)  # set per author family; the others hold one entry for any author
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TIERS = ("standard", "fast")
 FIELDS = ("provider", "model", "effort", "tier")
 JOBS = {"routine": -1, "judgment": 0, "hardest": 1}  # effort steps from the worker's configured one: judgment keeps it (owner, 2026-10-29)
-T3_DRIVERS = {"claude": "claudeAgent", "codex": "codex", "pi": "pi"}  # T3's driverKind for each provider
+T3_DRIVERS = {"claude": "claudeAgent", "codex": "codex"}  # T3's driverKind for each provider
 WORKER_TOOLS = "Bash,Read,Edit,Write,Grep,Glob"
-# pi runs many vendors' models; the family is the prefix of its model id (`pi --list-models`)
-PI_FAMILIES = {"anthropic": "claude", "claude-bridge": "claude", "openai": "codex", "openai-codex": "codex"}
-PI_READ_ONLY = "read,grep,find,ls"
 
 
 class ModelsError(Exception):
@@ -95,16 +89,6 @@ def label(role: str, author: str | None) -> str:
     return f"{role} for {author} work" if author else role
 
 
-def family(entry: dict) -> str:
-    if entry["provider"] != "pi":
-        return entry["provider"]
-    prefix = entry["model"].split("/", 1)[0] if "/" in entry["model"] else None
-    if prefix not in PI_FAMILIES:
-        raise ModelsError(f"a pi model is <provider>/<id> with a provider kitchen knows the family of ({', '.join(PI_FAMILIES)}), "
-                          f"so it can tell whose model reviews; not {entry['model']!r}")
-    return PI_FAMILIES[prefix]
-
-
 def validate(role: str, author: str | None, entry: dict) -> dict:
     if not isinstance(entry, dict):
         raise ModelsError(f"{label(role, author)}: each entry is a table of {', '.join(FIELDS)}; run `{set_command(role, author)}`")
@@ -112,19 +96,18 @@ def validate(role: str, author: str | None, entry: dict) -> dict:
     if missing:
         raise ModelsError(f"{role}{' for ' + author if author else ''}: missing {', '.join(missing)}; run `{set_command(role, author)}`")
     if entry["provider"] not in PROVIDERS:
-        raise ModelsError(f"provider must be one of {', '.join(PROVIDERS)}, not {entry['provider']!r}")
+        raise ModelsError(f"{path()}: {label(role, author)}: provider must be one of {', '.join(PROVIDERS)}, not {entry['provider']!r}; "
+                          f"remove that entry from the file by hand")
     if entry["effort"] not in EFFORTS:
         raise ModelsError(f"effort must be one of {', '.join(EFFORTS)}, not {entry['effort']!r}")
     if entry["tier"] not in TIERS:
         raise ModelsError(f"tier must be one of {', '.join(TIERS)}, not {entry['tier']!r}")
-    if entry["provider"] == "pi" and entry["tier"] == "fast":
-        raise ModelsError("pi has no service tier, in its CLI or in T3; set --tier standard")
     if role not in PER_AUTHOR:
         if entry["tier"] == "fast":
             raise ModelsError(f"a {role} runs fast only when `kitchen models get {role} --urgent` asks for it; set --tier standard")
         accounts = check_accounts(entry.get("accounts", []), role)
         return {f: entry[f] for f in FIELDS} | ({"accounts": accounts} if accounts else {})
-    if family(entry) == author:
+    if entry["provider"] == author:
         raise ModelsError(f"a {role} for {author}'s work must run another family's model: the author's model does not check its own work")
     return {f: entry[f] for f in FIELDS}
 
@@ -232,32 +215,16 @@ def here(cwd: Path) -> str | None:
     return Path(toplevel).name if toplevel else None
 
 
-def pi_lists(model: str) -> None:
-    """pi runs the nearest model it knows for an id it does not list, so a pi reviewer runs only on an id pi lists exactly."""
-    try:
-        listed = subprocess.run(["pi", "--list-models"], capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise ModelsError(f"cannot list pi's models ({error}), so the pi reviewer cannot run") from error
-    rows = {tuple(line.split()[:2]) for line in listed.stdout.splitlines()}
-    if listed.returncode != 0 or tuple(model.split("/", 1)) not in rows:
-        raise ModelsError(f"`pi --list-models` does not list {model}, and pi would run the nearest model it knows instead; "
-                          f"set an id it lists exactly")
-
-
 def command(entry: dict, writes: bool = False) -> list[str]:
-    """The non-interactive CLI call for a role outside T3: `codex exec`, `claude -p` or `pi -p`. The prompt goes last.
+    """The non-interactive CLI call for a role outside T3: `codex exec` or `claude -p`. The prompt goes last.
     A reviewer reads only; a worker (`writes`) edits and runs commands without asking: codex in its workspace-write
-    sandbox, claude with edits accepted and the tools it needs allowed, pi with its default tools."""
+    sandbox, claude with edits accepted and the tools it needs allowed."""
     if entry["provider"] == "codex":
         argv = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write" if writes else "read-only"]
         if entry["model"] != "default":
             argv += ["-m", entry["model"]]
         return argv + ["-c", f'model_reasoning_effort="{entry["effort"]}"',
                        "-c", f'service_tier="{"priority" if entry["tier"] == "fast" else "default"}"']
-    if entry["provider"] == "pi":  # pi has no sandbox: read-only is its read tools alone, no shell and no MCP
-        pi_lists(entry["model"])
-        tools = [] if writes else ["--no-mcp", "--tools", PI_READ_ONLY]
-        return ["pi", "-p", "--no-session", *tools, "--model", entry["model"], "--thinking", entry["effort"]]
     if entry["tier"] == "fast":
         raise ModelsError("the claude CLI has no flag for the fast tier; set --tier standard, or run the role where the tier can be set (T3's delegate_task)")
     argv = ["claude", "-p"] + (["--allowedTools", WORKER_TOOLS] if writes else [])  # variadic: never last, or it takes the prompt
@@ -281,8 +248,6 @@ def worker(job: str, urgent: bool, index: int, project: str | None) -> dict | No
     entry = entries[0]
     lists = project_accounts(data)
     step = min(max(EFFORTS.index(entry["effort"]) + JOBS[job], 0), len(EFFORTS) - 1)
-    if urgent and entry["provider"] == "pi":
-        raise ModelsError("pi has no service tier, in its CLI or in T3, so the worker cannot run fast: drop --urgent or set another provider")
     out = {f: entry[f] for f in FIELDS} | {"effort": EFFORTS[step], "tier": "fast" if urgent else "standard"}
     accounts = lists[project] if project in lists else entry.get("accounts", [])
     out |= {"project": project, "accounts_from": "project" if project in lists else "default"}
@@ -303,8 +268,7 @@ def t3(entry: dict) -> dict:
         target["model"] = entry["model"]
     fast = entry["tier"] == "fast"
     target["options"] = {"claude": {"effort": entry["effort"], "fastMode": fast},
-                         "codex": {"reasoningEffort": entry["effort"], "serviceTier": "priority" if fast else "default"},
-                         "pi": {"thinking": entry["effort"]}}[provider]
+                         "codex": {"reasoningEffort": entry["effort"], "serviceTier": "priority" if fast else "default"}}[provider]
     return target
 
 
