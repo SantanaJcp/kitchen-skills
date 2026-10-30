@@ -2345,9 +2345,12 @@ case "$1" in
   print)
     [ -f "$s/loaded" ] || exit 113
     # like launchd, the first print after a kickstart shows the spawn's transition, xpcproxy (measured on macOS)
-    state="not running"; [ ! -f "$s/running" ] || state=running
+    state="not running"; [ ! -f "$s/running" ] || state="${FAKE_RUNNING_STATE:-running}"
     if [ -f "$s/spawning" ]; then state=xpcproxy; rm -f "$s/spawning"; fi
-    printf '%s = {\n\tstate = %s\n\truns = %s\n\tlast exit code = %s\n}\n' "$2" "$state" "$(cat "$s/runs" 2>/dev/null || echo 0)" \
+    [ ! -f "$s/state" ] || state="$(cat "$s/state")"
+    printf '%s = {\n' "$2"
+    [ -n "${FAKE_OMIT_STATE:-}" ] && [ -f "$s/running" ] || printf '\tstate = %s\n' "$state"
+    printf '\truns = %s\n\tlast exit code = %s\n}\n' "$(cat "$s/runs" 2>/dev/null || echo 0)" \
       "$(cat "$s/exit" 2>/dev/null || echo '(never exited)')" ;;
   kickstart)
     plist="$HOME/Library/LaunchAgents/${3##*/}.plist"
@@ -2558,6 +2561,29 @@ class TriggeredJobTests(AutomationFixture):
                 self.assertIn("already", result.stderr)
                 self.assertNotIn("start", self.calls_log())
                 self.assertFalse((self.state / "audit" / "shop.jsonl").exists())
+
+    def test_run_job_refuses_a_launchd_job_caught_in_its_spawn(self):
+        self.install_stub("Darwin")
+        (self.manager / "state").write_text("xpcproxy")
+
+        result = self.trigger("daily-audit", "shop")
+
+        self.assertEqual(result.returncode, 69, result.stdout)
+        self.assertIn("already xpcproxy", result.stderr)
+        self.assertNotIn("kickstart", self.calls_log())
+
+    def test_run_job_never_waits_out_a_launchd_state_it_cannot_read_or_that_does_not_end(self):
+        for case, extra, said in (("stuck", {"FAKE_RUNNING_STATE": "xpcproxy"}, "stayed in launchd state 'xpcproxy'"),
+                                  ("unreadable", {"FAKE_OMIT_STATE": "1"}, "cannot read the state")):
+            with self.subTest(case=case):
+                shutil.rmtree(self.manager, ignore_errors=True)
+                self.install_stub("Darwin")
+
+                result = self.trigger("daily-audit", "shop", STUB_SECONDS="2.5", RUN_JOB_TRANSITION_SECONDS="1", **extra)
+
+                self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+                self.assertIn(said, result.stderr)
+                self.assertNotIn("exited", result.stdout)
 
     def test_run_job_refuses_a_unit_that_did_not_start(self):
         self.install_stub("Linux")
