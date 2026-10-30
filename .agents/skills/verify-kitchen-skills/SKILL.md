@@ -41,3 +41,4 @@ kitchen status --exceptions
 - Cloud sessions (Claude Code and Codex): never measured.
 - Codex project hooks: load only in a trusted project after the person approves them in `/hooks`; the tests run the handlers by hand, not through Codex.
 - The scheduled jobs on a real schedule: `bin/check` runs their tests, not a night of launchd or systemd.
+- `automation/bin/run-job` on a real launchd: its tests fake `launchctl`; on systemd its calls were measured on a throwaway unit.

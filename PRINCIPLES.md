@@ -26,7 +26,7 @@ Never invent counts, freshness, progress or success. A read that failed is `unkn
 - **When:** every report, every status line, every automation you write.
 - **Includes (pstack):**
   - [*Explain the Number*](principles/explain-the-number.md): before you measure, and before you trust, report or act on a number you measured.
-- **Enforced by:** `status` prints `unknown`, never `0` or `none`; the nightly records `incomplete` and is never green without steps; `integrate --recorded` reuses a PASS only on the same SHAs and check digest; `retro` prints its coverage line; `second-opinion` treats a missing review as a gap.
+- **Enforced by:** `status` prints `unknown`, never `0` or `none`; the nightly records `incomplete` and is never green without steps; `integrate --recorded` reuses a PASS only on the same SHAs and check digest; `retro` prints its coverage line; `second-opinion` treats a missing review as a gap; `run-job` never exits 0 without a run and a record line or log of its own.
 
 ## 3. No fallbacks; fail loud (`no-fallbacks`)
 
@@ -111,7 +111,7 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 - **Includes (pstack):**
   - [*Separate Before Serializing Shared State*](principles/separate-before-serializing-shared-state.md): concurrent actors might write the same file, branch, key or state.
   - [*Make Operations Idempotent*](principles/make-operations-idempotent.md): commands, installers and loops that run amid crashes and retries.
-- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector); the automation project lock; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`.
+- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector); the automation project lock; `run-job` starts a job in its own unit, never as a child of the agent that asked; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`.
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
 

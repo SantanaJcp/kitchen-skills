@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import unittest
@@ -442,6 +443,26 @@ class LogAndStatusTests(ProjectFixture):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertEqual(result.stdout.splitlines(), [
                     f"shop  audit      ✗ {outcome} on ab12cd34: report /r/report.md · 2h 5m ago · warnings: not notified: see the log"])
+
+    def test_a_triggered_audit_and_gardener_say_so_and_are_judged_on_their_records(self):
+        self.audit_project(status="clean")
+        units = self.home / ".config" / "systemd" / "user"
+        units.mkdir(parents=True)
+        agents = self.home / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True)
+        for job in ("daily-audit", "weekly-gardener"):  # installed --triggered: a service without its timer, a plist without a calendar
+            program = ["/bin/bash", f"/k/automation/bin/{job}", "shop"]
+            (units / f"kitchen-shop-{job}.service").write_text(f"[Service]\nExecStart={' '.join(program)}\n")
+            (agents / f"com.kitchen.shop.{job}.plist").write_bytes(plistlib.dumps({"Label": f"com.kitchen.shop.{job}",
+                                                                                   "ProgramArguments": program}))
+        env = {"XDG_CONFIG_HOME": str(self.home / ".config")}
+
+        out = self.kitchen("status", env_extra=env).stdout
+        result = self.kitchen("status", "--exceptions", env_extra=env)
+
+        self.assertIn("  audit      ✓ clean on ab12cd34: report /r/report.md · 2h 5m ago · triggered: no timer, run-job starts it\n", out)
+        self.assertIn("  gardener   ✓ published: https://example.test/pull/1 · 1d 0h ago · triggered: no timer, run-job starts it\n", out)
+        self.assertEqual((result.returncode, result.stdout), (0, ""), result.stdout + result.stderr)
 
     def test_a_refused_audit_without_a_sha_shows_its_reason(self):
         self.audit_project(status="refused", sha=None, detail="no nightly guard run is recorded; the agent did not run")

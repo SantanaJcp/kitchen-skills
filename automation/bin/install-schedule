@@ -6,8 +6,27 @@
 #   install-schedule --guard <project> [hour]                                     the nightly guard alone; default 02:00 daily
 #   install-schedule --audit <project> [hour]                                     the daily audit; default 04:00, after the guard
 #   install-schedule --retro [weekday] [hour]                                    default: Monday 07:00
+#   install-schedule --triggered --audit <project> | --gardener <project> | --retro
 # Weekdays are numbered as launchd does: 0 or 7 Sunday, 1 Monday ... 6 Saturday.
+# --triggered installs an agent job with no time of its own: the systemd service without its timer, or the launchd job
+# without StartCalendarInterval, which automation/bin/run-job starts and waits for (a T3 scheduled task, for one). It runs
+# exactly as when timed, in the same unit. Installing a job in one form removes the other form's timer. The nightly guard
+# is never triggered: it stays on its own timer.
 set -euo pipefail
+
+TRIGGERED=0
+args=()
+for arg in "$@"; do
+  if [ "$arg" = --triggered ]; then TRIGGERED=1; else args+=("$arg"); fi
+done
+set -- ${args[@]+"${args[@]}"}
+if [ "$TRIGGERED" = 1 ]; then
+  case "${1:-}" in
+    --audit|--gardener) [ $# -eq 2 ] || { echo "usage: install-schedule --triggered $1 <project> (a triggered job has no time: its trigger sets it)" >&2; exit 2; } ;;
+    --retro) [ $# -eq 1 ] || { echo "usage: install-schedule --triggered --retro (a triggered job has no time: its trigger sets it)" >&2; exit 2; } ;;
+    *) echo "install-schedule: only the agent jobs can be --triggered (--audit, --gardener, --retro); the nightly guard stays on its timer" >&2; exit 2 ;;
+  esac
+fi
 
 AUTOMATION="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_ROOT="${KITCHEN_STATE:-$HOME/.local/state/kitchen}"
@@ -30,10 +49,14 @@ mkdir -p "$AGENTS"
 # scheduled vs 2m40s to 3m09s run by hand).
 write_plist() { # label log-dir weekday-or-empty hour program-args...
   local label="$1" log_dir="$2" weekday="$3" hour="$4"; shift 4
-  local plist="$AGENTS/$label.plist" args="" calendar="<dict>"
+  local plist="$AGENTS/$label.plist" args="" calendar=""
   for arg in "$@"; do args="$args<string>$arg</string>"; done
-  [ -z "$weekday" ] || calendar="$calendar<key>Weekday</key><integer>$weekday</integer>"
-  calendar="$calendar<key>Hour</key><integer>$hour</integer><key>Minute</key><integer>0</integer></dict>"
+  if [ "$TRIGGERED" = 0 ]; then  # triggered: no calendar and no RunAtLoad, so launchd starts it only when kickstarted
+    calendar="<dict>"
+    [ -z "$weekday" ] || calendar="$calendar<key>Weekday</key><integer>$weekday</integer>"
+    calendar="
+  <key>StartCalendarInterval</key>$calendar<key>Hour</key><integer>$hour</integer><key>Minute</key><integer>0</integer></dict>"
+  fi
   mkdir -p "$log_dir"
   cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -42,8 +65,7 @@ write_plist() { # label log-dir weekday-or-empty hour program-args...
 <dict>
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array>$args</array>
-  <key>StartCalendarInterval</key>$calendar
+  <array>$args</array>$calendar
   <key>StandardOutPath</key><string>$log_dir/launchd.log</string>
   <key>StandardErrorPath</key><string>$log_dir/launchd.log</string>
   <key>ProcessType</key><string>Standard</string>
@@ -52,7 +74,7 @@ write_plist() { # label log-dir weekday-or-empty hour program-args...
 PLIST
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$plist"
-  echo "scheduled $label"
+  if [ "$TRIGGERED" = 1 ]; then echo "installed $label triggered: no schedule; automation/bin/run-job starts it"; else echo "scheduled $label"; fi
 }
 
 # PrivateTmp=yes gives each run a /tmp of its own: the gardener's sandboxes need to write /tmp on Linux and
@@ -79,6 +101,15 @@ PrivateTmp=yes
 StandardOutput=append:$log_dir/systemd.log
 StandardError=append:$log_dir/systemd.log
 UNIT
+  if [ "$TRIGGERED" = 1 ]; then
+    if [ -f "$AGENTS/$label.timer" ]; then  # what a timed install left: stop it before its file goes
+      systemctl --user disable --now "$label.timer" >/dev/null
+      rm "$AGENTS/$label.timer"
+    fi
+    systemctl --user daemon-reload
+    echo "installed $label triggered: no timer; automation/bin/run-job starts it"
+    return 0
+  fi
   cat > "$AGENTS/$label.timer" <<UNIT
 [Unit]
 Description=kitchen $label
