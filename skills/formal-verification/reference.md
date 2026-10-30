@@ -18,15 +18,17 @@ The detail behind each step of [SKILL.md](SKILL.md). It was written from the fir
 ## Citations and the coverage record
 
 - Every action in the model carries a comment that cites the code it stands for, in one greppable form, for example `\* code: path/to/file.ext:123 FunctionName`. One indivisible step in the code (one transaction, one lock-held block, one atomic write) is one action. Two steps in the code are two actions, even when splitting them grows the state space.
-- The coverage record is derived, never hand-kept: `bin/formal drift` extracts the cited files from the model on every run. A hand-kept list missed a cited file in the trial; a reviewer caught it.
+- The coverage record is derived, never hand-kept. `bin/formal drift --record` writes it from the model and the tree, and nothing else does. A hand-kept list missed a cited file in the trial; a reviewer caught it.
 - The record also names the writers: every place in the source that writes the guarded state, found by a pattern (the table, field, key or topic names). A writer the model does not cite is either modeled, or listed as out of scope with the reason.
-- The sync commit is the commit at which someone last confirmed that the model describes the cited code. It lives in the project skill.
+- For every covered file (each cited file, and each file holding a listed writer, out-of-scope ones included), the record keeps its content hash, `git hash-object <file>`, as it was when someone confirmed that the model describes it.
+- The sync commit is derived too: the last commit that changed the record (`git log -1 --format=%H -- <record>`). It survives squash merges and rebases, and no one writes a SHA by hand. Keep in step reads the changes since it.
 
 `drift` fails, with no model checker and no runtime, in under a second, when:
 
-1. a cited file changed between the sync commit and HEAD;
-2. a file the model cites is missing from the coverage record, or the record lists one the model no longer cites;
-3. the writer pattern finds a writer in the source directories that the record does not list.
+1. a covered file in the working tree, committed or not, no longer matches its recorded hash;
+2. a file the model cites is missing from the record, or the record lists one the model no longer cites;
+3. the writer pattern finds a writer in the source directories that the record does not list;
+4. the record has uncommitted changes, so no commit vouches for it.
 
 Show each failure red once, on a scratch change, before you hand the skill over.
 
@@ -75,12 +77,12 @@ The trial's first model wrote 14 GB of state to disk and never finished. The one
 - per config: its question, bounds, distinct states and time;
 - the controls, each with its expected property and steps;
 - the assumptions and their probes; what the model leaves out;
-- the coverage record's source (the model's citations and the writer pattern), and the sync commit;
-- how to tell a bug from a modeling error (replay the trace against the code), and when to move the sync commit;
+- where the coverage record lives, what it is derived from (the model's citations and the writer pattern), and how to read its sync commit;
+- how to tell a bug from a modeling error (replay the trace against the code), and when to rerun `drift --record`;
 - the full run's measured time. The trial's took 1 min 48 s, which fits a nightly tier, while `drift` fits the integrate tier.
 
 ## Report
 
 - **create:** PASS (with no finding), finding (the current code breaks the promise) or BLOCKED. Then the promise and harm, the tool and why, each config with its states and time, each control with its red and its time, each boundary probe, what the cold agent found and what was fixed, the chart, what is not covered, and the wiring decision.
-- **keep in step:** clean, updated, bug or blocked, per check. Then the commits read, each change classified, what changed in the model and why, the rerun and the control that still goes red, each bug as plain steps with its introducing commit, and the new sync commit or why it did not move.
+- **keep in step:** clean, updated, bug or blocked, per check. Then the commits read, each change classified, what changed in the model and why, the rerun and the control that still goes red, each bug as plain steps with its introducing commit, and the new sync commit or why the record did not move.
 - Every number is labeled measured, with the command that produced it.
