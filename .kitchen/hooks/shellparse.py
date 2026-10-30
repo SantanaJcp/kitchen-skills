@@ -739,6 +739,25 @@ def run_git(call: GitCall, *args: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def git_config_regexp(call: GitCall, pattern: str, *flags: str) -> "list[tuple[str, str]] | None":
+    """(key, value) pairs of `git config --get-regexp`; [] when nothing matches; None when git could not answer
+    (a read error or timeout is not "not configured")."""
+    if not call.cmd.cwd:
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({k: v.value for k, v in call.cmd.env.items() if k.startswith("GIT_") and not v.dynamic})
+    try:
+        result = subprocess.run(["git", "-C", call.cmd.cwd, *call.global_opts, "config", *flags, "--get-regexp", pattern],
+                                capture_output=True, text=True, env=env, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 1 and not result.stdout:
+        return []
+    if result.returncode != 0:
+        return None
+    return [tuple(line.split(" ", 1)) if " " in line else (line, "") for line in result.stdout.splitlines() if line]
+
+
 # ---------------------------------------------------------------- hook entry point
 
 def block(guard: str, message: str) -> None:
