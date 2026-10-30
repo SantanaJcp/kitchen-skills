@@ -1742,16 +1742,16 @@ class RetroTests(ProjectFixture):
         self.assertTrue(result.stdout.endswith("· sources: claude ~/.claude ok, ssh far-host unreachable\n"), result.stdout)
 
     def test_a_remote_source_that_cannot_run_kitchen_is_unknown(self):
-        self.remote_sources("ssh far-host maxim")
+        self.remote_sources("ssh far-host ops")
 
         result = self.kitchen("retro", "--since", "1d", cwd=self.home,
                               env_extra=self.fake_ssh('echo "zsh:1: command not found: kitchen" >&2; exit 127'))
 
-        self.assertIn("ssh far-host maxim unknown (exit 127: zsh:1: command not found: kitchen)", result.stdout.splitlines()[-1])
+        self.assertIn("ssh far-host ops unknown (exit 127: zsh:1: command not found: kitchen)", result.stdout.splitlines()[-1])
 
     def test_a_remote_source_is_merged_and_classified_where_it_lives(self):
         self.write_claude([self.claude_event("aquí", ts="2099-01-01T10:00:00Z")])
-        self.remote_sources("ssh far-host maxim")
+        self.remote_sources("ssh far-host ops")
         remote = [{"ts": "2099-01-01T09:00:00+00:00", "tool": "claude", "project": "/w/api", "session": "r1", "text": "allá", "excluded": None,
                    "source": "claude ~/.claude"},
                   {"ts": "2099-01-01T11:00:00+00:00", "tool": "codex", "project": "/w/api", "session": "r2", "text": "<heartbeat>",
@@ -1762,12 +1762,12 @@ class RetroTests(ProjectFixture):
         result = self.kitchen("retro", "--since", "1d", "--json", "--include-automated", cwd=self.home, env_extra=self.fake_ssh(body))
 
         self.assertEqual([(p["text"], p["source"], p["excluded"]) for p in json.loads(result.stdout)],
-                         [("allá", "ssh far-host maxim: claude ~/.claude", None), ("aquí", "claude ~/.claude", None),
-                          ("<heartbeat>", "ssh far-host maxim: codex ~/.codex", "automation")])
+                         [("allá", "ssh far-host ops: claude ~/.claude", None), ("aquí", "claude ~/.claude", None),
+                          ("<heartbeat>", "ssh far-host ops: codex ~/.codex", "automation")])
         self.assertIn("2 prompts included · 1 excluded (automation 1) · 0 unknown provenance · sources: claude ~/.claude ok, "
-                      "ssh far-host maxim ok [claude ~/.claude ok, codex ~/.codex ok]", result.stderr)
+                      "ssh far-host ops ok [claude ~/.claude ok, codex ~/.codex ok]", result.stderr)
         args = (self.home / "ssh-args").read_text().splitlines()
-        self.assertEqual(args[:6], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-l", "maxim"])
+        self.assertEqual(args[:6], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-l", "ops"])
         self.assertEqual(args[6], "far-host")
         self.assertIn("kitchen retro --json --include-automated --home-only --since 1d --tool all", args[7])
 
