@@ -180,13 +180,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     failures += legacy.doctor(h, REPO, common.config_dir())
     for author in models.AUTHORS:
         try:
-            reviewers = models.get("reviewer", author)
+            models.get("reviewer", author)
         except models.ModelsError as error:
             warnings.append(f"second-opinion on {author}'s work will run on the session model, not cross-model: {error}")
-            continue
-        if any(e["provider"] == "pi" for e in reviewers) and not environment.on_path("pi"):
-            warnings.append(f"`pi` is not on PATH: a reviewer for {author} work runs on it, so second-opinion outside T3 "
-                            f"will run its lenses on the session model, not cross-model")
 
     on_path = shutil.which("kitchen", path=os.environ.get("PATH", ""))
     if not on_path or Path(on_path).resolve() != (REPO / "bin" / "kitchen").resolve():
@@ -629,14 +625,14 @@ def main() -> int:
     mod_add.set_defaults(project=None)
     get_output = mod_get.add_mutually_exclusive_group()
     get_output.add_argument("--json", action="store_true")
-    get_output.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec, claude -p or pi -p), one per line; the prompt goes last")
+    get_output.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec or claude -p), one per line; the prompt goes last")
     get_output.add_argument("--t3", action="store_true", help="print the target JSON for T3's delegate_task, one per line")
     mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: judgment keeps the configured effort, hardest raises it one step, routine lowers it one")
     mod_get.add_argument("--urgent", action="store_true", help="worker: the fast tier (CI or trunk red, someone blocked now); standard otherwise")
     mod_get.add_argument("--index", type=int, help="worker: the worker's place in its batch, from 0; picks accounts[index %% len]")
     for p_entry in (mod_set, mod_add):  # required for add here; for set, unless --project, in cmd_models
         p_entry.add_argument("--provider", required=p_entry is mod_add, choices=models.PROVIDERS)
-        p_entry.add_argument("--model", required=p_entry is mod_add, help="a model id (`<provider>/<id>` for pi), or `default` for that tool's own default")
+        p_entry.add_argument("--model", required=p_entry is mod_add, help="a model id, or `default` for that tool's own default")
         p_entry.add_argument("--effort", required=p_entry is mod_add, choices=models.EFFORTS)
         p_entry.add_argument("--tier", required=p_entry is mod_add, choices=models.TIERS)
     mod_set.add_argument("--accounts", help="worker: T3 provider instance ids, comma-separated, in the order a batch alternates them")
