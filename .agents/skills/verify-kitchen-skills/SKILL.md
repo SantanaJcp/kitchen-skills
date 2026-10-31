@@ -24,7 +24,7 @@ systemd-run --user -q -p PrivateTmp=yes --wait --pipe --same-dir -E PATH="$PATH"
 EOF
 ```
 
-The run sees its own empty `/tmp`, not yours: put a file it reads, such as a throwaway `KITCHEN_DENYLIST`, under `$XDG_RUNTIME_DIR`, and pass the commit message on stdin. CI runs on macOS, where none of this applies.
+The run sees its own empty `/tmp`, not yours, and none of your shell's variables but those passed with `-E`: put a file it reads under `$XDG_RUNTIME_DIR` and pass its variable too, such as `-E KITCHEN_DENYLIST="$KITCHEN_DENYLIST"` for a throwaway denylist; pass the commit message on stdin. CI runs on macOS, where none of this applies.
 
 Every test runs in a throwaway repo and `HOME` (`KITCHEN_REPO`, `HOME`, `KITCHEN_CONFIG`, `KITCHEN_STATE`, `KITCHEN_DENYLIST`). A behavior change ships with a test that fails without it: run it red against the old code, then green.
 
