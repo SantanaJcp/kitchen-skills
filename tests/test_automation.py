@@ -26,6 +26,21 @@ def clean_env(**extra):
     return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **GIT_ENV, **extra}
 
 
+def setUpModule():
+    """On Linux the jobs refuse to start unless /tmp is their own (automation/lib/sealed.sh reads it the same way), so
+    outside one most of this suite fails, one job at a time. Stop at once, with the command that runs it."""
+    if platform.system() != "Linux":
+        return
+    try:
+        roots = subprocess.run(["findmnt", "-n", "-o", "FSROOT", "--mountpoint", "/tmp"], capture_output=True, text=True).stdout
+    except OSError:
+        roots = ""
+    if not (roots.splitlines() or [""])[-1].startswith("/systemd-private-"):
+        raise RuntimeError("on Linux the automation suite needs a private /tmp, as its jobs do. Run it with "
+                           "systemd-run --user -q -p PrivateTmp=yes --wait --pipe --same-dir -E PATH=\"$PATH\" -E HOME=\"$HOME\" "
+                           "bin/check integrate (or the same prefix before `git commit`); see the verify-kitchen-skills skill")
+
+
 class AutomationFixture(unittest.TestCase):
     """A local origin repo, fake external tools, and throwaway config and state."""
 
