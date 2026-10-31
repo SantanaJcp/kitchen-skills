@@ -6,9 +6,9 @@
 # Every record lists the steps that finished with their seconds. GUARD_STEP_BUDGETS (optional, "name|seconds") warns
 # when a step runs over its budget, never changing the verdict; a green run over budget opens (or comments on) one
 # issue labelled <GUARD_LABEL>-budget, closed by the next green run within every budget.
-# GUARD_REPORT_CMD (optional) runs in the clone after a green run only, never changing the verdict: each line it prints,
-# or a non-zero exit, is a warning and opens (or comments on) one issue labelled <GUARD_LABEL>-report; a run with no
-# line and exit 0 closes it.
+# GUARD_REPORT_CMD (optional) runs in the clone after a green run only, with no stdin and a deadline
+# (GUARD_REPORT_TIMEOUT_SECONDS), never changing the verdict: each line it prints, or a non-zero exit or the deadline,
+# is a warning and opens (or comments on) one issue labelled <GUARD_LABEL>-report; a run with no line and exit 0 closes it.
 # After each step the daily audit cites (AUDIT_GUARD_STEPS), the guard keeps a copy of AUDIT_EVIDENCE_PATHS from its
 # clone in $STATE_DIR/evidence/<run>/<step>/, for the newest EVIDENCE_KEEP runs that kept any.
 # A red or incomplete run also shows a local notification (lib/kitchen/notify.py); a green one never does.
@@ -93,15 +93,26 @@ report_budget() { # sha
 # Green runs only, like the budget: GUARD_REPORT_CMD runs in the clone. Each non-blank line it prints (redacted) is a
 # warning and an item in the issue. A non-zero exit means it could not compare: a warning and the issue too, with its
 # stderr tail, never "nothing to report". No line and exit 0 closes the issue. Without the command nothing runs and the
-# issue is left as is.
+# issue is left as is. It reads no stdin and has a deadline (GUARD_REPORT_TIMEOUT_SECONDS, whole seconds, default 600;
+# bounded stops its whole process group): a report that waits must not hold the record, nor the project lock, forever.
 run_report() { # sha
   [ -n "${GUARD_REPORT_CMD:-}" ] || return 0
   local out="$LOG_DIR/guard-$RUN_ID-report.out" err="$LOG_DIR/guard-$RUN_ID-report.err" rc lines line items="" count=0
   local label="$GUARD_LABEL-report" existing stderr_tail outcome body_file="$LOG_DIR/guard-$RUN_ID-report-issue.md"
-  (cd "$CLONE_DIR" && bash -c "$GUARD_REPORT_CMD") > "$out" 2> "$err"
+  local timeout="${GUARD_REPORT_TIMEOUT_SECONDS:-600}" started ended why=""
+  if [[ ! "$timeout" =~ ^[1-9][0-9]*$ ]]; then
+    warn "report not run: GUARD_REPORT_TIMEOUT_SECONDS=$timeout is not whole seconds"
+    return 0
+  fi
+  started=$SECONDS
+  (cd "$CLONE_DIR" && bounded "$timeout" bash -c "$GUARD_REPORT_CMD") < /dev/null > "$out" 2> "$err"
   rc=$?
-  log "report exited $rc (stdout $out, stderr $err)"
-  [ "$rc" = 0 ] || warn "report could not compare (exit $rc)"
+  ended="exited $rc"
+  [ "$rc" = 0 ] || why="exit $rc"
+  # bounded exits 124 on its deadline; a command that exits 124 by itself before it is still "exit 124"
+  if [ "$rc" = 124 ] && [ $((SECONDS - started)) -ge "$timeout" ]; then ended="timed out after ${timeout}s"; why="$ended"; fi
+  log "report $ended (stdout $out, stderr $err)"
+  [ -z "$why" ] || warn "report could not compare ($why)"
   lines="$(redact < "$out")" || return 1
   while IFS= read -r line; do
     [ -n "${line//[[:space:]]/}" ] || continue
@@ -117,10 +128,11 @@ run_report() { # sha
     return 0
   fi
   if [ "$rc" = 0 ]; then
-    outcome=$'GUARD_REPORT_CMD exited 0.\n'
+    outcome="GUARD_REPORT_CMD $ended."$'\n'
   else
-    stderr_tail="$(tail -20 "$err" | redact)" || return 1
-    outcome="$(printf 'GUARD_REPORT_CMD exited %s: **the report could not compare**, so this run says nothing about what it reports, and is not "nothing to report". Last lines of its stderr (secrets redacted):\n\n```\n%s\n```\n' "$rc" "$stderr_tail")"$'\n'
+    # the whole stderr is redacted before it is cut: a private key cut from its BEGIN line would no longer be found
+    stderr_tail="$(redact < "$err" | tail -20)" || return 1
+    outcome="$(printf 'GUARD_REPORT_CMD %s: **the report could not compare**, so this run says nothing about what it reports, and is not "nothing to report". Last lines of its stderr (secrets redacted):\n\n```\n%s\n```\n' "$ended" "$stderr_tail")"$'\n'
   fi
   [ "$count" -gt 0 ] && outcome+=$'\n'"Its $count line(s) (secrets redacted):"$'\n\n'"$items"
   printf 'Green on `%s` at %s (run %s). %s\nFull output on the guard machine: `%s` and `%s`\n' \

@@ -572,8 +572,8 @@ class NightlyGuardTests(AutomationFixture):
                         'case "$*" in "issue list"*"--label nightly-guard-report"*) echo "${REPORT_ISSUE:-}";;\n'
                         '  "issue create"*) echo "https://example.test/issues/9";; esac')
 
-    def configure_report(self, command, steps=("ok|true",)):
-        self.configure(list(steps), extra=f"GUARD_REPORT_CMD={shlex.quote(command)}\n")
+    def configure_report(self, command, steps=("ok|true",), extra=""):
+        self.configure(list(steps), extra=f"GUARD_REPORT_CMD={shlex.quote(command)}\n" + extra)
 
     def report_calls(self, verb):
         """The gh calls that touch the report issue: its label, or issue #9, which only the report fake hands out."""
@@ -698,6 +698,65 @@ class NightlyGuardTests(AutomationFixture):
         run = self.nightly()[-1]
         self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
         self.assertIn("report issue failed", run["warnings"])
+
+    def test_a_report_that_hangs_is_cut_off_at_its_deadline_and_the_run_stays_green(self):
+        self.report_gh()
+        self.configure_report("sleep 30", extra="GUARD_REPORT_TIMEOUT_SECONDS=2\n")
+
+        started = time.monotonic()
+        result = self.run_job("nightly-guard", "shop")
+
+        run = self.nightly()[-1]
+        self.assertLess(time.monotonic() - started, 20, "the report was not cut off")
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertEqual(self.report_warnings(), ["report could not compare (timed out after 2s)"])
+        created = self.report_calls("issue create")
+        self.assertEqual(len(created), 1, self.calls_log())
+        self.assertIn("timed out after 2s", self.issue_body(created[0]))
+
+        self.calls.unlink()
+        ran = Path(self.tmp.name) / "report-ran"
+        self.configure_report(f"touch {ran}", extra="GUARD_REPORT_TIMEOUT_SECONDS=2.5\n")
+        result = self.run_job("nightly-guard", "shop", REPORT_ISSUE="9")  # a deadline it cannot read: not run, said so
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertFalse(ran.exists())
+        self.assertEqual(self.report_warnings(), ["report not run: GUARD_REPORT_TIMEOUT_SECONDS=2.5 is not whole seconds"])
+        self.assertEqual([line for line in self.calls_log().splitlines() if "report" in line or " 9 " in line], [])
+
+    def test_a_report_that_reads_stdin_gets_none_and_the_run_ends_green(self):
+        self.report_gh()
+        self.configure_report("read -r line; echo \"stdin gave: ${line:-nothing}\"")
+        read_end, write_end = os.pipe()  # a stdin that never ends while the test holds its write end
+
+        try:
+            result = subprocess.run(["bash", str(AUTOMATION / "bin" / "nightly-guard"), "shop"], env=self.job_env(),
+                                    stdin=read_end, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("the report waited on the guard's stdin")
+        finally:
+            os.close(write_end)
+            os.close(read_end)
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertEqual(self.report_warnings(), ["report: stdin gave: nothing"])
+
+    def test_a_private_key_in_the_reports_stderr_is_redacted_before_its_tail_is_cut(self):
+        self.report_gh()
+        key_lines = ["".join(random.choices(string.ascii_letters + string.digits, k=64)) for _ in range(28)]
+        pem = ["-----BEGIN " + "RSA PRIVATE KEY-----", *key_lines, "-----END " + "RSA PRIVATE KEY-----"]  # built at runtime
+        self.commit_to_origin({"key.txt": ("\n".join(pem) + "\n", 0o644)})  # 30 lines: more than the tail keeps
+        self.configure_report("cat key.txt >&2; exit 2")
+
+        self.run_job("nightly-guard", "shop")
+
+        created = self.report_calls("issue create")
+        self.assertEqual(len(created), 1, self.calls_log())
+        body = self.issue_body(created[0])
+        self.assertIn("[REDACTED]", body)
+        self.assertEqual([line for line in key_lines if line in body], [])
 
     def evidence(self):
         return self.state / "automation" / "shop" / "evidence"
