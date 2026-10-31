@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""PreToolUse guard: deny publishing text that may be private. Two rules, for `gh pr create|new|edit|comment|review|merge`,
+`gh issue create|new|edit|comment` and `git commit`:
+
+1. Fixed temp files, in every project. /tmp, /var/tmp and /private/tmp are shared by every local user: a fixed name such
+   as /tmp/pr-body.md may already be another user's file, so the agent's write to it fails and the command publishes
+   their text (PR #92). Blocked: such a path, written absolute (after `~` and the variables the call itself sets), at
+   any depth, as the body file (`--body-file`, `-F`, `git commit -F` or `--file`), as the command's stdin (`< path`, also
+   through `sh -c` or `eval`), or read by `cat` in a call whose publish command reads stdin or a command output. Allowed: `-` (stdin), a path the guard
+   cannot know (a variable set elsewhere, a command output, `$(mktemp)`), a relative path, a path elsewhere.
+2. Private terms, in the kitchen repo only: it is public, while a client project's own PRs name the client. The repo is
+   recognized without the network: the git toplevel of the directory the command runs in holds `bin/kitchen` and
+   `lib/kitchen/common.py`, as every clone and worktree of the kitchen does. The scan reads the whole command (heredoc
+   bodies included), the publish commands' expanded arguments, and each of those files the guard can read. It matches as
+   `kitchen check` does (`private_terms()` in lib/kitchen/common.py, repeated here because a guard is vendored alone;
+   tests/test_hooks.py checks that the two agree). No denylist file: no scan, as in `kitchen check`; a denylist that
+   exists but cannot be read blocks.
+
+Principles: `doors` (published text cannot be taken back), `isolate` (a fixed path in a shared temp dir belongs to
+whoever wrote it first), `encode-lessons` (PR #92 published another user's file; PR #97 named a client project)."""
+from __future__ import annotations
+
+import errno
+import os
+import re
+import stat
+import sys
+from dataclasses import dataclass
+
+sys.dont_write_bytecode = True
+
+GUARD = "deny-private-publish"
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+try:
+    import shellparse  # noqa: E402
+except Exception as error:  # noqa: BLE001 - a guard that cannot load must block, not exit 1
+    sys.stderr.write(f"Blocked by the kitchen hook {GUARD}: cannot load hooks/shellparse.py ({error}). Run `kitchen doctor`.\n")
+    sys.exit(2)
+
+SHARED_TEMP = ("/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp")  # the last two are where macOS resolves the first two
+GH_PUBLISH = {"pr": {"create", "new", "edit", "comment", "review", "merge"}, "issue": {"create", "new", "edit", "comment"}}
+KITCHEN_MARKERS = (("bin", "kitchen"), ("lib", "kitchen", "common.py"))
+MAX_BODY_BYTES = 1 << 20
+# `git commit` options, read as deny-no-verify reads them: in `-mF` the F is the message, in `-aF x` it takes x.
+COMMIT_SHORT_WITH_VALUE = set("mcCt")
+COMMIT_SHORT_OPTIONAL_ATTACHED = set("Su")
+COMMIT_LONG_WITH_VALUE = {"--message", "--reuse-message", "--reedit-message", "--fixup", "--squash", "--author",
+                          "--date", "--template", "--cleanup", "--trailer", "--pathspec-from-file"}
+WHY_TEMP = ("/tmp, /var/tmp and /private/tmp are shared by every local user: a fixed name there may already be another "
+            "user's file, so writing it fails and this command publishes their text instead.")
+
+
+@dataclass
+class Publish:
+    cmd: shellparse.Cmd
+    label: str          # `gh pr create`, `git commit`
+    stdin_form: str     # the same command reading its text from a heredoc
+    files: list         # [Arg] given to its body-file option
+    cwd: str | None     # where its relative paths resolve
+    toplevel: str | None
+
+
+def gh_publish(cmd) -> Publish | None:
+    if cmd.name != "gh":
+        return None
+    words, i = [], 1  # the group and the subcommand: gh takes options before either (`gh --repo o/r pr create`)
+    while i < len(cmd.argv) and len(words) < 2:
+        arg = cmd.argv[i]
+        if not arg.dynamic and arg.value.startswith("-"):
+            # as gh's command parser reads it: an option before a command word takes the next argument as its value,
+            # unless the value is attached or the option is a flag
+            value = arg.value
+            attached = "=" in value or (not value.startswith("--") and len(value) > 2)
+            i += 1 if attached or value in ("-h", "--help", "--version") else 2
+            continue
+        words.append(arg)
+        i += 1
+    if len(words) < 2 or any(w.dynamic for w in words) or words[1].value not in GH_PUBLISH.get(words[0].value, ()):
+        return None
+    label = f"gh {words[0].value} {words[1].value}"
+    options = [a for a in cmd.argv[1:] if a is not words[0] and a is not words[1]]
+    toplevel = shellparse.run_git(shellparse.GitCall("", [], [], [], cmd), "rev-parse", "--show-toplevel")
+    return Publish(cmd, label, f"{label} --body-file - <<'EOF'", gh_body_files(options), cmd.cwd, toplevel)
+
+
+def gh_body_files(args) -> list:
+    """The values of --body-file and -F. Every argument is read as a possible option, a value of another option too, so
+    a command that only quotes such an option inside another value (`--body '-F /tmp/x'`) can be read as one."""
+    values, i = [], 0
+    while i < len(args):
+        arg, value = args[i], args[i].value
+        following = args[i + 1] if i + 1 < len(args) else None
+        if value == "--" and not arg.dynamic:
+            break
+        if value.startswith("--body-file="):
+            values.append(shellparse.Arg(value[len("--body-file="):], arg.dynamic))
+        elif value == "--body-file" or (value.startswith("-") and not value.startswith("--") and "F" in value[1:]):
+            rest = "" if value == "--body-file" else value[value.index("F", 1) + 1:]
+            if rest:
+                values.append(shellparse.Arg(rest, arg.dynamic))
+            elif following is not None:
+                values.append(following)
+                i += 1
+        i += 1
+    return values
+
+
+def commit_publish(cmd) -> Publish | None:
+    call = shellparse.git_call(cmd)
+    if call is None or call.sub != "commit":
+        return None
+    cwd = cmd.cwd
+    for name, value in zip(call.global_opts[::2], call.global_opts[1::2]):
+        if name == "-C":
+            cwd = shellparse.join_path(cwd, value)
+    toplevel = shellparse.run_git(call, "rev-parse", "--show-toplevel")
+    return Publish(cmd, "git commit", "git commit -F - <<'EOF'", commit_files(call.args), cwd, toplevel)
+
+
+def commit_files(args) -> list:
+    """The values of `git commit -F` and `--file` (git takes `--fil` too), attached or not."""
+    values, i = [], 0
+    while i < len(args):
+        arg, value = args[i], args[i].value
+        following = args[i + 1] if i + 1 < len(args) else None
+        if value == "--" and not arg.dynamic:
+            break
+        if value.startswith("--"):
+            name, eq, attached = value.partition("=")
+            if len(name) >= len("--fil") and "--file".startswith(name):
+                if eq:
+                    values.append(shellparse.Arg(attached, arg.dynamic))
+                elif following is not None:
+                    values.append(following)
+                    i += 1
+            elif name in COMMIT_LONG_WITH_VALUE and not eq:
+                i += 1
+        elif value.startswith("-") and len(value) > 1:
+            for k, letter in enumerate(value[1:], 1):
+                if letter in COMMIT_SHORT_OPTIONAL_ATTACHED:
+                    break
+                if letter == "F" or letter in COMMIT_SHORT_WITH_VALUE:
+                    rest = value[k + 1:]
+                    if letter == "F" and rest:
+                        values.append(shellparse.Arg(rest, arg.dynamic))
+                    elif letter == "F" and following is not None:
+                        values.append(following)
+                    if not rest:
+                        i += 1  # the next argument is its value
+                    break
+        i += 1
+    return values
+
+
+def shared_temp(arg) -> bool:
+    """Whether this argument is a fixed absolute path inside a shared temp directory. A relative path is not judged: it
+    names a file of the project the agent works in, wherever that project is checked out."""
+    path = arg.value
+    if arg.dynamic or not os.path.isabs(path):
+        return False
+    fresh = shellparse.temp_path()  # what $(mktemp) and a variable set from it expand to: a new name, never shared
+    if path == fresh or path.startswith(fresh + "/"):
+        return False
+    for candidate in (os.path.normpath("/" + path.lstrip("/")), os.path.realpath(path)):
+        if any(candidate == root or candidate.startswith(root + "/") for root in SHARED_TEMP):
+            return True
+    return False
+
+
+def sources(publish, commands) -> list:
+    """(how, Arg, cwd) for each file the published text may come from: the body file, the file on stdin, and, when the
+    command reads stdin or a command output, any file `cat` reads in the same call."""
+    found = [("reads its text from", arg, publish.cwd) for arg in publish.files]
+    stdin = next((target for op, target in reversed(publish.cmd.redirects) if op in ("<", "<>")), None)
+    if stdin is not None:
+        found.append(("reads its stdin from", stdin, publish.cmd.cwd))
+    if any(a.value == "-" for a in publish.files) or any(a.dynamic for a in publish.cmd.argv):
+        found += [("may read its text, through `cat`, from", arg, cmd.cwd) for cmd in commands if cmd.name == "cat"
+                  for arg in cmd.argv[1:] if not arg.value.startswith("-")]
+    return found
+
+
+def temp_reasons(publishes, commands) -> list:
+    return [f"`{p.label}` {how} `{arg.value}`, a fixed path in a shared temp directory. {WHY_TEMP} Send the text itself on "
+            f"stdin: `{p.stdin_form}`, then the text, then a line `EOF`; do not read it back from a file in /tmp."
+            for p in publishes for how, arg, _ in sources(p, commands) if shared_temp(arg)]
+
+
+def denylist_path() -> str:
+    return os.environ.get("KITCHEN_DENYLIST") or os.path.join(os.environ["HOME"], ".config", "kitchen", "denylist.txt")
+
+
+def private_terms() -> list | None:
+    """Patterns for the private terms in the denylist; None when there is no denylist. The rule of private_terms() in
+    lib/kitchen/common.py: smart case, whole words, lines starting with `#` and blank lines skipped. A denylist that
+    exists but cannot be read raises."""
+    path = denylist_path()
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            return None
+        raise
+    if not stat.S_ISREG(mode):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        terms = [line.strip() for line in handle.read().splitlines() if line.strip() and not line.startswith("#")]
+    return [re.compile(rf"\b{re.escape(term)}\b", 0 if term != term.lower() else re.IGNORECASE) for term in terms]
+
+
+def body_text(arg, cwd) -> str:
+    """The contents of a body file the guard can read; "" for stdin, a path it cannot know, or anything but a file."""
+    path = None if arg.dynamic or arg.value in ("", "-") else shellparse.join_path(cwd, arg.value)
+    if path is None or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(MAX_BODY_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return ""  # gh and git cannot read it either, so it publishes nothing
+
+
+def is_kitchen(toplevel) -> bool:
+    return bool(toplevel) and all(os.path.isfile(os.path.join(toplevel, *parts)) for parts in KITCHEN_MARKERS)
+
+
+def term_reasons(publishes, commands, raw) -> list:
+    mine = [p for p in publishes if is_kitchen(p.toplevel)]
+    if not mine:
+        return []
+    try:
+        patterns = private_terms()
+    except (OSError, UnicodeError, KeyError) as error:
+        return [f"cannot read the private denylist ({type(error).__name__}: {error}), so the text this command publishes in "
+                "the public kitchen repo cannot be checked. Fix the file (`kitchen check` reads it too), then run the command again."]
+    if not patterns:
+        return []
+    texts = [raw] + [" ".join(a.value for a in p.cmd.argv) for p in mine]
+    texts += [body_text(arg, cwd) for p in mine for _, arg, cwd in sources(p, commands) if not shared_temp(arg)]
+    found = list(dict.fromkeys(m.group(0) for pattern in patterns for text in texts for m in [pattern.search(text)] if m))
+    if not found:
+        return []
+    labels = ", ".join(dict.fromkeys(f"`{p.label}`" for p in mine))
+    terms = ", ".join(f"`{term}`" for term in found)
+    return [f"the text {labels} publishes holds {terms}, from the private denylist, and the kitchen repo is public. "
+            "Remove it from the text, then run the command again."]
+
+
+def check(commands, raw):
+    publishes = [p for p in (gh_publish(c) or commit_publish(c) for c in commands) if p]
+    if not publishes:
+        return []
+    return temp_reasons(publishes, commands) + term_reasons(publishes, commands, raw)
+
+
+if __name__ == "__main__":
+    shellparse.main(GUARD, check, raw=True)
