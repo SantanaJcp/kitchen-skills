@@ -6,6 +6,7 @@ import platform
 import plistlib
 import random
 import re
+import shlex
 import shutil
 import string
 import signal
@@ -564,6 +565,139 @@ class NightlyGuardTests(AutomationFixture):
         self.assertRegex(shown.stdout, r"nightly .* warnings: over budget: slow \d+s > 1s", shown.stdout + shown.stderr)
         steps = json.loads(report.stdout)["projects"][0]["nightly"]["steps"]
         self.assertEqual([(s["name"], s["status"]) for s in steps], [("slow", "green")])
+
+    def report_gh(self):
+        """A gh whose report issue (label nightly-guard-report) is #9 when REPORT_ISSUE=9; every call is logged."""
+        self.fake("gh", 'echo "gh $*" >> "$CALLS"; [ "${GH_FAIL:-0}" = 1 ] && exit 1\n'
+                        'case "$*" in "issue list"*"--label nightly-guard-report"*) echo "${REPORT_ISSUE:-}";;\n'
+                        '  "issue create"*) echo "https://example.test/issues/9";; esac')
+
+    def configure_report(self, command, steps=("ok|true",)):
+        self.configure(list(steps), extra=f"GUARD_REPORT_CMD={shlex.quote(command)}\n")
+
+    def report_calls(self, verb):
+        """The gh calls that touch the report issue: its label, or issue #9, which only the report fake hands out."""
+        return [line for line in self.calls_log().splitlines()
+                if line.startswith(f"gh {verb}") and ("nightly-guard-report" in line or line.startswith(f"gh {verb} 9 "))]
+
+    def issue_body(self, call):
+        return Path(call.split("--body-file ")[1].split()[0]).read_text()
+
+    def report_warnings(self):
+        return [w for w in self.nightly()[-1]["warnings"] if w.startswith("report")]
+
+    def test_report_lines_on_a_green_run_warn_and_open_one_report_issue_never_changing_the_verdict(self):
+        self.report_gh()
+        token = "ghp_" + "b" * 30  # built at runtime: the repo never holds a credential shape
+        self.commit_to_origin({"slow.txt": (f"tests/a.py::slow 6.2s, a new test\n\n   \ntests/b.py::slower 9.0s, 2.0s before {token}\n", 0o644)})
+        self.configure_report("cat slow.txt")  # a path relative to the clone: the command runs there
+
+        result = self.run_job("nightly-guard", "shop")
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertEqual(self.report_warnings(), ["report: tests/a.py::slow 6.2s, a new test",
+                                                  "report: tests/b.py::slower 9.0s, 2.0s before [REDACTED]"])
+        created = self.report_calls("issue create")
+        self.assertEqual(len(created), 1, self.calls_log())
+        self.assertIn("--title Nightly guard report on dev --label nightly-guard-report", created[0])
+        body = self.issue_body(created[0])
+        self.assertIn(f"`{self.git(self.origin, 'rev-parse', 'HEAD')}`", body)
+        self.assertIn("exited 0", body)
+        self.assertIn("\n- tests/a.py::slow 6.2s, a new test\n- tests/b.py::slower 9.0s, 2.0s before [REDACTED]\n", body)
+        self.assertNotIn(token, body)
+        self.assertNotIn("could not compare", body)
+
+    def test_a_second_run_with_report_lines_comments_on_the_open_report_issue(self):
+        self.report_gh()
+        self.configure_report("echo 'tests/a.py::slow 6.2s, a new test'")
+
+        self.run_job("nightly-guard", "shop", REPORT_ISSUE="9")
+
+        commented = self.report_calls("issue comment")
+        self.assertEqual(len(commented), 1, self.calls_log())
+        self.assertIn("\n- tests/a.py::slow 6.2s, a new test\n", self.issue_body(commented[0]))
+        self.assertEqual(self.report_calls("issue create"), [])
+        self.assertEqual(self.report_calls("issue close"), [])
+
+    def test_a_clean_report_closes_the_open_report_issue_naming_the_sha_and_run(self):
+        self.report_gh()
+        self.configure_report("printf '\\n  \\n'")  # blank lines are no item
+
+        result = self.run_job("nightly-guard", "shop", REPORT_ISSUE="9")
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"], self.report_warnings()), (0, "green", []), result.stdout)
+        closed = self.report_calls("issue close")
+        self.assertEqual(len(closed), 1, self.calls_log())
+        self.assertIn(self.git(self.origin, "rev-parse", "HEAD"), closed[0])
+        self.assertIn(run["run_id"], closed[0])
+        self.assertEqual(self.report_calls("issue create") + self.report_calls("issue comment"), [])
+
+    def test_a_report_that_exits_non_zero_could_not_compare_and_is_never_nothing_to_report(self):
+        self.report_gh()
+        self.configure_report("echo 'no recorded run to compare' >&2; exit 3")
+
+        result = self.run_job("nightly-guard", "shop")
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertEqual(self.report_warnings(), ["report could not compare (exit 3)"])
+        created = self.report_calls("issue create")
+        self.assertEqual(len(created), 1, self.calls_log())
+        body = self.issue_body(created[0])
+        self.assertIn("could not compare", body)
+        self.assertIn("exited 3", body)
+        self.assertIn("no recorded run to compare", body)  # its stderr tail
+        self.assertIn(f"`{self.git(self.origin, 'rev-parse', 'HEAD')}`", body)
+
+        self.calls.unlink()
+        self.run_job("nightly-guard", "shop", REPORT_ISSUE="9")  # still cannot compare: a comment, never a close
+
+        self.assertEqual(len(self.report_calls("issue comment")), 1, self.calls_log())
+        self.assertEqual(self.report_calls("issue close"), [])
+
+    def test_a_red_or_trial_run_never_runs_the_report(self):
+        self.report_gh()
+        ran = Path(self.tmp.name) / "report-ran"
+        self.configure_report(f"touch {ran}; echo 'tests/a.py::slow 6.2s, a new test'", steps=("ok|true", "bad|false"))
+
+        self.run_job("nightly-guard", "shop", REPORT_ISSUE="9")
+        self.run_job("nightly-guard", "shop", REPORT_ISSUE="9", GUARD_ONLY="ok")
+
+        self.assertEqual(self.nightly()[-1]["status"], "red")
+        self.assertFalse(ran.exists())
+        self.assertEqual(self.report_warnings(), [])
+        self.assertEqual([line for line in self.calls_log().splitlines() if "report" in line or " 9 " in line], [])
+
+        self.configure_report(f"touch {ran}; echo 'tests/a.py::slow 6.2s, a new test'")
+        self.run_job("nightly-guard", "shop", REPORT_ISSUE="9")  # the same command on a green run does run
+
+        self.assertTrue(ran.exists())
+
+    def test_without_a_report_command_nothing_runs_and_an_open_report_issue_is_left_alone(self):
+        self.report_gh()
+        self.configure_report("echo 'tests/a.py::slow 6.2s, a new test'")
+        self.run_job("nightly-guard", "shop")
+        self.assertEqual(len(self.report_calls("issue create")), 1, self.calls_log())  # the issue the next run finds open
+
+        self.calls.unlink()
+        self.configure(["ok|true"])
+        result = self.run_job("nightly-guard", "shop", REPORT_ISSUE="9")
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"], run["warnings"]), (0, "green", []), result.stdout)
+        self.assertEqual([line for line in self.calls_log().splitlines() if "report" in line or " 9 " in line], [])
+
+    def test_a_failed_report_issue_call_is_a_warning(self):
+        self.report_gh()
+        self.configure_report("echo 'tests/a.py::slow 6.2s, a new test'")
+
+        result = self.run_job("nightly-guard", "shop", GH_FAIL="1")
+
+        run = self.nightly()[-1]
+        self.assertEqual((result.returncode, run["status"]), (0, "green"), result.stdout)
+        self.assertIn("report issue failed", run["warnings"])
 
     def evidence(self):
         return self.state / "automation" / "shop" / "evidence"

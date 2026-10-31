@@ -54,6 +54,8 @@ GUARD_STEPS=(                          # name|command, run in order in bash -e -
   "tests|make test"
 )
 GUARD_STEP_BUDGETS=("tests|900")       # optional; name|seconds. A step over its budget is a warning, never a red run
+GUARD_REPORT_CMD="python3 tools/test-times.py --newly-slow"  # optional; after a green run, in the clone: each line it prints
+                                       # is a warning; a non-zero exit means it could not compare. Never a red run
 CLEANUP_CMD="make stop"                # optional
 METRICS_CMD="python3 scripts/metrics.py --json"   # optional; snapshot per run in the history
 HISTORY_MIRROR="gardener-host:.local/state/kitchen/automation/<project>/history/"   # optional; rsync history.jsonl there after each recorded run, for a gardener on another host
@@ -111,6 +113,12 @@ One JSON line per run: `ts`, `started`, `sha` (full 40 characters), `status`, `f
 Trial runs (`GUARD_ONLY=...`) are neither recorded nor reported.
 
 **Step budgets.** `GUARD_STEP_BUDGETS` holds `name|seconds` entries, apart from `GUARD_STEPS` because a command may contain `|`. A malformed entry or a name that is not a step is a warning, never a failure. A step that ran longer than its budget adds the warning `over budget: <step> <s>s > <budget>s`, which `kitchen status` shows with the nightly's other warnings, and never changes the verdict. On a green run with a step over budget the guard opens one issue labelled `<GUARD_LABEL>-budget`, or comments on the open one; the next green run with every budgeted step within budget closes it. Red and incomplete runs stopped early and prove nothing about time: they leave that issue alone. Without a valid budget the issue is left as is, so close it by hand when you remove the budgets. A failed issue call is the warning `budget issue report failed`.
+
+**Report command.** `GUARD_REPORT_CMD` is a project command the guard runs with `bash -c` in its clone after a green run, and only then: red and incomplete runs stopped early, and trial runs report nothing. It is for what a green run still owes the owner, such as the tests that became slow since the night before; the project's command decides, the guard only reports. Each non-blank line it prints on stdout, secrets redacted, is the warning `report: <line>` and one item in one issue labelled `<GUARD_LABEL>-report`, opened or commented on. A non-zero exit means the report could not compare (no earlier run, a partial one): the warning `report could not compare (exit <n>)` and the same issue, with the exit code and the tail of its stderr, never "nothing to report". No line and exit 0 closes that issue, with a comment naming the SHA and the run. The command never changes the verdict. Without it nothing runs and the issue is left as is, so close it by hand when you remove the command. Its stdout and stderr stay in the run's logs; a failed issue call is the warning `report issue failed`. For example, a test runner that keeps each test's time between nights in a file the guard's steps pass it:
+
+```bash
+GUARD_REPORT_CMD='python3 tools/test-times.py --newly-slow --times "$HOME/.local/state/kitchen/automation/<project>/times.json"'
+```
 
 **Evidence per step.** After each step named in `AUDIT_GUARD_STEPS`, the guard copies every `AUDIT_EVIDENCE_PATHS` entry from its clone into `~/.local/state/kitchen/automation/<project>/evidence/<run_id>/<step>/<path>`, so a later step that writes the same path cannot overwrite what an earlier one left. A missing path, or one outside the clone, is a warning; so is a copy that fails, and the guard then keeps nothing of that path, so the audit refuses instead of citing part of it. Only the evidence of the newest 3 runs that kept any is kept; trial runs keep none.
 
