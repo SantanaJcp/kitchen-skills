@@ -57,6 +57,13 @@ You hold the full context; the reviewers saw a diff or a file list. Merge each l
 - its **evidence**: measured (the command you ran and what came out) or inferred (the `file:line` you read);
 - its **principle**, when one applies: the PRINCIPLES.md id it breaks.
 
+Grade it on this scale; the reviewer only proposes a severity, you set the final one:
+
+- **P0**: loses or corrupts data or money; opens a security or permission hole; or breaks the trunk or the merge gate for everyone.
+- **P1**: wrong behavior that normal use or the merge gate hits, reproducible with a concrete case.
+- **P2**: real, but needs a rare or forced input, or only affects the quality of a test, a message or a document. Listed; it does not open a PR or a queue item by itself.
+- **P3**: a style detail; not recorded.
+
 Then place it in exactly one bucket:
 
 - **Act on**: a real, concrete P0 or P1, however many there are. Only these are fixed before merge (chef-mode's review budget).
