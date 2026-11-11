@@ -16,6 +16,7 @@ ref origin/<branch>, the clone gets refs/remotes/origin/<branch> at the base SHA
 A base given as a SHA or a local branch creates no origin/ ref.
 Nothing it runs inherits GIT_* (or KITCHEN_REPO): a caller inside a git hook must not leak into the clone.
 The merges and checks run inside one of the user's `kitchen slot` slots, waiting for a free one.
+The clone lives on disk under the state directory, never in the system temp directory, which may be RAM (tmpfs).
 """
 from __future__ import annotations
 
@@ -118,6 +119,16 @@ def records_path(project: str) -> Path:
     return state_dir() / "integrate" / f"{project}.jsonl"
 
 
+def work_directory() -> Path:
+    """A fresh directory for the disposable clone, on disk under the state directory: the system temp directory may be RAM."""
+    parent = state_dir() / "integrate" / "work"
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="kitchen-integrate-", dir=parent))
+    except OSError as error:
+        raise IntegrateError(f"cannot create the work directory under {parent}: {error}") from error
+
+
 def run_checks(clone: Path, checks: list[str], env: dict, log) -> tuple[bool, str | None]:
     for command in checks:
         log.write(f"$ {command}\n")
@@ -137,10 +148,11 @@ def integrate(repo: Path, base: str, refs: list[str], project: str, checks_overr
     log_path = state_dir() / "integrate" / "logs" / f"{project}-{run_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     record["log"] = str(log_path)
-    workdir = Path(tempfile.mkdtemp(prefix="kitchen-integrate-"))
-    clone = workdir / "clone"
+    workdir = None
     try:
         with log_path.open("w", encoding="utf-8") as log:
+            workdir = work_directory()
+            clone = workdir / "clone"
             config = {"checks": checks_override} if checks_override else project_config(project)
             env = clean_env(config.get("path"))
             record["checks"] = config["checks"]
@@ -196,7 +208,8 @@ def integrate(repo: Path, base: str, refs: list[str], project: str, checks_overr
         record["reason"] = f"interrupted by {error}"
         return record
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        if workdir is not None:
+            shutil.rmtree(workdir, ignore_errors=True)
         records_path(project).parent.mkdir(parents=True, exist_ok=True)
         with records_path(project).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")

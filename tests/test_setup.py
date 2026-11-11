@@ -293,6 +293,137 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.assertEqual(report, [("WARN", "cannot read `launchctl list`, so 1 kitchen schedules were not checked")])
 
 
+
+# /proc/self/mountinfo lines as proc(5) lays them out: a root on disk, a RAM directory, a disk directory, one with no optional fields
+MOUNTS = """\
+22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
+30 22 0:30 / /scratch-ram rw,nosuid,nodev shared:12 - tmpfs tmpfs rw,size=1024k
+31 22 259:3 / /scratch-disk rw,relatime - btrfs /dev/nvme0n1p3 rw
+"""
+
+
+class MountinfoTests(unittest.TestCase):
+    def kind(self, text, path):
+        return environment().filesystem_of(text, path)
+
+    def test_a_ram_temp_directory_is_tmpfs(self):
+        self.assertEqual(self.kind(MOUNTS, "/scratch-ram/claude-1000"), "tmpfs")
+        self.assertEqual(self.kind(MOUNTS, "/scratch-ram"), "tmpfs")
+
+    def test_a_temp_directory_on_disk_is_its_disk_filesystem(self):
+        self.assertEqual(self.kind(MOUNTS, "/scratch-disk/x"), "btrfs")
+        self.assertEqual(self.kind(MOUNTS, "/var/tmp"), "ext4")
+
+    def test_a_disk_mount_nested_inside_a_ram_mount_wins_for_paths_under_it_only(self):
+        inner = "40 30 259:4 / /scratch-ram/x rw - xfs /dev/sdb1 rw\n"
+        nested = inner + MOUNTS  # listed before its parent too, as after a remount: the longest mount point wins, not the order
+
+        self.assertEqual(self.kind(nested, "/scratch-ram/x/agents"), "xfs")
+        self.assertEqual(self.kind(nested, "/scratch-ram/xy"), "tmpfs")
+
+    def test_a_mount_point_with_an_escaped_space(self):
+        spaced = MOUNTS + "41 30 259:5 / /scratch-ram/my\\040disk rw shared:9 - ext4 /dev/sdc1 rw\n"
+
+        self.assertEqual(self.kind(spaced, "/scratch-ram/my disk/agents"), "ext4")
+        self.assertEqual(self.kind(spaced, "/scratch-ram/my\\040disk"), "tmpfs")
+
+    def test_the_last_mount_on_one_point_is_the_one_on_top(self):
+        self.assertEqual(self.kind(MOUNTS + "50 22 0:40 / /scratch-disk rw - ramfs ramfs rw\n", "/scratch-disk/x"), "ramfs")
+
+
+class AgentScratchTests(unittest.TestCase):
+    """doctor's RAM temp directory check, with a planted mountinfo and a temp directory that is no real path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.mountinfo = self.home / "mountinfo"
+        self.mountinfo.write_text(MOUNTS)
+        self.settings = self.home / ".claude" / "settings.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def report(self, env=None, system="Linux", temp="/scratch-ram"):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CLAUDE_CODE_TMPDIR", None)
+            os.environ.update(env or {})
+            return environment().agent_scratch(system, self.home, mountinfo=self.mountinfo, temp=temp)
+
+    def write_settings(self, text):
+        self.settings.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.write_text(text)
+
+    def test_ram_temp_and_no_setting_is_a_warning_with_the_fix(self):
+        self.write_settings(json.dumps({"env": {"OTHER": "1"}}))
+
+        [(level, line)] = self.report()
+
+        self.assertEqual(level, "WARN")
+        self.assertTrue(line.startswith("agents' scratch directories live in RAM: the temp directory /scratch-ram is tmpfs"), line)
+        self.assertTrue(line.endswith(f"set env.CLAUDE_CODE_TMPDIR in {self.settings} to a directory on disk"), line)
+
+    def test_set_in_the_settings_file_to_a_disk_path_is_ok_naming_it(self):
+        self.write_settings(json.dumps({"env": {"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"}}))
+
+        self.assertEqual(self.report(), [("INFO", "agents' scratch directories are on disk in the sessions that read it: "
+                                                  f"CLAUDE_CODE_TMPDIR=/scratch-disk/agents (from {self.settings}), "
+                                                  "while the temp directory /scratch-ram is tmpfs, in RAM")])
+
+    def test_an_empty_value_in_the_settings_file_wins_over_the_environment_and_is_a_warning(self):
+        self.write_settings(json.dumps({"env": {"CLAUDE_CODE_TMPDIR": ""}}))
+
+        [(level, line)] = self.report({"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"})
+
+        self.assertEqual(level, "WARN")
+        self.assertTrue(line.startswith("agents' scratch directories live in RAM"), line)
+
+    def test_a_path_that_cannot_be_resolved_is_said_not_a_crash(self):
+        self.write_settings(json.dumps({"env": {"CLAUDE_CODE_TMPDIR": "/scratch-disk/\u0000agents"}}))
+
+        [(level, line)] = self.report()
+
+        self.assertEqual(level, "WARN")
+        self.assertIn("agents' scratch directories not checked", line)
+
+    def test_set_in_the_environment_is_ok(self):
+        [(level, line)] = self.report({"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"})
+
+        self.assertEqual(level, "INFO")
+        self.assertIn("CLAUDE_CODE_TMPDIR=/scratch-disk/agents (from this environment)", line)
+
+    def test_set_to_a_ram_path_is_still_a_warning(self):
+        self.write_settings(json.dumps({"env": {"CLAUDE_CODE_TMPDIR": "/scratch-ram/agents"}}))
+
+        [(level, line)] = self.report({"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"})
+
+        self.assertEqual(level, "WARN")
+        self.assertIn(f"CLAUDE_CODE_TMPDIR=/scratch-ram/agents (from {self.settings}) is tmpfs", line)
+
+    def test_an_unparsable_settings_file_is_said_not_passed(self):
+        self.write_settings("{not json")
+
+        [(level, line)] = self.report({"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"})
+
+        self.assertEqual(level, "WARN")
+        self.assertIn(f"agents' scratch directories not checked: cannot read env.CLAUDE_CODE_TMPDIR from {self.settings} (JSONDecodeError", line)
+
+    def test_an_unreadable_mountinfo_says_the_check_could_not_run(self):
+        self.mountinfo.unlink()
+
+        [(level, line)] = self.report({"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"})
+
+        self.assertEqual(level, "WARN")
+        self.assertIn(f"RAM temp directory check could not run: cannot read {self.mountinfo}", line)
+
+    def test_a_temp_directory_on_disk_has_nothing_to_say(self):
+        self.assertEqual(self.report(temp="/scratch-disk"), [])
+
+    def test_macos_has_nothing_to_say(self):
+        self.mountinfo.unlink()
+
+        self.assertEqual(self.report(system="Darwin"), [])
+
 class FastCheckTests(KitchenFixture):
     """`check --fast` runs the test modules the staged paths need; plain `check` runs all of them."""
 

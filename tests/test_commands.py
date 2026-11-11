@@ -950,6 +950,31 @@ class IntegrateTests(ProjectFixture):
         self.assertEqual(self.records()[-1]["vector"], [base, self.sha("feature-a"), self.sha("feature-b")])
         self.assertEqual(recorded.returncode, 0, recorded.stdout)
 
+    def test_the_clone_lives_on_disk_under_the_state_directory_and_is_removed_after(self):
+        where = self.home / "where"
+        work = self.home / "state" / "integrate" / "work"
+
+        result = self.integrate("feature-a", "--check", f"pwd -P > {where}")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        ran_in = Path(where.read_text().strip())
+        self.assertEqual(ran_in.name, "clone")
+        self.assertEqual(ran_in.parent.parent, work.resolve())
+        self.assertTrue(ran_in.parent.name.startswith("kitchen-integrate-"), ran_in)
+        self.assertEqual(list(work.iterdir()), [])
+
+    def test_a_work_directory_it_cannot_create_is_a_fail_not_a_traceback(self):
+        work = self.home / "state" / "integrate" / "work"
+        work.parent.mkdir(parents=True)
+        work.write_text("a file where the work directory goes\n")
+
+        result = self.integrate("feature-a")
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(f"FAIL  shop [unresolved]: cannot create the work directory under {work}", result.stdout)
+        self.assertEqual(self.records()[-1]["status"], "FAIL")
+
     def test_a_base_given_as_a_sha_or_a_local_branch_creates_no_origin_ref(self):
         git(self.source, "update-ref", "refs/remotes/origin/main", self.sha("main"))
         self.configure('checks = ["test -z \\"$(git for-each-ref refs/remotes)\\""]')
