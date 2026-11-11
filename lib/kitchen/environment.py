@@ -217,8 +217,9 @@ def filesystem_of(mountinfo: str, path: str) -> str | None:
 
 def agent_scratch(system: str, h: Path, mountinfo: Path = MOUNTINFO, temp: str | None = None) -> list[tuple[str, str]]:
     """Linux only: whether the agents' scratch directories live in RAM. Claude Code creates them under the system temp directory
-    unless CLAUDE_CODE_TMPDIR names another place, read here from the env block of ~/.claude/settings.json, which every session
-    gets whatever started it, else from this environment. Nothing to say when the temp directory is on disk."""
+    unless CLAUDE_CODE_TMPDIR names another place, read here from the env block of ~/.claude/settings.json, which a session that
+    loads the user's settings gets whatever started it, else from this environment. The scheduled jobs' sealed sessions load
+    neither, so this says nothing about them. Nothing to say when the temp directory is on disk."""
     if system != "Linux":
         return []
     temp = os.path.realpath(temp or tempfile.gettempdir())
@@ -234,28 +235,30 @@ def agent_scratch(system: str, h: Path, mountinfo: Path = MOUNTINFO, temp: str |
     settings = h / ".claude" / "settings.json"
     where = f"the temp directory {temp} is {kind}, in RAM"
     fix = f"set env.CLAUDE_CODE_TMPDIR in {settings} to a directory on disk"
-    value, source = None, None
+    value, source = os.environ.get("CLAUDE_CODE_TMPDIR"), "this environment"
     if settings.exists():
         try:
-            data = json.loads(settings.read_text(encoding="utf-8"))
-            value = data.get("env", {}).get("CLAUDE_CODE_TMPDIR")
-        except (OSError, ValueError, AttributeError) as error:
+            block = json.loads(settings.read_text(encoding="utf-8")).get("env", {})
+            if "CLAUDE_CODE_TMPDIR" in block:  # the settings file wins over the environment, even with an empty value
+                value, source = block["CLAUDE_CODE_TMPDIR"], str(settings)
+        except (OSError, ValueError, AttributeError, TypeError) as error:
             return [("WARN", f"agents' scratch directories not checked: cannot read env.CLAUDE_CODE_TMPDIR from {settings} "
                              f"({type(error).__name__}: {error}); {where}")]
-        source = str(settings)
-    if not value:
-        value, source = os.environ.get("CLAUDE_CODE_TMPDIR"), "this environment"
-    if not value:
+    if value is None or value == "":
         return [("WARN", f"agents' scratch directories live in RAM: {where}, and Claude Code creates them there "
                          f"unless CLAUDE_CODE_TMPDIR names another place; {fix}")]
-    if not isinstance(value, str) or not os.path.isabs(value):
+    try:
+        resolved = os.path.realpath(value) if isinstance(value, str) and os.path.isabs(value) else None
+    except ValueError:  # an embedded NUL
+        resolved = None
+    if resolved is None:
         return [("WARN", f"agents' scratch directories not checked: CLAUDE_CODE_TMPDIR in {source} is {value!r}, "
                          f"not an absolute path; {where}")]
-    target = filesystem_of(mounts, os.path.realpath(value))
+    target = filesystem_of(mounts, resolved)
     if target is None:
         return [("WARN", f"RAM temp directory check could not run: no mount in {mountinfo} holds {value}")]
     if target in RAM_FILESYSTEMS:
         return [("WARN", f"agents' scratch directories live in RAM: CLAUDE_CODE_TMPDIR={value} (from {source}) is {target}, "
                          f"and {where}; {fix}")]
-    return [("INFO", f"agents' scratch directories are on disk: CLAUDE_CODE_TMPDIR={value} (from {source}), "
-                     f"while {where}")]
+    return [("INFO", f"agents' scratch directories are on disk in the sessions that read it: CLAUDE_CODE_TMPDIR={value} "
+                     f"(from {source}), while {where}")]

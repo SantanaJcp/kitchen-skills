@@ -366,8 +366,25 @@ class AgentScratchTests(unittest.TestCase):
     def test_set_in_the_settings_file_to_a_disk_path_is_ok_naming_it(self):
         self.write_settings(json.dumps({"env": {"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"}}))
 
-        self.assertEqual(self.report(), [("INFO", "agents' scratch directories are on disk: CLAUDE_CODE_TMPDIR=/scratch-disk/agents "
-                                                  f"(from {self.settings}), while the temp directory /scratch-ram is tmpfs, in RAM")])
+        self.assertEqual(self.report(), [("INFO", "agents' scratch directories are on disk in the sessions that read it: "
+                                                  f"CLAUDE_CODE_TMPDIR=/scratch-disk/agents (from {self.settings}), "
+                                                  "while the temp directory /scratch-ram is tmpfs, in RAM")])
+
+    def test_an_empty_value_in_the_settings_file_wins_over_the_environment_and_is_a_warning(self):
+        self.write_settings(json.dumps({"env": {"CLAUDE_CODE_TMPDIR": ""}}))
+
+        [(level, line)] = self.report({"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"})
+
+        self.assertEqual(level, "WARN")
+        self.assertTrue(line.startswith("agents' scratch directories live in RAM"), line)
+
+    def test_a_path_that_cannot_be_resolved_is_said_not_a_crash(self):
+        self.write_settings(json.dumps({"env": {"CLAUDE_CODE_TMPDIR": "/scratch-disk/\u0000agents"}}))
+
+        [(level, line)] = self.report()
+
+        self.assertEqual(level, "WARN")
+        self.assertIn("agents' scratch directories not checked", line)
 
     def test_set_in_the_environment_is_ok(self):
         [(level, line)] = self.report({"CLAUDE_CODE_TMPDIR": "/scratch-disk/agents"})
