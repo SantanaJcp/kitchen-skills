@@ -5,6 +5,12 @@
 # Every command here was run in this repo and seen to pass, and the commit tier was seen to fail on a planted defect.
 # A tier with no command fails: an empty check is never green.
 set -eu
+# The heavy tiers queue for one of the kitchen's slots, so parallel agents do not all build at once; without the kitchen
+# (CI) there is no queue. commit stays out: a pre-commit hook waits on it. A project whose commit tier builds may add it.
+case "${1:-}" in
+  integrate|nightly|verify-tree)
+    if [ -z "${KITCHEN_SLOT:-}" ] && command -v kitchen >/dev/null 2>&1; then exec kitchen slot -- "$0" "$@"; fi ;;
+esac
 cd "$(dirname "$0")/.."
 
 tier_commit() {

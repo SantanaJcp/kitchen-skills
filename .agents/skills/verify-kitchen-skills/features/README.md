@@ -15,3 +15,4 @@ One file per `kitchen` command, in this order. `tests/test_feature_map.py` fails
 - [integrate](integrate.md)
 - [check-cost](check-cost.md)
 - [principle](principle.md)
+- [slot](slot.md)

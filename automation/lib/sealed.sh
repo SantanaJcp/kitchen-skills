@@ -233,7 +233,9 @@ verify_tree() {
     rm -f "$JOB_DIR/exit/rc"
     rc=0
     # The command and the exit file travel as variables: srt joins positional arguments without quoting.
-    (cd "$vdir" && bounded "$VERIFY_TIMEOUT" env -i ${keep[@]+"${keep[@]}"} \
+    # KITCHEN_SLOT: the job is admitted by its own schedule and project lock, and the sandbox cannot write the
+    # `kitchen slot` queue, so a slotted bin/check in a step runs directly.
+    (cd "$vdir" && bounded "$VERIFY_TIMEOUT" env -i ${keep[@]+"${keep[@]}"} KITCHEN_SLOT=automation \
       PATH="$KITCHEN_AUTOMATION/shims/sealed:$TOOL_PATH" GIT_CONFIG_GLOBAL="$JOB_DIR/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
       KITCHEN_STEP="$cmd" KITCHEN_STEP_EXIT="$JOB_DIR/exit/rc" \
       "$SRT" -s "$JOB_DIR/verify-srt.json" -c 'bash -e -o pipefail -c "$KITCHEN_STEP"; echo $? > "$KITCHEN_STEP_EXIT"') \

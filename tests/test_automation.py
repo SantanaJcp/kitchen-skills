@@ -1477,6 +1477,18 @@ git commit -q -am "More notes"
         self.assertIn("Job verification: the job reran these steps on exactly this tree, sandboxed by srt", body)
         self.assertIn("- notes: passed\n- checkout: passed", body)
 
+    def test_verify_steps_run_as_already_admitted_so_a_slotted_check_never_queues(self):
+        # the sandbox cannot write the `kitchen slot` queue; the job's schedule and project lock admit it
+        out = Path(self.tmp.name) / "verify-out"
+        out.mkdir()
+        self.verify_config(f"'slot|echo \"$KITCHEN_SLOT\" > {out}/slot'", f'GARDENER_SANDBOX_WRITE=("{out}")')
+        self.agent(self.commit_script())
+
+        result = self.run_job("weekly-gardener", "shop")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual((out / "slot").read_text(), "automation\n")
+
     def test_tree_attributes_cannot_make_the_verify_checkout_fail(self):
         # working-tree-encoding converts on add: re-adding the exported (stored) bytes must not apply it again
         (self.origin / ".gitattributes").write_text("*.ps1 text working-tree-encoding=UTF-16\n")

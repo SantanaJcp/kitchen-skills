@@ -85,6 +85,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 - Preserve unrelated work. Prefer focused changes over unsolicited rewrites, abstractions, dependencies or scope expansion.
 - Preserve existing behavior unless the change requires otherwise. If a necessary change would reduce existing functionality, explain the tradeoff and get the owner's approval first.
 - Never introduce fallbacks: no alternative paths, substitute values or degraded behavior when the intended operation fails. Surface the failure. An existing fallback: report where it is, when it activates and what it hides; change it only with approval.
+- A build or a test suite runs under `kitchen slot -- <command>` unless the project's `bin/check` already takes one: parallel agents queue instead of piling up.
 - Never fake state: no invented counts, freshness, progress or success. A skipped check is reported as skipped, in your reports and in any automation you write.
 - Before deleting or overwriting anything that is not in git, inspect it and move it to the Trash instead of removing it.
 - Use current authoritative sources when information may have changed or accuracy matters.

@@ -39,6 +39,7 @@ One-way doors are printed, never run: a ruleset or branch protection that requir
 
 - `bin/check`: every command is one you ran in this repo and saw pass; nothing guessed stays in. When `integrate.toml` already lists checks for the repo, start from those. Keep the commit tier fast; put the full build and the slow suites in `integrate`.
 - Long runs print progress; never sit silent for minutes.
+- Keep the template's `kitchen slot` stanza above `cd`: `integrate`, `nightly` and `verify-tree` then wait for one of the owner's slots, so parallel agents do not all build at once; `commit` stays out, because the pre-commit hook waits on it.
 - A file `.gitignore` hides gets a `!` exception in `.gitignore`, not `git add -f`.
 - Guards: `kitchen guards .`, then `kitchen guards . --check` must print OK.
 
