@@ -14,9 +14,11 @@ both run for real and differ only in whether HEAD moved.
 
 The clone lives under the kitchen's state directory, on disk, not in the system temp dir (on some machines /tmp is
 RAM, and a build there eats memory). Nothing it runs inherits GIT_* or KITCHEN_REPO.
+The runs hold one `kitchen slot` slot, taken before `warm`: no timed run includes a wait, and a slotted check nests.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -26,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from . import slot
 from .common import now, state_dir
 from .integrate import IntegrateError, clean_env, git, resolve
 
@@ -93,7 +96,7 @@ def check_cost(repo: Path, ref: str = "HEAD", command: str = DEFAULT_COMMAND, fa
         log_path.parent.mkdir(parents=True, exist_ok=True)
         workdir = Path(tempfile.mkdtemp(prefix="run-", dir=root))
         clone = workdir / "clone"
-        with log_path.open("w", encoding="utf-8") as log:
+        with log_path.open("w", encoding="utf-8") as log, contextlib.ExitStack() as stack:
             record["sha"] = resolve(repo, ref)
             if ref == "HEAD" and uncommitted(repo):
                 print(f"check-cost: {repo} has uncommitted changes; they are not measured (the clone checks out the committed HEAD)",
@@ -105,6 +108,9 @@ def check_cost(repo: Path, ref: str = "HEAD", command: str = DEFAULT_COMMAND, fa
             checkout = git(clone, "checkout", "-q", "--detach", record["sha"])
             if checkout.returncode != 0:
                 raise IntegrateError(f"cannot check out {record['sha']}: {checkout.stderr.strip()}")
+            held = stack.enter_context(slot.held(f"kitchen check-cost {command}", slot.project_name(repo)))
+            held.exit = 1
+            env = {**env, **held.env}
 
             def run(name: str) -> float:
                 print(f"check-cost: {name} started", file=progress, flush=True)
@@ -133,8 +139,11 @@ def check_cost(repo: Path, ref: str = "HEAD", command: str = DEFAULT_COMMAND, fa
                 write_probe(clone / PROBE.format(n=3), 3)
                 confirm = run("confirm")
             record["status"], record["message"] = verdict(same, moved, confirm, factor, floor)
-    except IntegrateError as error:
+            held.exit = 0 if record["status"] == "PASS" else 1
+    except (IntegrateError, slot.SlotError) as error:
         record["message"] = str(error)
+    except slot.Interrupted as error:
+        record["message"] = f"interrupted by {error}"
     except (OSError, subprocess.CalledProcessError) as error:
         record["message"] = f"setup problem: {error}"
     finally:

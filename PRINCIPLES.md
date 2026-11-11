@@ -111,7 +111,7 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 - **Includes (pstack):**
   - [*Separate Before Serializing Shared State*](principles/separate-before-serializing-shared-state.md): concurrent actors might write the same file, branch, key or state.
   - [*Make Operations Idempotent*](principles/make-operations-idempotent.md): commands, installers and loops that run amid crashes and retries.
-- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector) and `kitchen check-cost` (a disposable clone that only reads the source); the automation project lock; `run-job` starts a job in its own unit, never as a child of the agent that asked; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`; `deny-private-publish` blocks publishing text from a fixed path in a temp directory every local user shares.
+- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector) and `kitchen check-cost` (a disposable clone that only reads the source); the automation project lock; `kitchen slot` queues heavy commands for this user's N slots; `run-job` starts a job in its own unit, never as a child of the agent that asked; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`; `deny-private-publish` blocks publishing text from a fixed path in a temp directory every local user shares.
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
 

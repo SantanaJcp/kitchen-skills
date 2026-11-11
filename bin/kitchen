@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from kitchen import common, credentials, integrate, inventory, journal, status, transcripts  # noqa: E402
 from kitchen import checkcost, checkplan, environment, legacy, models, principles  # noqa: E402
+from kitchen import slot  # noqa: E402
 # Principles (`kitchen check`): `small-owned`, `doors`, `encode-lessons`. It caps a SKILL.md at MAX_SKILL_LINES lines,
 # keeps private data out of this public repo, and runs the lints and tests.
 MAX_SKILL_LINES = 150
@@ -42,6 +43,7 @@ EXAMPLES = """examples:
   kitchen init ../some-repo   print the instructions your agent follows to set a repo up
   kitchen guards .            put the kitchen's guards in this repo only
   kitchen principle explain-the-number   read one principle before you apply it
+  kitchen slot -- make test   wait for one of this user's N slots, then run a build or test suite
 
 run `kitchen <command> --help` for a command's options."""
 
@@ -573,6 +575,24 @@ def cmd_check_cost(args: argparse.Namespace) -> int:
     return 0 if record["status"] == "PASS" else 1
 
 
+def cmd_slot(args: argparse.Namespace) -> int:
+    command = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
+    try:
+        if args.report:
+            if command:
+                print("kitchen slot: --report takes no command", file=sys.stderr)
+                return 2
+            print(slot.report(common.parse_since(args.since), args.since))
+            return 0
+        if not command:
+            print(slot.show_state())
+            return 0
+        return slot.run_command(command)
+    except (slot.SlotError, ValueError) as error:
+        print(f"kitchen slot: {error}", file=sys.stderr)
+        return 125
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="kitchen", description=__doc__, epilog=EXAMPLES,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -678,6 +698,13 @@ def main() -> int:
     princ = sub.add_parser("principle", help="print one principle's section or leaf, or with no name the index chef-mode carries")
     princ.add_argument("name", nargs="?", help="a principle id (`prove`) or a leaf name (`explain-the-number`)")
     princ.set_defaults(func=cmd_principle)
+
+    slot_cmd = sub.add_parser("slot", help="run a heavy command (a build, a test suite) in one of this user's N slots, waiting for a free one; "
+                              "with no command, show who holds them")
+    slot_cmd.add_argument("--report", action="store_true", help="how long runs waited and ran, per project (to size N)")
+    slot_cmd.add_argument("--since", default="7d", help="--report window, e.g. 24h or 7d")
+    slot_cmd.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- command", help="the command and its arguments")
+    slot_cmd.set_defaults(func=cmd_slot)
 
     args = parser.parse_args()
     return args.func(args)

@@ -15,6 +15,7 @@ Checks that compare against `origin/<base>` see the base the batch merges onto: 
 ref origin/<branch>, the clone gets refs/remotes/origin/<branch> at the base SHA, copied from the source, never fetched.
 A base given as a SHA or a local branch creates no origin/ ref.
 Nothing it runs inherits GIT_* (or KITCHEN_REPO): a caller inside a git hook must not leak into the clone.
+The merges and checks run inside one of the user's `kitchen slot` slots, waiting for a free one.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from . import slot
 from .common import config_dir, now, state_dir
 
 FIXED_DATE = "2000-01-01T00:00:00+00:00"  # merge commits are deterministic for a given SHA vector
@@ -163,26 +165,35 @@ def integrate(repo: Path, base: str, refs: list[str], project: str, checks_overr
                 pinned = git(clone, "update-ref", remote_ref, record["base"]["sha"])
                 if pinned.returncode != 0:
                     raise IntegrateError(f"cannot create {remote_ref} in the clone: {pinned.stderr.strip()}")
-            merge_env = {**env, "GIT_AUTHOR_NAME": "kitchen integrate", "GIT_AUTHOR_EMAIL": "integrate@kitchen.invalid",
-                         "GIT_COMMITTER_NAME": "kitchen integrate", "GIT_COMMITTER_EMAIL": "integrate@kitchen.invalid",
-                         "GIT_AUTHOR_DATE": FIXED_DATE, "GIT_COMMITTER_DATE": FIXED_DATE}
-            for branch in record["branches"]:
-                log.write(f"== merge {branch['ref']} {branch['sha']}\n")
-                merged = git(clone, "merge", "-q", "--no-ff", "--no-edit", "-m", f"integrate {branch['ref']}", branch["sha"], env=merge_env)
-                if merged.returncode != 0:
-                    log.write(merged.stdout + merged.stderr)
-                    record["steps"].append({"ref": branch["ref"], "merge": "conflict"})
-                    record["reason"] = f"merge conflict at {branch['ref']}"
-                    return record
-                ok, why = run_checks(clone, config["checks"], env, log)
-                record["steps"].append({"ref": branch["ref"], "merge": "ok", "check": "ok" if ok else why})
-                if not ok:
-                    record["reason"] = f"check failed after {branch['ref']}: {why}"
-                    return record
+            # one of this user's slots for the whole batch; its checks and merge hooks see KITCHEN_SLOT, so a slotted
+            # bin/check nests instead of waiting for the slot this run holds
+            with slot.held(" ".join(["kitchen integrate", *refs]), project) as held:
+                env = {**env, **held.env}
+                merge_env = {**env, "GIT_AUTHOR_NAME": "kitchen integrate", "GIT_AUTHOR_EMAIL": "integrate@kitchen.invalid",
+                             "GIT_COMMITTER_NAME": "kitchen integrate", "GIT_COMMITTER_EMAIL": "integrate@kitchen.invalid",
+                             "GIT_AUTHOR_DATE": FIXED_DATE, "GIT_COMMITTER_DATE": FIXED_DATE}
+                held.exit = 1
+                for branch in record["branches"]:
+                    log.write(f"== merge {branch['ref']} {branch['sha']}\n")
+                    merged = git(clone, "merge", "-q", "--no-ff", "--no-edit", "-m", f"integrate {branch['ref']}", branch["sha"], env=merge_env)
+                    if merged.returncode != 0:
+                        log.write(merged.stdout + merged.stderr)
+                        record["steps"].append({"ref": branch["ref"], "merge": "conflict"})
+                        record["reason"] = f"merge conflict at {branch['ref']}"
+                        return record
+                    ok, why = run_checks(clone, config["checks"], env, log)
+                    record["steps"].append({"ref": branch["ref"], "merge": "ok", "check": "ok" if ok else why})
+                    if not ok:
+                        record["reason"] = f"check failed after {branch['ref']}: {why}"
+                        return record
+                held.exit = 0
             record["status"] = "PASS"
             return record
-    except IntegrateError as error:
+    except (IntegrateError, slot.SlotError) as error:
         record["reason"] = str(error)
+        return record
+    except slot.Interrupted as error:
+        record["reason"] = f"interrupted by {error}"
         return record
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
