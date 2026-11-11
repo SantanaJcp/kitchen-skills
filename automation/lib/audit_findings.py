@@ -4,11 +4,13 @@ issues, and what it sends.
 
   audit_findings.py open <issues.json>
       the open findings issues the agent sees before its pass, one per line: `- <key>: <title> (issue #N)`
-  audit_findings.py plan <report> <issues.json> <limit> <out-dir> <header.md> <project> [<unpublished-reason>]
+  audit_findings.py plan <report> <issues.json> <limit> <out-dir> <header.md> <project> <git-dir> <sha> [<unpublished-reason>]
       one line per finding, `<action> <number-or--> <key> <dir>`: `create` (no open issue carries its key),
       `comment` (its open issue's last text differs) or `none` (its open issue already says the same). <dir> holds
-      `title` and `body.md`, redacted and cut under GitHub's limits. With <unpublished-reason>, the prose fixes the
-      pass committed did not ship, and that is one more finding, keyed `unpublished-prose-fixes`.
+      `title` and `body.md`, redacted and cut under GitHub's limits. Redaction keeps the private terms the audited
+      tree (<sha> in <git-dir>) already holds: they are the project's own vocabulary (lib/project_terms.py). With
+      <unpublished-reason>, the prose fixes the pass committed did not ship, and that is one more finding, keyed
+      `unpublished-prose-fixes`.
 
 A finding is a `### <key>: <title>` heading inside the report's `## Findings` section, with its text up to the next
 heading of level 3 or less (fenced code blocks are text); the section holds nothing else. The key is kebab-case and the agent keeps it while the
@@ -31,7 +33,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
-from kitchen.transcripts import scrub  # noqa: E402  (redact.py's patterns)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kitchen.transcripts import scrub as scrub_all  # noqa: E402  (redact.py's patterns)
+from project_terms import Unknown, foreign_terms  # noqa: E402
 
 KEY = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 SECTION = re.compile(r"^##\s+Findings\s*$")
@@ -125,8 +129,16 @@ def cut(text: str, note: str) -> str:
     return text if len(text) <= BODY_LIMIT else text[: BODY_LIMIT - len(note)] + note
 
 
-def plan(report_path, issues_path, limit, out_dir, header_path, project, unpublished=None) -> list[str]:
+def plan(report_path, issues_path, limit, out_dir, header_path, project, git_dir, sha, unpublished=None) -> list[str]:
     report = Path(report_path).read_text(encoding="utf-8", errors="replace")
+    try:
+        terms = foreign_terms(git_dir, sha)
+    except Unknown as reason:
+        raise Refused(str(reason)) from None
+
+    def scrub(text: str) -> str:
+        return scrub_all(text, terms)
+
     # Redacted before parsing, so a key, a title and a text that leave the machine are all redacted.
     items = findings(scrub(report))
     raw_keys = [key for key, _, _ in findings(report)]

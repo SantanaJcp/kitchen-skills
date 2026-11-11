@@ -67,10 +67,10 @@ SSH_TIMEOUT = 300  # seconds for a remote source's whole run
 REMOTE_SOURCES = re.compile(r" · sources: (.*)$")
 
 
-def scrub(text: str) -> str:
-    """Credentials out, then the private terms from the denylist (when there is one)."""
+def scrub(text: str, terms: list | None = None) -> str:
+    """Credentials out, then the private terms: <terms> (patterns) when given, else the denylist's (when there is one)."""
     text = redact(text)
-    for pattern in private_terms() or []:
+    for pattern in (private_terms() or []) if terms is None else terms:
         text = pattern.sub("[PRIVATE]", text)
     return text
 

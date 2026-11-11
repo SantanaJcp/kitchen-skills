@@ -24,14 +24,23 @@ def denylist_path() -> Path:
     return Path(os.environ.get("KITCHEN_DENYLIST") or home() / ".config" / "kitchen" / "denylist.txt")
 
 
-def private_terms() -> list[re.Pattern] | None:
-    """Patterns for the private terms in the denylist; None when there is no denylist.
-    Smart case, whole words: the name "Acme" must not match "the acme of design"."""
+def denylist_terms() -> list[str] | None:
+    """The private terms of the denylist, one per non-comment line; None when there is no denylist."""
     path = denylist_path()
     if not path.is_file():
         return None
-    terms = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
-    return [re.compile(rf"\b{re.escape(term)}\b", 0 if term != term.lower() else re.IGNORECASE) for term in terms]
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
+
+
+def term_pattern(term: str) -> re.Pattern:
+    """Smart case, whole words: the name "Acme" must not match "the acme of design"; "acme" matches any case."""
+    return re.compile(rf"\b{re.escape(term)}\b", 0 if term != term.lower() else re.IGNORECASE)
+
+
+def private_terms() -> list[re.Pattern] | None:
+    """Patterns for the private terms in the denylist; None when there is no denylist."""
+    terms = denylist_terms()
+    return None if terms is None else [term_pattern(term) for term in terms]
 
 
 def projects() -> list[Path]:
