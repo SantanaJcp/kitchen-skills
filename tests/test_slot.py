@@ -470,6 +470,32 @@ class IntegrateTests(SlotFixture):
         self.assertFalse(self.marker.exists())
 
 
+class CheckCostTests(SlotFixture):
+    def test_check_cost_waits_for_the_only_slot_and_its_runs_hold_it(self):
+        source = self.work / "shop"
+        source.mkdir()
+        git(source, "init", "-q", "-b", "main")
+        git(source, "commit", "-q", "--allow-empty", "-m", "init")
+        marker = self.work / "checked"
+        self.slots("slots = 1\n")
+        holder = self.holder("a")
+        self.wait_for("a.started")
+        cost = self.popen([sys.executable, str(KITCHEN), "check-cost", str(source), "--command", f"echo $KITCHEN_SLOT >> {marker}"])
+
+        waiting = self.stderr_line(cost)
+        ran_while_held = marker.exists()
+        (self.work / "a.release").touch()
+        code, out, err = self.finish(cost)
+
+        self.assertIn("number 1 in the queue, for one of 1 slot", waiting)
+        self.assertFalse(ran_while_held)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(marker.read_text(), "0\n0\n0\n", "warm, same and moved each ran inside the slot")
+        self.assertEqual(self.finish(holder)[0], 0)
+        record = self.record("kitchen check-cost")
+        self.assertEqual((record["project"], record["slot"], record["exit"]), ("shop", 0, 0))
+
+
 class TemplateTests(SlotFixture):
     def check_repo(self):
         repo = self.work / "repo"

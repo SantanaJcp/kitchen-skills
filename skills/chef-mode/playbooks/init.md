@@ -48,7 +48,7 @@ One-way doors are printed, never run: a ruleset or branch protection that requir
 Prove each piece the owner said yes to; a piece they declined has nothing to prove.
 
 1. Check contract: `bin/check commit` green twice in a row, from a clean tree.
-2. Check cost: commit the work on `kitchen/init` first (check-cost measures the committed HEAD, not the working tree), then `kitchen check-cost .` prints PASS; run it again after any later change to the check. A FAIL means the check costs several times more right after a commit than with HEAD unchanged, usually because the build puts the commit id into its inputs: fix that before you hand it over.
+2. Check cost: commit the work on `kitchen/init` first (check-cost measures the committed HEAD, not the working tree), then `kitchen check-cost .` prints PASS (it may first wait for one of the owner's slots; the wait is not timed); run it again after any later change to the check. A FAIL means the check costs several times more right after a commit than with HEAD unchanged, usually because the build puts the commit id into its inputs: fix that before you hand it over.
 3. Check contract, negative control: plant a defect in a file the commit tier actually runs (a test it executes, in a language its commands cover), run `bin/check commit`, see it fail, revert the defect. Still green means the tier does not cover that file: fix the tier or pick a file it runs. Never report done on a control that stayed green.
 4. Check contract: `bin/check integrate` green once.
 5. Pre-commit hook: `git config core.hooksPath .githooks`, stage the planted defect and run `git commit`: the hook must refuse it. Revert.
