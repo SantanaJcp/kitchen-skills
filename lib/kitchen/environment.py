@@ -181,27 +181,64 @@ NOTIFICATION_PROBE = ["systemd-run", "--user", "--wait", "--pipe", "--quiet", "b
                       "org.freedesktop.Notifications", "GetServerInformation"]
 
 
-NOTIFY_SETTING = re.compile(r"""^\s*(?:export\s+)?KITCHEN_NOTIFY=(["']?)([^"'\s#]*)\1\s*(?:#.*)?$""")
+NOTIFY_ASSIGNMENT = re.compile(r"^(?:export[ \t]+)?KITCHEN_NOTIFY=(.*)$")
 
 
-def notify_setting(env: Path) -> str:
-    """KITCHEN_NOTIFY as a project's automation config sets it: its last literal assignment line, "" without one."""
+def shell_literal(text: str) -> str | None:
+    """The value Bash gives the word that starts <text> (an assignment's right side), when it is a plain literal: unquoted,
+    'single' or "double" quoted parts, then nothing or whitespace and a comment. A `#` starts a comment only after
+    whitespace, as in Bash: `off#typo` is the value `off#typo`. None for anything Bash would expand or run on."""
+    value, quote = "", ""
+    for index, char in enumerate(text):
+        if quote == "'":
+            quote, value = ("", value) if char == "'" else (quote, value + char)
+        elif quote == '"':
+            if char in '$`\\':
+                return None
+            quote, value = ("", value) if char == '"' else (quote, value + char)
+        elif char in "'\"":
+            quote = char
+        elif char in " \t":
+            rest = text[index:].strip()
+            return value if not rest or rest.startswith("#") else None
+        elif char in "$`\\;&|<>(){}[]*?~!":
+            return None
+        else:
+            value += char
+    return None if quote else value
+
+
+def notify_setting(env: Path) -> str | None:
+    """KITCHEN_NOTIFY as a project's config sets it, "" when no line names it, None when doctor cannot be sure. The jobs
+    source the file with Bash; doctor only reads it: each non-comment line that names KITCHEN_NOTIFY must be a plain
+    assignment at the start of the line (`[export ]KITCHEN_NOTIFY=<literal>`), and the last one wins. Anything else (an
+    unset, a condition, an expansion, an indented line that may sit inside a block) is unknown."""
     value = ""
     for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = NOTIFY_SETTING.match(line)
-        if match:
-            value = match.group(2)
+        if "KITCHEN_NOTIFY" not in line or line.lstrip().startswith("#"):
+            continue
+        match = NOTIFY_ASSIGNMENT.match(line)
+        literal = shell_literal(match.group(1)) if match else None
+        if literal is None:
+            return None
+        value = literal
     return value
 
 
 def notifications() -> list[tuple[str, str]]:
     """Projects whose config sets KITCHEN_NOTIFY=off are off on purpose (automation/README.md, Notifications); the
-    server is probed only while a configured project still notifies, or none is configured."""
+    server is probed only while a configured project may still notify, or none is configured."""
     folder = config_dir() / "automation"
     settings = {env.stem: notify_setting(env) for env in sorted(folder.glob("*.env"))} if folder.is_dir() else {}
     off = [name for name, value in settings.items() if value == "off"]
-    report = [("WARN", f"KITCHEN_NOTIFY in {name}.env is '{value[:40]}': only off (or unset) is valid, so its exception runs "
-                       f"record `not notified`") for name, value in settings.items() if value not in ("", "off")]
+    report = []
+    for name, value in settings.items():
+        if value is None:
+            report.append(("WARN", f"KITCHEN_NOTIFY in {name}.env is unknown: doctor reads only plain `KITCHEN_NOTIFY=<value>` "
+                                   f"lines at the start of a line, and this file names it some other way"))
+        elif value not in ("", "off"):
+            report.append(("WARN", f"KITCHEN_NOTIFY in {name}.env is '{value[:40]}': only off (or unset) is valid, so its "
+                                   f"exception runs record `not notified`"))
     if off:
         report.append(("INFO", f"notifications off by configuration (KITCHEN_NOTIFY=off) for {', '.join(off)}: exception runs "
                                f"log one line and record no warning"))

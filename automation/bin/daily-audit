@@ -346,8 +346,7 @@ case "$OUTCOME" in
       fi
       # Fixes the report lists on a branch that did not ship are still drift: one more finding says so, and why.
       [ -n "$pr" ] || unpublished="${WARNINGS[${#WARNINGS[@]}-1]#not published: }"
-      [ -n "$pr" ] || [ -z "$REFUSED_BUNDLE" ] ||
-        unpublished+="; the refused branch is kept on the audit machine as $REFUSED_BUNDLE (git fetch <bundle> <branch>)"
+      [ -n "$pr" ] || [ -z "$REFUSED_KEPT" ] || unpublished+="; $REFUSED_KEPT"
       fixes="${pr:-not published (see the finding unpublished-prose-fixes)}"
     fi
     if report_findings "$fixes" "$unpublished"; then

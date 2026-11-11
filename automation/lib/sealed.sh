@@ -12,8 +12,8 @@
 #   PUBLISH_LABEL, MAX_CHANGED_LINES, PROTECTED_PATHS (shell patterns never published), EDIT_PATHS (when not
 #   empty, the only shell patterns published), PROSE_ONLY (1: only Markdown prose outside fenced code blocks,
 #   lib/prose_only.py), RESULT_TAG (the job's one result line)
-# and defines result <status> <detail>, refuse <reason> (records refused, returns 1) and stop <reason> (records
-# incomplete, exits). Both jobs use the project's sandbox config: GARDENER_SANDBOX_READ/WRITE/DOMAINS/UNIX_SOCKETS
+# and defines result <status> <detail> (setting RESULT and RESULT_DETAIL), refuse <reason> (records refused, returns 1)
+# and stop <reason> (records incomplete, exits). Both jobs use the project's sandbox config: GARDENER_SANDBOX_READ/WRITE/DOMAINS/UNIX_SOCKETS
 # and GARDENER_ENV_PASS (see README.md).
 # Principles: `isolate` (the agent is sealed; nothing it wrote runs unsealed), `prove` (the job reruns the checks).
 
@@ -27,7 +27,8 @@ SRT="$KITCHEN_AUTOMATION/node_modules/.bin/srt"  # pinned in automation/package.
 RUN_DATE="$(date -u +%Y-%m-%d)"
 PLATFORM_READ=()
 PLATFORM_WRITE=()
-REFUSED_BUNDLE=""  # set by publish when it refused a branch and kept it (keep_refused)
+REFUSED_KEPT=""      # set by publish when it refused a branch: where the branch is kept, or why it is not (keep_refused)
+KEEP_PUBLISH_GIT=0  # 1: the refused branch lives only in $JOB_DIR/publish.git, so cleanup keeps it
 
 # Claude's environment: everything it needs to edit, build, test and commit; nothing to publish with.
 run_sealed() {
@@ -181,7 +182,8 @@ cleanup_agent_run() { # ran-agent(0|1)
       log "cleanup FAILED: could not export $BASE_SHA to run it"
     fi
   fi
-  rm -rf "$AGENT_CLONE" "$JOB_DIR/prepare" "$JOB_DIR/cleanup" "$JOB_DIR/verify" "$JOB_DIR/publish.git"
+  rm -rf "$AGENT_CLONE" "$JOB_DIR/prepare" "$JOB_DIR/cleanup" "$JOB_DIR/verify"
+  [ "$KEEP_PUBLISH_GIT" = 1 ] || rm -rf "$JOB_DIR/publish.git"
   find "$LOG_DIR" -name "$AGENT_KIND-*" -mtime +90 -delete
   find "$STATE_DIR/$AGENT_KIND" "$STATE_DIR/$AGENT_KIND-job" -mindepth 1 -maxdepth 1 -mtime +90 -exec rm -rf {} + 2>/dev/null
 }
@@ -254,28 +256,31 @@ verify_tree() {
 
 # Deterministic publication of what the agent committed, from the base BASE_SHA. Returns 1 when it refuses or
 # fails; sets PUBLISHED_URL when it opened the PR, and leaves it empty when there was no branch to publish.
-# A refused branch is kept as $JOB_DIR/refused.bundle (REFUSED_BUNDLE) once its objects were imported: cleanup
-# deletes the agent's clone, and the owner can still inspect or ship what was refused.
+# A refused branch is kept once its objects were imported, since cleanup deletes the agent's clone: as
+# $JOB_DIR/refused.bundle, or, when the bundle fails, in $JOB_DIR/publish.git, which cleanup then keeps. REFUSED_KEPT
+# says which (or that nothing was imported); a refused result's detail ends with it.
 publish() {
-  REFUSED_BUNDLE="" PUBLISH_BRANCH=""
+  REFUSED_KEPT="" PUBLISH_BRANCH=""
   publish_checked && return 0
   local rc=$?
   keep_refused
+  log "$REFUSED_KEPT"
+  [ "${RESULT:-}" != refused ] || RESULT_DETAIL+="; $REFUSED_KEPT"
   return "$rc"
 }
 
 # The refused branch, BASE_SHA..head, from the job's own repository (objects re-hashed by fsck; git never runs in
-# the agent's clone). Logs where it is, or why there is none.
+# the agent's clone).
 keep_refused() {
   local head
-  head="$(git rev-parse --verify --quiet refs/kitchen/agent 2>/dev/null)" ||
-    { log "the refused branch is not kept: the job never imported its objects"; return 0; }
-  if git update-ref "refs/heads/$PUBLISH_BRANCH" "$head" &&
+  if ! head="$(git rev-parse --verify --quiet refs/kitchen/agent 2>/dev/null)"; then
+    REFUSED_KEPT="the refused branch is not kept: the job never imported its objects"
+  elif git update-ref "refs/heads/$PUBLISH_BRANCH" "$head" &&
     git bundle create -q "$JOB_DIR/refused.bundle" "refs/heads/$PUBLISH_BRANCH" "^$BASE_SHA" >/dev/null 2>&1; then
-    REFUSED_BUNDLE="$JOB_DIR/refused.bundle"
-    log "kept the refused branch as $REFUSED_BUNDLE (git fetch $REFUSED_BUNDLE $PUBLISH_BRANCH)"
+    REFUSED_KEPT="the refused branch is kept on the job's machine as $JOB_DIR/refused.bundle (git fetch <bundle> $PUBLISH_BRANCH)"
   else
-    log "the refused branch is not kept: could not bundle $PUBLISH_BRANCH (${head:0:12}) from ${BASE_SHA:0:12}"
+    KEEP_PUBLISH_GIT=1
+    REFUSED_KEPT="the refused branch is kept on the job's machine in the repository $GIT_DIR (ref refs/kitchen/agent, ${head:0:12}): its bundle could not be made"
   fi
 }
 

@@ -202,7 +202,7 @@ class EnvironmentDoctorTests(unittest.TestCase):
 
     def linux_timer_report(self, systemd_run):
         units = self.root / ".config" / "systemd" / "user"
-        units.mkdir(parents=True)
+        units.mkdir(parents=True, exist_ok=True)
         (units / "kitchen-shop-nightly-guard.timer").write_text("[Timer]\n")
         self.fake("systemctl", "echo active")
         if systemd_run is not None:
@@ -249,6 +249,30 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.assertEqual(len(warnings), 2, report)
         self.assertIn("KITCHEN_NOTIFY in shop.env is 'no': only off (or unset) is valid", warnings[0])
         self.assertIn("no notification server confirmed on the kitchen timers' session bus", warnings[1])
+
+    def test_a_hash_inside_the_value_is_part_of_it_as_bash_reads_it(self):
+        (self.config / "automation" / "shop.env").write_text("KITCHEN_NOTIFY=off#typo\n")
+
+        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertIn("KITCHEN_NOTIFY in shop.env is 'off#typo': only off (or unset) is valid", warnings[0])
+        self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
+
+    def test_a_notify_setting_doctor_cannot_read_for_sure_is_unknown_not_off(self):
+        for name, text in (("unset later", "KITCHEN_NOTIFY=off\nunset KITCHEN_NOTIFY\n"),
+                           ("conditional", '[ -n "$DESKTOP" ] || KITCHEN_NOTIFY=off\n'),
+                           ("inside a block", "if true; then\n  KITCHEN_NOTIFY=off\nfi\n"),
+                           ("expanded", 'KITCHEN_NOTIFY="$MODE"\n')):
+            with self.subTest(name):
+                (self.config / "automation" / "shop.env").write_text(text)
+
+                report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+
+                warnings = [m for level, m in report if level == "WARN"]
+                self.assertIn("KITCHEN_NOTIFY in shop.env is unknown", warnings[0])
+                self.assertIn("no notification server confirmed", warnings[1])  # unknown is not off: the bus is probed
+                self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
 
     def test_a_probe_that_cannot_run_is_a_warning_not_a_pass(self):
         report = self.linux_timer_report(None)

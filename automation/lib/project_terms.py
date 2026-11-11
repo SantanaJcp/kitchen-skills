@@ -3,9 +3,10 @@
 A private term the project's base tree carries (the name of a vendor its code integrates, say) is the project's own
 vocabulary, not a leak into it: the job neither refuses a diff that adds it nor scrubs it from the text it sends to
 the project (lib/scan_diff.py, lib/redact.py, lib/audit_findings.py). A term the tree does not hold stays private.
-One `git grep -q -I -F -w` per term on the tree at <rev>, with -i for an all-lowercase term: the denylist's smart case
-and whole words (lib/kitchen/common.py). Binary files do not count. A git grep that fails raises Unknown: a term is
-exempt only when git said the tree holds it.
+git grep (-I -F, -i for an all-lowercase term) lists the tree's lines that hold the term's text; a term is the
+project's only when one of them matches the very pattern the scanner and the scrubber use (lib/kitchen/common.py: smart case, whole words by Python's Unicode-aware \\b). git's own -w
+is byte-wise and would count `Zorblat` inside `Zorblaté`. Binary files do not count. A git grep that fails raises
+Unknown: a term is exempt only when the tree was read and holds it.
 Principles: `truthful-state` (an unknown answer exempts nothing), `no-fallbacks`.
 """
 from __future__ import annotations
@@ -23,19 +24,27 @@ class Unknown(Exception):
     pass
 
 
+def holds(git_dir: str, rev: str, term: str) -> bool:
+    """Whether a text file of the tree at <rev> holds <term> as the denylist pattern matches it. Stops at the first hit."""
+    pattern = term_pattern(term)
+    case = [] if term != term.lower() else ["-i"]
+    grep = subprocess.Popen(["git", "--git-dir", git_dir, "grep", "-h", "-I", "-F", *case, "-e", term, rev, "--"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+    for line in grep.stdout:
+        if pattern.search(line):
+            grep.kill()
+            grep.communicate()
+            return True
+    _, error = grep.communicate()
+    if grep.returncode not in (0, 1):
+        reason = (error.strip().splitlines() or [f"exit {grep.returncode}"])[0]
+        raise Unknown(f"cannot tell which private terms {rev[:12]} holds: git grep failed ({reason})")
+    return False
+
+
 def foreign_terms(git_dir: str, rev: str) -> list[re.Pattern]:
     """Patterns for the denylist terms the tree at <rev> in <git_dir> does not hold; [] without a denylist."""
-    foreign = []
-    for term in denylist_terms() or []:
-        case = [] if term != term.lower() else ["-i"]
-        found = subprocess.run(["git", "--git-dir", git_dir, "grep", "-q", "-I", "-F", "-w", *case, "-e", term, rev, "--"],
-                               capture_output=True, text=True)
-        if found.returncode == 1:
-            foreign.append(term_pattern(term))
-        elif found.returncode != 0:
-            reason = (found.stderr.strip().splitlines() or [f"exit {found.returncode}"])[0]
-            raise Unknown(f"cannot tell which private terms {rev[:12]} holds: git grep failed ({reason})")
-    return foreign
+    return [term_pattern(term) for term in denylist_terms() or [] if not holds(git_dir, rev, term)]
 
 
 def args_terms(args: list[str]) -> list[re.Pattern] | None:

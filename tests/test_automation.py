@@ -225,7 +225,9 @@ class NightlyGuardTests(AutomationFixture):
         self.fake("notify-send", 'echo "notify $*" >> "$CALLS"; echo "The name is not activatable" >&2; exit 1')
         for name, setting, attempts, warnings in (("unset", "", 1, ["not notified: see the log"]),
                                                   ("off", "KITCHEN_NOTIFY=off\n", 0, []),
-                                                  ("not off", "KITCHEN_NOTIFY=no\n", 0, ["not notified: see the log"])):
+                                                  ("not off", "KITCHEN_NOTIFY=no\n", 0, ["not notified: see the log"]),
+                                                  ("a # inside the word", "KITCHEN_NOTIFY=off#typo\n", 0,
+                                                   ["not notified: see the log"])):
             with self.subTest(name):
                 before = len(self.notifications())
                 self.configure(["bad|false"], extra=setting)
@@ -1398,12 +1400,12 @@ class GardenerPublicationTests(AutomationFixture):
         self.assert_refused(self.run_job("weekly-gardener", "shop"), "possible secret or private term in the diff: notes.txt:4: GitHub token")
         self.assertNotIn(token, self.calls_log())
 
-    def private_term_run(self, in_base):
+    def private_term_run(self, in_base, base_text="The sync talks to Zorblat.\n"):
         """The denylist names Zorblat (an invented vendor); the agent adds a line naming it, and the base holds it or not."""
         denylist = Path(self.tmp.name) / "denylist.txt"
         denylist.write_text("Zorblat\n")
         if in_base:
-            self.commit_to_origin({"docs/vendor.md": ("The sync talks to Zorblat.\n", 0o644)})
+            self.commit_to_origin({"docs/vendor.md": (base_text, 0o644)})
         self.configure_publishing()
         self.agent(self.commit_script() + textwrap.dedent("""\
             echo "Sync with Zorblat nightly." >> notes.txt && git commit -q -am "More notes"
@@ -1426,7 +1428,8 @@ class GardenerPublicationTests(AutomationFixture):
         self.assert_refused(result, "possible secret or private term in the diff: notes.txt:4: private term")
         bundles = list((self.state / "automation" / "shop" / "gardener-job").glob("*/refused.bundle"))
         self.assertEqual(len(bundles), 1, result.stdout)
-        self.assertIn(f"kept the refused branch as {bundles[0]}", result.stdout)
+        self.assertIn(f"the refused branch is kept on the job's machine as {bundles[0]}", self.gardener()[-1]["detail"])
+        self.assertFalse((bundles[0].parent / "publish.git").exists())  # the bundle holds it; cleanup ran as always
         fetched = Path(self.tmp.name) / "fetched"
         self.git(self.origin, "clone", "-q", str(self.origin), str(fetched))
         heads = self.git(fetched, "bundle", "list-heads", str(bundles[0]))
@@ -1434,6 +1437,29 @@ class GardenerPublicationTests(AutomationFixture):
         self.assertTrue(branch.startswith("gardener/"), heads)
         self.git(fetched, "fetch", "-q", str(bundles[0]), f"refs/heads/{branch}:refs/heads/refused")
         self.assertIn("Sync with Zorblat nightly.", self.git(fetched, "show", "refused:notes.txt"))
+
+    def test_a_term_the_base_holds_only_inside_a_longer_word_grants_no_exemption(self):
+        # git grep -w is byte-wise: it finds Zorblat in Zorblaté, where the denylist's Unicode-aware \b sees no word.
+        result = self.private_term_run(in_base=True, base_text="Built for Zorblaté only.\n")
+
+        self.assert_refused(result, "possible secret or private term in the diff: notes.txt:4: private term")
+
+    def test_a_refused_branch_whose_bundle_fails_stays_in_the_jobs_repository(self):
+        real_git = shutil.which("git")
+        self.fake("git", f'[ "$1" = bundle ] && {{ echo "fatal: injected bundle failure" >&2; exit 128; }}\nexec {real_git} "$@"')
+
+        result = self.private_term_run(in_base=False)
+
+        self.assert_refused(result, "notes.txt:4: private term")
+        jobs = list((self.state / "automation" / "shop" / "gardener-job").glob("*/"))
+        self.assertEqual(len(jobs), 1, result.stdout)
+        kept = jobs[0] / "publish.git"
+        self.assertFalse((jobs[0] / "refused.bundle").exists())
+        self.assertIn(f"the refused branch is kept on the job's machine in the repository {kept} (ref refs/kitchen/agent",
+                      self.gardener()[-1]["detail"])
+        notes = subprocess.run([real_git, "--git-dir", str(kept), "show", "refs/kitchen/agent:notes.txt"], check=True,
+                               capture_output=True, text=True, env=clean_env()).stdout
+        self.assertIn("Sync with Zorblat nightly.", notes)
 
     def test_a_credential_is_labelled_a_credential_pattern_apart_from_private_terms(self):
         self.configure_publishing()
@@ -2422,7 +2448,7 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertEqual(len(bundles), 1, result.stdout)
         body = self.issue("unpublished-prose-fixes")["body"]
         self.assertIn("docs/map.md:3: private term", body)
-        self.assertIn(f"the refused branch is kept on the audit machine as {bundles[0]}", body)
+        self.assertIn(f"the refused branch is kept on the job's machine as {bundles[0]}", body)
 
     def test_a_report_the_agent_links_to_a_host_file_never_leaves_the_machine(self):
         secret = Path(self.tmp.name) / "host-only.txt"  # outside every path the agent may read
