@@ -19,18 +19,22 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 HOOKS = ROOT / "hooks"
 CORPUS = json.loads((Path(__file__).resolve().parent / "corpus" / "hooks" / "cases.json").read_text(encoding="utf-8"))
-GUARDS = ("deny-no-verify", "deny-shared-push", "deny-recursive-rm", "deny-private-publish")
+GUARDS = ("deny-no-verify", "deny-shared-push", "deny-recursive-rm", "deny-private-publish", "deny-unslotted-heavy")
+# reads the list next to its own folder, so it runs from a copy where `kitchen guards` puts it: <project>/.kitchen/hooks/
+UNSLOTTED = "deny-unslotted-heavy"
+DEFAULT_LIST = object()
 AFTER_COMPACT = "chef-mode-after-compact"  # blocks nothing, so it has no attack corpus: AfterCompactTests below
 CHEF_MODE = ROOT / "skills" / "chef-mode" / "SKILL.md"
 # Each block names its way out: what to do instead. A case with its own `advice` names a different way out.
 ADVICE = {"deny-no-verify": "Run it without", "deny-shared-push": "Push your own branch", "deny-recursive-rm": "trash ",
-          "deny-private-publish": "on stdin"}
+          "deny-private-publish": "on stdin", UNSLOTTED: "kitchen slot -- "}
 GIT_ID = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.test", "GIT_COMMITTER_NAME": "t",
           "GIT_COMMITTER_EMAIL": "t@example.test"}
 
 
 def clean_env(**extra):
-    return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")}, **extra}
+    """Without GIT_*, and without KITCHEN_SLOT: a check run inside a slot would let every heavy command through."""
+    return {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "KITCHEN_SLOT"}, **extra}
 
 
 class HookFixture(unittest.TestCase):
@@ -44,6 +48,7 @@ class HookFixture(unittest.TestCase):
         self.denylist = root / "denylist.txt"  # invented terms; never the real ~/.config/kitchen/denylist.txt
         self.denylist.write_text("\n".join(CORPUS["defaults"]["denylist"]) + "\n")
         self.repos = {}
+        self.vendored = {}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -81,10 +86,28 @@ class HookFixture(unittest.TestCase):
         return clean_env(HOME=str(self.home), TMPDIR=str(self.tmpdir), KITCHEN_CONFIG=str(self.config),
                          KITCHEN_DENYLIST=str(self.denylist))
 
-    def run_guard(self, guard, payload, python=None):
-        command = [python, str(HOOKS / guard)] if python else [str(HOOKS / guard)]
+    def guard_path(self, guard, heavy=DEFAULT_LIST):
+        """The guard to run. deny-unslotted-heavy runs from a copy in <project>/.kitchen/hooks/, with `heavy` (lines) as
+        that project's .kitchen/heavy-commands: the corpus default, or no file at all for None."""
+        if guard != UNSLOTTED:
+            return HOOKS / guard
+        lines = CORPUS["defaults"]["heavy_commands"] if heavy is DEFAULT_LIST else heavy
+        key = None if lines is None else tuple(lines)
+        if key not in self.vendored:
+            kitchen = self.home / "projects" / f"slotted{len(self.vendored)}" / ".kitchen"
+            (kitchen / "hooks").mkdir(parents=True)
+            for name in (UNSLOTTED, "shellparse.py"):
+                shutil.copy2(HOOKS / name, kitchen / "hooks" / name)
+            if lines is not None:
+                (kitchen / "heavy-commands").write_text("".join(line + "\n" for line in lines))
+            self.vendored[key] = kitchen / "hooks" / UNSLOTTED
+        return self.vendored[key]
+
+    def run_guard(self, guard, payload, python=None, heavy=DEFAULT_LIST, env=None):
+        path = self.guard_path(guard, heavy)
+        command = [python, str(path)] if python else [str(path)]
         data = payload if isinstance(payload, str) else json.dumps(payload)
-        return subprocess.run(command, input=data, capture_output=True, text=True, env=self.env(), timeout=30)
+        return subprocess.run(command, input=data, capture_output=True, text=True, env=env or self.env(), timeout=30)
 
     def payload(self, command, cwd):
         return {"session_id": "s", "transcript_path": str(self.home / "t.jsonl"), "cwd": str(cwd), "permission_mode": "default",
@@ -121,7 +144,7 @@ class HookCorpusTests(HookFixture):
             payload = self.payload(case.get("command"), self.case_cwd(case))
             if "tool_name" in case:  # a tool that is not the shell
                 payload.update(tool_name=case["tool_name"], tool_input=case["tool_input"])
-            result = self.run_guard(case["guard"], payload)
+            result = self.run_guard(case["guard"], payload, heavy=case.get("heavy_commands", DEFAULT_LIST))
             what = case.get("command", case.get("tool_name"))
             with self.subTest(case["id"], guard=case["guard"], kind=case["kind"]):
                 if case["expect"] == "deny":
@@ -275,6 +298,62 @@ class PrivatePublishTests(HookFixture):
             self.assertEqual((guard.private_terms(), common.private_terms()), (None, None))
 
 
+class UnslottedHeavyTests(HookFixture):
+    """What deny-unslotted-heavy does besides the commands the corpus covers: where its list comes from, a list it
+    cannot read, a session that already holds a slot, and a machine without `kitchen` on the PATH."""
+
+    def guard(self, command, heavy=DEFAULT_LIST, env=None):
+        return self.run_guard(UNSLOTTED, self.payload(command, self.home), heavy=heavy, env=env)
+
+    def test_a_project_that_lists_nothing_is_never_blocked(self):
+        for label, heavy in (("no file", None), ("only comments", ["# heavy commands", "", "   # indented"])):
+            for data in ("dotnet build", 'echo "unterminated', "{oops"):
+                with self.subTest(label, input=data):
+                    payload = data if data == "{oops" else self.payload(data, self.home)
+                    result = self.run_guard(UNSLOTTED, payload, heavy=heavy)
+                    self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_a_list_that_cannot_be_read_blocks(self):
+        hooks = self.guard_path(UNSLOTTED, ["placeholder"]).parent
+        listed = hooks.parent / "heavy-commands"
+        cases = {"not UTF-8": lambda: listed.write_bytes(b"dotnet bu\xffild\n"),
+                 "an unbalanced quote": lambda: listed.write_text("npm run 'build\n"),
+                 "a directory": lambda: (listed.unlink(), listed.mkdir())}
+        if os.geteuid() != 0:  # root reads a file whatever its mode
+            cases["no read permission"] = lambda: (listed.rmdir(), listed.write_text("dotnet build\n"), listed.chmod(0))
+        for label, make in cases.items():
+            make()
+            with self.subTest(label):
+                result = self.run_guard(UNSLOTTED, self.payload("ls", self.home), heavy=["placeholder"])
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f"cannot read {listed}", result.stderr)
+
+    def test_a_session_that_holds_a_slot_is_not_blocked(self):
+        inside = self.guard("dotnet build", env={**self.env(), "KITCHEN_SLOT": "1"})
+        empty = self.guard("dotnet build", env={**self.env(), "KITCHEN_SLOT": ""})
+
+        self.assertEqual((inside.returncode, inside.stderr), (0, ""))
+        self.assertEqual(empty.returncode, 2, empty.stderr)
+
+    def test_the_way_out_is_the_same_command_in_a_slot_or_installing_kitchen(self):
+        linked, bare = self.home / "linked-bin", self.home / "bare-bin"
+        for folder in (linked, bare):
+            folder.mkdir()
+            (folder / "python3").symlink_to(sys.executable)
+        (linked / "kitchen").write_text("#!/bin/sh\n")
+        (linked / "kitchen").chmod(0o755)
+        command = 'cd src && FOO=1 nice dotnet build "My App.sln" -c Release'
+
+        found = self.guard(command, env={**self.env(), "PATH": str(linked)})
+        missing = self.guard(command, env={**self.env(), "PATH": str(bare)})
+
+        self.assertEqual(found.returncode, 2, found.stderr)
+        self.assertIn("Run it as `kitchen slot -- dotnet build 'My App.sln' -c Release`.", found.stderr)
+        self.assertEqual(missing.returncode, 2, missing.stderr)
+        self.assertIn("`kitchen` is not on the PATH: install or link it", missing.stderr)
+        self.assertNotIn("Run it as", missing.stderr)
+
+
 class HookPayloadTests(HookFixture):
     def test_codex_payload_with_an_argv_command_is_checked(self):
         payload = {"session_id": "s", "turn_id": "t", "model": "gpt", "cwd": str(self.home), "hook_event_name": "PreToolUse",
@@ -321,7 +400,7 @@ class HookPayloadTests(HookFixture):
     def test_guards_run_on_the_system_python(self):
         """The hooks run on whatever python3 the agent finds; macOS ships 3.9 at /usr/bin/python3."""
         cases = {"deny-no-verify": "git commit -n -m x", "deny-shared-push": "git push origin dev", "deny-recursive-rm": "rm -rf ~",
-                 "deny-private-publish": "gh pr create --body-file /tmp/pr-body.md"}
+                 "deny-private-publish": "gh pr create --body-file /tmp/pr-body.md", UNSLOTTED: "dotnet build"}
         for guard, command in cases.items():
             with self.subTest(guard):
                 result = self.run_guard(guard, self.payload(command, self.home), python="/usr/bin/python3")

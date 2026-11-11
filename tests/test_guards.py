@@ -10,11 +10,12 @@ from tests.test_hooks import Session, numbered
 from tests.test_kitchen import KITCHEN, KitchenFixture
 
 ROOT = KITCHEN.parent.parent
-GUARDS = ["deny-no-verify", "deny-private-publish", "deny-recursive-rm", "deny-shared-push"]
+GUARDS = ["deny-no-verify", "deny-private-publish", "deny-recursive-rm", "deny-shared-push", "deny-unslotted-heavy"]
 AFTER_COMPACT = "chef-mode-after-compact"
 PUSH = {"tool_name": "Bash", "hook_event_name": "PreToolUse", "tool_input": {"command": "git push origin HEAD:main"}}
 PROBES = {"deny-shared-push": "git push origin HEAD:main", "deny-no-verify": "git commit --no-verify -m x",
-          "deny-recursive-rm": "rm -rf /kitchen-probe", "deny-private-publish": "gh pr create --body-file /tmp/kitchen-probe.md"}
+          "deny-recursive-rm": "rm -rf /kitchen-probe", "deny-private-publish": "gh pr create --body-file /tmp/kitchen-probe.md",
+          "deny-unslotted-heavy": "dotnet build"}  # blocks only with .kitchen/heavy-commands, which the probe test writes
 
 
 class GuardsFixture(KitchenFixture):
@@ -31,7 +32,7 @@ class GuardsFixture(KitchenFixture):
 
     def run_handler(self, handler, cwd, env_extra=None, command=None):
         payload = json.dumps({**PUSH, "cwd": str(cwd), **({"tool_input": {"command": command}} if command else {})})
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "KITCHEN_SLOT")}
         return subprocess.run(["/bin/sh", "-c", handler["command"]], input=payload, capture_output=True, text=True,
                               cwd=cwd, env={**env, **(env_extra or {})})
 
@@ -65,6 +66,8 @@ class GuardsTests(GuardsFixture):
 
     def test_each_guard_blocks_its_own_probe_through_its_handler_in_both_tools(self):
         self.kitchen("guards", str(self.project))
+        self.assertFalse((self.project / ".kitchen" / "heavy-commands").exists(), "the project lists its heavy commands, not guards")
+        (self.project / ".kitchen" / "heavy-commands").write_text("dotnet build\n")
 
         for path, env in ((self.claude, {"CLAUDE_PROJECT_DIR": str(self.project)}), (self.codex, {})):
             for handler in self.handlers(path):

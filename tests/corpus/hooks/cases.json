@@ -10,6 +10,15 @@
       "# invented terms for the deny-private-publish cases",
       "Acmecorp",
       "zorblat"
+    ],
+    "heavy_commands": [
+      "# invented list for the deny-unslotted-heavy cases",
+      "dotnet build",
+      "dotnet test",
+      "npm run build",
+      "cargo test",
+      "",
+      "./gradlew build"
     ]
   },
   "cases": [
@@ -2083,6 +2092,368 @@
       "command": "( gh pr create --title x --body-file - ) < /tmp/pr-body.md",
       "expect": "allow",
       "limit": "a redirection on a `( … )` or `{ … }` group is not passed to the commands inside it."
+    },
+    {
+      "id": "heavy-listed",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "heavy-with-arguments",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "dotnet build X.sln -c Release",
+      "expect": "deny"
+    },
+    {
+      "id": "heavy-test",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "dotnet test --filter Unit",
+      "expect": "deny"
+    },
+    {
+      "id": "heavy-three-words",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "npm run build",
+      "expect": "deny"
+    },
+    {
+      "id": "heavy-absolute-path",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "/usr/local/bin/dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "heavy-listed-path-run-by-name",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "./gradlew build --offline",
+      "expect": "deny"
+    },
+    {
+      "id": "heavy-second-in-a-chain",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "kitchen slot -- dotnet build && dotnet test",
+      "expect": "deny"
+    },
+    {
+      "id": "heavy-in-a-condition",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "if true; then cargo test; fi",
+      "expect": "deny"
+    },
+    {
+      "id": "slotted",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "kitchen slot -- dotnet build X.sln -c Release",
+      "expect": "allow"
+    },
+    {
+      "id": "slotted-relative-kitchen",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "bin/kitchen slot -- dotnet test",
+      "expect": "allow"
+    },
+    {
+      "id": "slotted-absolute-kitchen",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "/opt/kitchen/bin/kitchen slot -- npm run build",
+      "expect": "allow"
+    },
+    {
+      "id": "slotted-under-a-wrapper",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "nice -n 19 kitchen slot -- dotnet build",
+      "expect": "allow"
+    },
+    {
+      "id": "slotted-shell-string",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "kitchen slot -- sh -c 'cd src && dotnet build'",
+      "expect": "allow"
+    },
+    {
+      "id": "longer-word",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "dotnet builder",
+      "expect": "allow"
+    },
+    {
+      "id": "other-subcommand",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "dotnet --version",
+      "expect": "allow"
+    },
+    {
+      "id": "other-script",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "npm run build:css",
+      "expect": "allow"
+    },
+    {
+      "id": "prefix-only-in-an-argument",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "grep -rn \"dotnet build\" docs",
+      "expect": "allow"
+    },
+    {
+      "id": "prefix-in-a-message",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "git commit -m \"run dotnet build in a slot\"",
+      "expect": "allow"
+    },
+    {
+      "id": "no-list",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "dotnet build",
+      "expect": "allow",
+      "heavy_commands": null
+    },
+    {
+      "id": "list-without-entries",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "dotnet build",
+      "expect": "allow",
+      "heavy_commands": [
+        "# nothing is heavy yet",
+        ""
+      ]
+    },
+    {
+      "id": "cd-first",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "cd src && dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "variable-prefix",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "FOO=1 dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "slot-variable-set-on-the-command",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "KITCHEN_SLOT=1 dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "slot-variable-exported",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "export KITCHEN_SLOT=1; dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "env-wrapper",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "env DOTNET_CLI_TELEMETRY_OPTOUT=1 dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "nice",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "nice -n 19 dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "time",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "time dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "timeout",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "timeout 600 dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "nohup-background",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "nohup dotnet build > build.log 2>&1 &",
+      "expect": "deny"
+    },
+    {
+      "id": "sh-c",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "sh -c 'dotnet build'",
+      "expect": "deny"
+    },
+    {
+      "id": "bash-lc",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "bash -lc \"dotnet build\"",
+      "expect": "deny"
+    },
+    {
+      "id": "subshell",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "( dotnet build )",
+      "expect": "deny"
+    },
+    {
+      "id": "pipeline",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "dotnet build 2>&1 | tail -20",
+      "expect": "deny"
+    },
+    {
+      "id": "xargs-arguments",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "ls *.sln | xargs dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "xargs-subcommand",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "echo build | xargs dotnet",
+      "expect": "deny"
+    },
+    {
+      "id": "find-exec",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "find . -name '*.sln' -exec dotnet build {} \\;",
+      "expect": "deny"
+    },
+    {
+      "id": "command-substitution",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "echo \"$(dotnet build)\"",
+      "expect": "deny"
+    },
+    {
+      "id": "variable-holds-the-command",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "CMD=\"dotnet build\"; $CMD",
+      "expect": "deny"
+    },
+    {
+      "id": "dynamic-subcommand",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "dotnet $(echo build)",
+      "expect": "deny"
+    },
+    {
+      "id": "eval",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "eval \"dotnet build\"",
+      "expect": "deny"
+    },
+    {
+      "id": "function",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "b() { dotnet build; }; b",
+      "expect": "deny"
+    },
+    {
+      "id": "slot-report-then-build",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "kitchen slot --report && dotnet build",
+      "expect": "deny"
+    },
+    {
+      "id": "substitution-in-a-slotted-command",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "kitchen slot -- echo $(dotnet build)",
+      "expect": "deny"
+    },
+    {
+      "id": "script-file",
+      "guard": "deny-unslotted-heavy",
+      "kind": "known-limit",
+      "command": "bash build.sh",
+      "expect": "allow",
+      "limit": "the contents of a script file are not read; list the script itself if it is heavy."
+    },
+    {
+      "id": "piped-to-shell",
+      "guard": "deny-unslotted-heavy",
+      "kind": "known-limit",
+      "command": "echo dotnet build | sh",
+      "expect": "allow",
+      "limit": "commands fed to a shell on stdin are not parsed."
+    },
+    {
+      "id": "unknown-command-name",
+      "guard": "deny-unslotted-heavy",
+      "kind": "known-limit",
+      "command": "$BUILD",
+      "expect": "allow",
+      "limit": "a command name from a variable the hook cannot know is not treated as heavy, or every such command would block."
+    },
+    {
+      "id": "option-between-the-words",
+      "guard": "deny-unslotted-heavy",
+      "kind": "known-limit",
+      "command": "npm --prefix web run build",
+      "expect": "allow",
+      "limit": "the words must follow each other as listed; an option between them (`cargo +nightly test`) is another prefix to list."
+    },
+    {
+      "id": "other-spelling",
+      "guard": "deny-unslotted-heavy",
+      "kind": "known-limit",
+      "command": "dotnet msbuild X.sln",
+      "expect": "allow",
+      "limit": "another spelling of the same build (`dotnet msbuild`, `npm run-script build`) is another prefix to list."
+    },
+    {
+      "id": "make-target",
+      "guard": "deny-unslotted-heavy",
+      "kind": "known-limit",
+      "command": "make all",
+      "expect": "allow",
+      "limit": "a tool that runs the build itself (make, a task runner) is not followed; list its command too."
+    },
+    {
+      "id": "other-language",
+      "guard": "deny-unslotted-heavy",
+      "kind": "known-limit",
+      "command": "python3 -c \"import subprocess; subprocess.run(['dotnet', 'build'])\"",
+      "expect": "allow",
+      "limit": "commands started from other languages are not parsed."
     }
   ]
 }
