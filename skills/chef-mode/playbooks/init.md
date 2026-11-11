@@ -23,7 +23,7 @@ Work in a worktree on a new branch `kitchen/init` from the shared base: in T3 Co
 
 One message of numbered questions. For each: what is there today, one sentence on what yes does, your recommendation. Leave out a piece that already exists and works; say so in one line instead.
 
-1. **Guards.** `kitchen guards .` copies `deny-no-verify`, `deny-shared-push`, `deny-recursive-rm` and `deny-private-publish` into `.kitchen/hooks/` and runs them before every shell command, plus `chef-mode-after-compact`, which brings chef mode back after a compaction, from `.claude/settings.json` and `.codex/hooks.json`. Recommend yes.
+1. **Guards.** `kitchen guards .` copies `deny-no-verify`, `deny-shared-push`, `deny-recursive-rm`, `deny-private-publish` and `deny-unslotted-heavy` (makes the builds and test suites listed in `.kitchen/heavy-commands` run through `kitchen slot --`) into `.kitchen/hooks/` and runs them before every shell command, plus `chef-mode-after-compact`, which brings chef mode back after a compaction, from `.claude/settings.json` and `.codex/hooks.json`. Recommend yes.
 2. **Check contract.** `bin/check` with the tiers `commit` (seconds to a minute), `integrate` (everything a merge needs), `nightly` and `verify-tree`, and `--list`; from [check.sh](init/check.sh), filled with commands this repo really runs. Recommend yes.
 3. **Pre-commit hook.** `.githooks/pre-commit` from [pre-commit.sh](init/pre-commit.sh): a secret scan on the staged changes, then `bin/check commit`. Recommend yes when the commit tier takes under a minute.
 4. **Verify method.** `.agents/skills/verify-<repo>/` from [verify/](init/verify/), with a feature map and a guard test that fails when an entry point is missing from it. Recommend yes when the repo has a UI, an API or a CLI to drive.
@@ -42,6 +42,7 @@ One-way doors are printed, never run: a ruleset or branch protection that requir
 - Keep the template's `kitchen slot` stanza above `cd`: `integrate`, `nightly` and `verify-tree` then wait for one of the owner's slots, so parallel agents do not all build at once; `commit` stays out, because the pre-commit hook waits on it.
 - A file `.gitignore` hides gets a `!` exception in `.gitignore`, not `git add -f`.
 - Guards: `kitchen guards .`, then `kitchen guards . --check` must print OK.
+- Guards, heavy commands: write `.kitchen/heavy-commands`, one command prefix per line, with the build and test commands from section 1 that you ran and saw take more than about half a minute; nothing guessed.
 
 ## 4. Prove it
 
@@ -52,7 +53,7 @@ Prove each piece the owner said yes to; a piece they declined has nothing to pro
 3. Check contract, negative control: plant a defect in a file the commit tier actually runs (a test it executes, in a language its commands cover), run `bin/check commit`, see it fail, revert the defect. Still green means the tier does not cover that file: fix the tier or pick a file it runs. Never report done on a control that stayed green.
 4. Check contract: `bin/check integrate` green once.
 5. Pre-commit hook: `git config core.hooksPath .githooks`, stage the planted defect and run `git commit`: the hook must refuse it. Revert.
-6. Guards: each one blocks its probe in this repo: pipe `{"tool_name":"Bash","cwd":"<repo>","tool_input":{"command":"git push origin HEAD:<base>"}}` into `.kitchen/hooks/deny-shared-push` and see exit 2 (likewise `git commit --no-verify -m x` for `deny-no-verify`, `rm -rf /x` for `deny-recursive-rm`, `gh pr create --body-file /tmp/x.md` for `deny-private-publish`).
+6. Guards: each one blocks its probe in this repo: pipe `{"tool_name":"Bash","cwd":"<repo>","tool_input":{"command":"git push origin HEAD:<base>"}}` into `.kitchen/hooks/deny-shared-push` and see exit 2 (likewise `git commit --no-verify -m x` for `deny-no-verify`, `rm -rf /x` for `deny-recursive-rm`, `gh pr create --body-file /tmp/x.md` for `deny-private-publish`). `deny-unslotted-heavy`: when `.kitchen/heavy-commands` has entries, its first entry blocks and the same command passes after `kitchen slot -- `; when it has none (nothing took half a minute), say so in the pull request and probe nothing.
 
 Keep each command and its last lines of output for the pull request.
 
