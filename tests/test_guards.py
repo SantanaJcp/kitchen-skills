@@ -276,6 +276,13 @@ class GuardsTests(GuardsFixture):
         self.assertIn("FAIL  .kitchen/hooks/deny-no-verify differs", drifted.stdout)
         self.assertFalse(before.stdout.count("wrote"))
 
+    def test_this_repo_carries_the_guards_it_ships(self):
+        # #107 added a guard and changed shellparse.py without re-running `kitchen guards .` here: the kitchen's own
+        # sessions kept the old copies, and nothing said so until someone ran --check by hand.
+        result = self.kitchen("guards", str(ROOT), "--check")
+
+        self.assertEqual(result.returncode, 0, "run `bin/kitchen guards .` in this repo and commit the result\n" + result.stdout)
+
 
 class InitTests(GuardsFixture):
     def setUp(self):

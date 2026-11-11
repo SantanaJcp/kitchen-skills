@@ -563,11 +563,13 @@ class Extractor:
                     return  # `command -v rm` only looks the name up
                 i += 1
             again(rest[i:])
-        elif name in ("nohup", "time", "exec", "caffeinate"):
+        elif name in ("nohup", "exec", "caffeinate"):
             i = skip_options(rest, with_value=("-a",))
             again(rest[i:])
+        elif name == "time":  # /usr/bin/time: -f/-o take a value; the shell keyword takes none
+            again(rest[skip_options(rest, with_value=("-f", "-o", "--format", "--output")):])
         elif name == "nice":
-            again(rest[skip_options(rest, with_value=("-n",)):])
+            again(rest[skip_options(rest, with_value=("-n", "--adjustment")):])
         elif name in ("sudo", "doas"):
             # sudo resets the environment by default: what the command sees is not this shell's
             i = skip_options(rest, with_value=("-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"))
@@ -575,7 +577,7 @@ class Extractor:
         elif name == "stdbuf":
             again(rest[skip_options(rest, with_value=("-i", "-o", "-e")):])
         elif name == "timeout":
-            i = skip_options(rest, with_value=("-s", "-k"))
+            i = skip_options(rest, with_value=("-s", "-k", "--signal", "--kill-after"))
             again(rest[i + 1:])
         elif name == "env":
             i, env, cwd, clean = 0, {}, cmd.cwd, False

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""PreToolUse guard: deny a heavy command (a build, a test suite) this project lists that does not run through
+`kitchen slot -- <command>`, the per-user queue that keeps parallel agents from building all at once.
+
+The list is the project's `.kitchen/heavy-commands`: `heavy-commands` in the folder above this hook's own folder, which
+`kitchen guards` makes `<project>/.kitchen/`. One command prefix per line, in words as typed (`dotnet build`); `#` lines
+and blank lines are ignored. No file, or no entries: everything is allowed. A file that exists but cannot be read
+blocks. A simple command matches when its shell words begin with a listed prefix's words (the first word compared by
+its basename), after `VAR=x` prefixes and the wrappers shellparse peels (env, nice, time, timeout, nohup, sudo, xargs,
+find -exec, sh -c, eval). A simple command that is `kitchen slot -- ...` is exempt before any matching: what follows
+`--` runs inside the slot. The message never rewrites the command: it says where `kitchen slot -- ` goes. A non-empty
+KITCHEN_SLOT in the hook's environment means the session already holds a slot, and allows everything.
+Principles: `encode-lessons` (a rule in a skill is forgotten after a compaction; a guard is not), `isolate` (the CPU is
+shared state: heavy commands queue for it), `no-fallbacks` (a list that cannot be read blocks)."""
+import os
+import shlex
+import shutil
+import sys
+
+sys.dont_write_bytecode = True
+
+GUARD = "deny-unslotted-heavy"
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+try:
+    import shellparse  # noqa: E402
+except Exception as error:  # noqa: BLE001 - a guard that cannot load must block, not exit 1
+    sys.stderr.write(f"Blocked by the kitchen hook {GUARD}: cannot load hooks/shellparse.py ({error}). Run `kitchen doctor`.\n")
+    sys.exit(2)
+LIST = os.path.join(os.path.dirname(HERE), "heavy-commands")
+WHY = "Heavy commands wait for a free slot, so parallel agents do not overload the machine."
+
+
+def heavy_prefixes():
+    """The listed prefixes as word lists; [] when there is no list. Blocks when the file exists but cannot be read."""
+    try:
+        with open(LIST, encoding="utf-8") as handle:
+            return [words for words in (shlex.split(line, comments=True) for line in handle) if words]
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        shellparse.block(GUARD, f"cannot read {LIST} ({type(error).__name__}: {str(error)[:200]}), the list of this project's "
+                                "heavy commands. Fix the file (one command prefix per line, UTF-8), or remove it to list none.")
+        return []
+
+
+def words(cmd):
+    """The command's shell words as the parser gives them, None for one the hook cannot know; the first by basename."""
+    out = [None if arg.dynamic else arg.value for arg in cmd.argv]
+    if out and out[0] is not None:
+        out[0] = os.path.basename(out[0])
+    return out
+
+
+def slotted(have):
+    """`kitchen slot -- ...` (kitchen by any path): the command after `--` already runs in a slot."""
+    return have[:1] == ["kitchen"] and have[1:3] == ["slot", "--"]
+
+
+def match(have, more_args, prefix):
+    """'yes' when the words begin with the prefix, 'maybe' when a word the hook cannot know (or arguments xargs adds)
+    stands where the prefix goes on, else None. A command name the hook cannot know is a known limit, not a maybe."""
+    if not have or have[0] is None:
+        return None
+    for position, word in enumerate(prefix):
+        if position >= len(have):
+            return "maybe" if more_args else None
+        if have[position] is None:
+            return "maybe"
+        if have[position] != (os.path.basename(word) if position == 0 else word):
+            return None
+    return "yes"
+
+
+def check(commands, prefixes):
+    reasons = []
+    linked = shutil.which("kitchen") is not None
+    for cmd in commands:
+        have = words(cmd)
+        if slotted(have):
+            continue
+        found = [(how, prefix) for prefix in prefixes for how in [match(have, cmd.more_args, prefix)] if how]
+        if not found:
+            continue
+        how, prefix = min(found, key=lambda pair: pair[0] != "yes")
+        # the command's own first words, where the listed ones stand: that is where `kitchen slot -- ` goes
+        head = " ".join(arg.value if arg.dynamic else shlex.quote(arg.value) for arg in cmd.argv[:len(prefix)])
+        listed = " ".join(shlex.quote(word) for word in prefix)
+        if how == "maybe":
+            extra = " with arguments from xargs or find -exec" if cmd.more_args else ""
+            lead = (f"`{head}`{extra} may be `{listed}`, a heavy command in this project (.kitchen/heavy-commands): a word "
+                    "of it is a variable, a command output or comes from input, so the hook cannot tell.")
+        else:
+            alias = "" if head == listed else f" (listed as `{listed}`)"
+            lead = f"`{head}`{alias} is a heavy command in this project (.kitchen/heavy-commands)."
+        put = (f"put `kitchen slot -- ` right before `{head}` and leave the rest of the command as it is "
+               f"(for example `FOO=1 nice kitchen slot -- {head} ...`).")
+        if linked:
+            reasons.append(f"{lead} {WHY} Put{put[3:]}")
+        else:
+            reasons.append(f"{lead} {WHY} `kitchen` is not on the PATH: install or link it (`bin/kitchen install` in the "
+                           f"kitchen checkout, then `kitchen doctor`), then {put}")
+    return reasons
+
+
+if __name__ == "__main__":
+    if os.environ.get("KITCHEN_SLOT"):
+        sys.stdin.read()
+        sys.exit(0)
+    heavy = heavy_prefixes()
+    if not heavy:
+        sys.stdin.read()  # nothing listed: allow, after taking the payload so the tool's write never meets a closed pipe
+        sys.exit(0)
+    shellparse.main(GUARD, lambda commands: check(commands, heavy))
