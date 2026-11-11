@@ -196,7 +196,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         failures.append("pre-commit hook inactive: run `bin/kitchen install` (sets core.hooksPath=.githooks)")
 
     infos: list[str] = []
-    for level, line in environment.tools(REPO, common.config_dir()) + environment.schedules(platform.system(), h):
+    probes = environment.tools(REPO, common.config_dir()) + environment.schedules(platform.system(), h) \
+        + environment.agent_scratch(platform.system(), h)
+    for level, line in probes:
         {"FAIL": failures, "WARN": warnings, "INFO": infos}[level].append(line)
 
     unmanaged = sorted(

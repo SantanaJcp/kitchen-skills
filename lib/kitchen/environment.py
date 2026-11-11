@@ -1,4 +1,5 @@
-"""What `kitchen doctor` checks outside the links: agent CLIs, the automation's tools, the scheduled jobs and whether their notifications can reach a server.
+"""What `kitchen doctor` checks outside the links: agent CLIs, the automation's tools, the scheduled jobs and whether their notifications can reach a server,
+and, on Linux, whether the agents' scratch directories live in RAM.
 A job installed `--triggered` (automation/bin/install-schedule) has no timer: whatever starts it with automation/bin/run-job,
 a T3 scheduled task for one, holds its schedule. It shows as triggered with its last run, read from what the job left."""
 from __future__ import annotations
@@ -6,8 +7,10 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .common import state_dir
@@ -190,3 +193,69 @@ def notification_server() -> tuple[str, str]:
     reason = (probe.stderr.strip().splitlines() or [f"exit {probe.returncode}"])[0]
     return ("WARN", f"no notification server confirmed on the kitchen timers' session bus: asking it from a transient unit failed "
                     f"({reason}); without one, exception runs record `not notified` (automation/README.md, Notifications)")
+
+
+MOUNTINFO = Path("/proc/self/mountinfo")
+RAM_FILESYSTEMS = {"tmpfs", "ramfs"}
+
+
+def filesystem_of(mountinfo: str, path: str) -> str | None:
+    """The filesystem type of the mount that holds an absolute, resolved path, from /proc/self/mountinfo text: the mount whose
+    mount point is the longest one that is the path or one of its parents; of mounts on the same point, the last listed is on top.
+    Per proc(5) the fifth field is the mount point (octal escapes such as \\040 for a space) and the field after `-` is the type.
+    None when no mount holds the path."""
+    best, found = -1, None
+    for line in mountinfo.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 10 or "-" not in fields[6:-1]:
+            continue
+        point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4])
+        if (path == point or path.startswith(point.rstrip("/") + "/")) and len(point) >= best:
+            best, found = len(point), fields[fields.index("-", 6) + 1]
+    return found
+
+
+def agent_scratch(system: str, h: Path, mountinfo: Path = MOUNTINFO, temp: str | None = None) -> list[tuple[str, str]]:
+    """Linux only: whether the agents' scratch directories live in RAM. Claude Code creates them under the system temp directory
+    unless CLAUDE_CODE_TMPDIR names another place, read here from the env block of ~/.claude/settings.json, which every session
+    gets whatever started it, else from this environment. Nothing to say when the temp directory is on disk."""
+    if system != "Linux":
+        return []
+    temp = os.path.realpath(temp or tempfile.gettempdir())
+    try:
+        mounts = mountinfo.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return [("WARN", f"RAM temp directory check could not run: cannot read {mountinfo} ({error.strerror or error})")]
+    kind = filesystem_of(mounts, temp)
+    if kind is None:
+        return [("WARN", f"RAM temp directory check could not run: no mount in {mountinfo} holds {temp}")]
+    if kind not in RAM_FILESYSTEMS:
+        return []
+    settings = h / ".claude" / "settings.json"
+    where = f"the temp directory {temp} is {kind}, in RAM"
+    fix = f"set env.CLAUDE_CODE_TMPDIR in {settings} to a directory on disk"
+    value, source = None, None
+    if settings.exists():
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8"))
+            value = data.get("env", {}).get("CLAUDE_CODE_TMPDIR")
+        except (OSError, ValueError, AttributeError) as error:
+            return [("WARN", f"agents' scratch directories not checked: cannot read env.CLAUDE_CODE_TMPDIR from {settings} "
+                             f"({type(error).__name__}: {error}); {where}")]
+        source = str(settings)
+    if not value:
+        value, source = os.environ.get("CLAUDE_CODE_TMPDIR"), "this environment"
+    if not value:
+        return [("WARN", f"agents' scratch directories live in RAM: {where}, and Claude Code creates them there "
+                         f"unless CLAUDE_CODE_TMPDIR names another place; {fix}")]
+    if not isinstance(value, str) or not os.path.isabs(value):
+        return [("WARN", f"agents' scratch directories not checked: CLAUDE_CODE_TMPDIR in {source} is {value!r}, "
+                         f"not an absolute path; {where}")]
+    target = filesystem_of(mounts, os.path.realpath(value))
+    if target is None:
+        return [("WARN", f"RAM temp directory check could not run: no mount in {mountinfo} holds {value}")]
+    if target in RAM_FILESYSTEMS:
+        return [("WARN", f"agents' scratch directories live in RAM: CLAUDE_CODE_TMPDIR={value} (from {source}) is {target}, "
+                         f"and {where}; {fix}")]
+    return [("INFO", f"agents' scratch directories are on disk: CLAUDE_CODE_TMPDIR={value} (from {source}), "
+                     f"while {where}")]
