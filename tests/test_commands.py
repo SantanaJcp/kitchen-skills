@@ -1083,7 +1083,8 @@ class CheckCostTests(ProjectFixture):
         self.assertEqual((snapshot(self.source), snapshot(decoy)), before)
         lines = (self.marks / "env").read_text().splitlines()
         self.assertEqual(len(lines), 3, f"warm, same and moved ran, and nothing else was printed: {lines}")
-        self.assertTrue(all(Path(line).is_relative_to(self.home / "state" / "check-cost") for line in lines), lines)
+        work = (self.home / "state" / "check-cost").resolve()  # `pwd` prints the physical path; macOS temp dirs sit behind a symlink
+        self.assertTrue(all(Path(line).is_relative_to(work) for line in lines), lines)
         self.assertEqual(sorted(p.name for p in (self.home / "state" / "check-cost").iterdir()), ["logs"])
 
     def test_a_probe_name_the_source_tracks_as_a_symlink_is_unknown_and_writes_nothing_through_it(self):
