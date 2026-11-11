@@ -568,7 +568,7 @@ def cmd_integrate(args: argparse.Namespace) -> int:
 
 
 def cmd_check_cost(args: argparse.Namespace) -> int:
-    record = checkcost.check_cost(Path(args.repo), args.ref, args.command, floor=args.floor)
+    record = checkcost.check_cost(Path(args.repo), args.ref, args.command)
     print(checkcost.render(record))
     return 0 if record["status"] == "PASS" else 1
 
@@ -673,8 +673,6 @@ def main() -> int:
     cost.add_argument("repo", nargs="?", default=".", help="source repository (default: current directory)")
     cost.add_argument("--ref", default="HEAD", help="commit to check out in the clone (default: HEAD)")
     cost.add_argument("--command", default=checkcost.DEFAULT_COMMAND, help=f"the check to time (default: {checkcost.DEFAULT_COMMAND})")
-    cost.add_argument("--floor", type=float, default=checkcost.FLOOR,
-                      help=f"seconds a slowdown must reach to count, whatever the ratio (default: {checkcost.FLOOR:g})")
     cost.set_defaults(func=cmd_check_cost)
 
     princ = sub.add_parser("principle", help="print one principle's section or leaf, or with no name the index chef-mode carries")

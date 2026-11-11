@@ -1,4 +1,5 @@
 import datetime
+import io
 import json
 import os
 import plistlib
@@ -961,54 +962,88 @@ class IntegrateTests(ProjectFixture):
                 self.assertEqual(self.records()[-1]["vector"][0], self.sha("main"))
 
 
+def load_checkcost():
+    sys.path.insert(0, str(KITCHEN.parent.parent / "lib"))
+    try:
+        from kitchen import checkcost
+    finally:
+        sys.path.pop(0)
+    return checkcost
+
+
 class CheckCostTests(ProjectFixture):
-    """`kitchen check-cost` times a project's check in a disposable clone: before and after HEAD moves."""
+    """`kitchen check-cost` times a project's check in a disposable clone: before and after HEAD moves.
+
+    A verdict that depends on durations is driven in process: the fake check writes the seconds it "cost" to a file and
+    the injected measure reads them, so the scheduler cannot flip it. The CLI tests prove what needs no timing."""
 
     def setUp(self):
         super().setUp()
         self.source = self.make_project("shop")
         self.marks = Path(self.tmp.name) / "marks"
         self.marks.mkdir()
+        self.cost = self.marks / "cost"
 
     def check_cost(self, command, *args, env_extra=None):
         return self.kitchen("check-cost", str(self.source), "--command", command, *args, env_extra=env_extra)
 
-    def slower_when_head_moved(self, seconds=0.4):
+    def simulated(self, command):
+        """Run check_cost in process; each run costs the seconds the check wrote to self.cost."""
+        def timed(run):
+            result = run()
+            return result, float(self.cost.read_text())
+        progress = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": str(self.home), "KITCHEN_STATE": str(self.home / "state")}):
+            record = load_checkcost().check_cost(self.source, command=command, progress=progress, timed=timed)
+        return record, progress.getvalue()
+
+    def stamps_the_commit_id(self, unchanged=10, rebuilt=40):
         """A build that stamps the commit id: it rebuilds everything when HEAD differs from the one it last built."""
-        stamp = shlex.quote(str(self.marks / "last-head"))
-        return f'h=$(git rev-parse HEAD); [ "$(cat {stamp} 2>/dev/null)" = "$h" ] || sleep {seconds}; echo "$h" > {stamp}'
+        stamp, cost = shlex.quote(str(self.marks / "last-head")), shlex.quote(str(self.cost))
+        return (f'h=$(git rev-parse HEAD); if [ "$(cat {stamp} 2>/dev/null)" = "$h" ]; then echo {unchanged} > {cost}; '
+                f'else echo {rebuilt} > {cost}; fi; echo "$h" > {stamp}')
 
     def assert_verdict(self, result, status, code):
         self.assertEqual(result.returncode, code, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip().splitlines()[-1].split()[0], status, result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_a_check_slower_after_a_commit_fails_and_says_why(self):
-        result = self.check_cost(self.slower_when_head_moved(), "--floor", "0.2")
+        record, progress = self.simulated(self.stamps_the_commit_id())
 
-        self.assert_verdict(result, "FAIL", 1)
-        self.assertIn("more right after a commit", result.stdout)
-        self.assertIn("commit id into the build's inputs", result.stdout)
-        self.assertIn("same HEAD again", result.stdout, "a FAIL needs the confirm run")
-        for name in ("warm", "same", "moved", "confirm"):
-            self.assertIn(f"check-cost: {name} started", result.stderr)
-            self.assertRegex(result.stderr, rf"check-cost: {name} done in \d+\.\d s")
+        self.assertEqual(record["status"], "FAIL", record)
+        self.assertEqual(record["times"], {"warm": 40.0, "same": 10.0, "moved": 40.0, "confirm": 10.0})
+        self.assertIn("costs 4.0x more right after a commit", record["message"])
+        self.assertIn("commit id into the build's inputs", record["message"])
+        self.assertEqual([line.split()[1] for line in progress.splitlines() if line.endswith("started")],
+                         ["warm", "same", "moved", "confirm"])
 
     def test_a_check_that_reuses_a_pass_for_an_identical_tree_still_fails(self):
         # without a fresh probe file before each run, the reuse answers `same` and `moved` alike and hides the rebuild
-        cache = shlex.quote(str(self.marks / "passed"))
+        cache, cost = shlex.quote(str(self.marks / "passed")), shlex.quote(str(self.cost))
         key = "k=$(git ls-files -co --exclude-standard | while read -r f; do printf '%s ' \"$f\"; cat \"$f\"; done | cksum | cut -d' ' -f1)"
-        reuse = f'{key}; grep -qx "$k" {cache} 2>/dev/null && exit 0; {self.slower_when_head_moved()}; echo "$k" >> {cache}'
+        reuse = f'{key}; if grep -qx "$k" {cache} 2>/dev/null; then echo 1 > {cost}; exit 0; fi; {self.stamps_the_commit_id()}; echo "$k" >> {cache}'
 
-        result = self.check_cost(reuse, "--floor", "0.2")
+        record, _ = self.simulated(reuse)
 
-        self.assert_verdict(result, "FAIL", 1)
+        self.assertEqual(record["status"], "FAIL", record)
         self.assertEqual(len((self.marks / "passed").read_text().splitlines()), 4, "every run built a tree of its own")
 
-    def test_a_check_that_costs_the_same_after_a_commit_passes(self):
-        result = self.check_cost("sleep 0.2", "--floor", "0.3")
+    def test_a_check_that_costs_the_same_after_a_commit_passes_without_a_confirm_run(self):
+        record, progress = self.simulated(f"echo 10 > {shlex.quote(str(self.cost))}")
 
-        self.assert_verdict(result, "PASS", 0)
-        self.assertNotIn("confirm", result.stderr, "no confirm run when moved is not too slow")
+        self.assertEqual(record["status"], "PASS", record)
+        self.assertEqual(record["times"], {"warm": 10.0, "same": 10.0, "moved": 10.0})
+        self.assertNotIn("uncommitted", progress, "a clean source tree gets no warning")
+
+    def test_moved_slow_against_same_but_not_against_confirm_is_unknown(self):
+        counter, cost = shlex.quote(str(self.marks / "runs")), shlex.quote(str(self.cost))
+        drift = f'n=$(( $(cat {counter} 2>/dev/null || echo 0) + 1 )); echo "$n" > {counter}; case $n in 3) echo 40;; 4) echo 35;; *) echo 10;; esac > {cost}'
+
+        record, _ = self.simulated(drift)
+
+        self.assertEqual(record["status"], "UNKNOWN", record)
+        self.assertIn("load changed", record["message"])
 
     def test_a_run_that_exits_non_zero_is_unknown_and_names_the_run_and_the_log(self):
         counter = shlex.quote(str(self.marks / "runs"))
@@ -1044,18 +1079,53 @@ class CheckCostTests(ProjectFixture):
         result = self.check_cost(f'pwd >> {seen}; env | grep -E "^(GIT_|KITCHEN_REPO=)" >> {seen}; true', env_extra=hook_env)
 
         self.assert_verdict(result, "PASS", 0)
+        self.assertIn("uncommitted changes; they are not measured", result.stderr)
         self.assertEqual((snapshot(self.source), snapshot(decoy)), before)
         lines = (self.marks / "env").read_text().splitlines()
         self.assertEqual(len(lines), 3, f"warm, same and moved ran, and nothing else was printed: {lines}")
         self.assertTrue(all(Path(line).is_relative_to(self.home / "state" / "check-cost") for line in lines), lines)
         self.assertEqual(sorted(p.name for p in (self.home / "state" / "check-cost").iterdir()), ["logs"])
 
-    def test_the_verdict_is_a_function_of_the_three_numbers(self):
-        sys.path.insert(0, str(KITCHEN.parent.parent / "lib"))
+    def test_a_probe_name_the_source_tracks_as_a_symlink_is_unknown_and_writes_nothing_through_it(self):
+        precious = self.source / "precious.txt"
+        precious.write_bytes(b"keep me\n")
+        os.symlink(precious, self.source / ".kitchen-check-cost-1")
+        git(self.source, "add", ".")
+        git(self.source, "commit", "-q", "-m", "a tracked symlink")
+
+        result = self.check_cost("true")
+
+        self.assert_verdict(result, "UNKNOWN", 1)
+        self.assertIn(".kitchen-check-cost-1 already exists", result.stdout)
+        self.assertEqual(precious.read_bytes(), b"keep me\n")
+
+    def test_a_work_directory_that_cannot_be_removed_is_unknown_and_named(self):
+        runs = self.home / "state" / "check-cost"
         try:
-            from kitchen.checkcost import verdict
+            result = self.check_cost("[ -d locked ] || { mkdir locked && touch locked/f && chmod 555 locked; }")
+
+            self.assert_verdict(result, "UNKNOWN", 1)
+            left = [p for p in runs.iterdir() if p.name.startswith("run-")]
+            self.assertEqual(len(left), 1, result.stdout)
+            self.assertIn(f"the work directory {left[0]} could not be removed", result.stdout)
         finally:
-            sys.path.pop(0)
+            for locked in runs.glob("run-*/clone/locked"):
+                locked.chmod(0o755)
+
+    def test_a_state_directory_that_cannot_be_written_is_unknown_not_a_traceback(self):
+        state = self.home / "state"
+        state.mkdir()
+        state.chmod(0o555)
+        try:
+            result = self.check_cost("true")
+        finally:
+            state.chmod(0o755)
+
+        self.assert_verdict(result, "UNKNOWN", 1)
+        self.assertIn("setup problem", result.stdout)
+
+    def test_the_verdict_is_a_function_of_the_three_numbers(self):
+        verdict = load_checkcost().verdict
         cases = [
             ((10.0, 15.0, None), "PASS"),     # under the factor
             ((1.0, 4.0, None), "PASS"),       # 4x, but 3 s is under the floor
