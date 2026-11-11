@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .common import state_dir
+from .common import config_dir, state_dir
 
 RECORDS = {"daily-audit": "audit", "weekly-gardener": "gardener"}  # the job's record; the retro keeps only run logs
 
@@ -172,13 +172,42 @@ def systemd(h: Path) -> list[tuple[str, str]]:
         else:
             report.append(("WARN", f"{timer} is present but {state}: start it with "
                                    f"`systemctl --user enable --now {timer.name}`, or move it to the Trash if the job runs elsewhere"))
-    return report + [notification_server()]
+    return report + notifications()
 
 
 # Asked from a transient unit, so it reaches the session bus the timers get, not this shell's. Shows nothing on screen.
 NOTIFICATION_PROBE = ["systemd-run", "--user", "--wait", "--pipe", "--quiet", "busctl", "--user", "call",
                       "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                       "org.freedesktop.Notifications", "GetServerInformation"]
+
+
+NOTIFY_SETTING = re.compile(r"""^\s*(?:export\s+)?KITCHEN_NOTIFY=(["']?)([^"'\s#]*)\1\s*(?:#.*)?$""")
+
+
+def notify_setting(env: Path) -> str:
+    """KITCHEN_NOTIFY as a project's automation config sets it: its last literal assignment line, "" without one."""
+    value = ""
+    for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = NOTIFY_SETTING.match(line)
+        if match:
+            value = match.group(2)
+    return value
+
+
+def notifications() -> list[tuple[str, str]]:
+    """Projects whose config sets KITCHEN_NOTIFY=off are off on purpose (automation/README.md, Notifications); the
+    server is probed only while a configured project still notifies, or none is configured."""
+    folder = config_dir() / "automation"
+    settings = {env.stem: notify_setting(env) for env in sorted(folder.glob("*.env"))} if folder.is_dir() else {}
+    off = [name for name, value in settings.items() if value == "off"]
+    report = [("WARN", f"KITCHEN_NOTIFY in {name}.env is '{value[:40]}': only off (or unset) is valid, so its exception runs "
+                       f"record `not notified`") for name, value in settings.items() if value not in ("", "off")]
+    if off:
+        report.append(("INFO", f"notifications off by configuration (KITCHEN_NOTIFY=off) for {', '.join(off)}: exception runs "
+                               f"log one line and record no warning"))
+    if not settings or len(off) < len(settings):
+        report.append(notification_server())
+    return report
 
 
 def notification_server() -> tuple[str, str]:

@@ -131,6 +131,11 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.config = self.root / "config"  # never the real ~/.config/kitchen
+        (self.config / "automation").mkdir(parents=True)
+        patch = mock.patch.dict(os.environ, {"KITCHEN_CONFIG": str(self.config)})
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -141,8 +146,7 @@ class EnvironmentDoctorTests(unittest.TestCase):
         path.chmod(0o755)
 
     def test_missing_agent_clis_and_srt_are_reported(self):
-        config = self.root / "config"
-        (config / "automation").mkdir(parents=True)
+        config = self.config
         (config / "automation" / "shop.env").write_text("BRANCH=dev\n")
 
         with mock.patch.dict(os.environ, {"PATH": str(self.bin)}):
@@ -224,6 +228,27 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.assertEqual(args.read_text().split(), ["--user", "--wait", "--pipe", "--quiet", "busctl", "--user", "call",
                                                     "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                                                     "org.freedesktop.Notifications", "GetServerInformation"])
+
+    def test_notifications_off_by_configuration_are_info_and_the_bus_is_not_probed(self):
+        (self.config / "automation" / "shop.env").write_text('BRANCH=dev\nKITCHEN_NOTIFY="off"  # no desktop for this user\n')
+        probed = self.root / "probed"
+
+        report = self.linux_timer_report(f': > {probed}; echo "Call failed: The name is not activatable" >&2; exit 1')
+
+        self.assertEqual([m for level, m in report if level == "WARN"], [], report)
+        self.assertIn(("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs log one line "
+                               "and record no warning"), report)
+        self.assertFalse(probed.exists())
+
+    def test_a_notify_setting_that_is_not_off_is_flagged_and_the_bus_still_probed(self):
+        (self.config / "automation" / "shop.env").write_text("KITCHEN_NOTIFY=no\n")
+
+        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertEqual(len(warnings), 2, report)
+        self.assertIn("KITCHEN_NOTIFY in shop.env is 'no': only off (or unset) is valid", warnings[0])
+        self.assertIn("no notification server confirmed on the kitchen timers' session bus", warnings[1])
 
     def test_a_probe_that_cannot_run_is_a_warning_not_a_pass(self):
         report = self.linux_timer_report(None)

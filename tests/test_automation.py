@@ -219,6 +219,25 @@ class NightlyGuardTests(AutomationFixture):
         self.assertIn("kitchen nightly: shop red", sent[1][0])
         self.assertIn("kitchen nightly: shop incomplete", sent[2][0])
 
+    def test_notifications_off_by_configuration_attempt_nothing_and_record_no_warning(self):
+        # A timer user whose desktop belongs to another user has no notification server: notify-send fails as measured
+        # there, and every red run would record `not notified`.
+        self.fake("notify-send", 'echo "notify $*" >> "$CALLS"; echo "The name is not activatable" >&2; exit 1')
+        for name, setting, attempts, warnings in (("unset", "", 1, ["not notified: see the log"]),
+                                                  ("off", "KITCHEN_NOTIFY=off\n", 0, []),
+                                                  ("not off", "KITCHEN_NOTIFY=no\n", 0, ["not notified: see the log"])):
+            with self.subTest(name):
+                before = len(self.notifications())
+                self.configure(["bad|false"], extra=setting)
+
+                result = self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+
+                run = self.nightly()[-1]
+                self.assertEqual(run["status"], "red", result.stdout)
+                self.assertEqual(len(self.notifications()) - before, attempts, self.calls_log())
+                self.assertEqual(run["warnings"], warnings, result.stdout)
+                self.assertEqual("notifications off by configuration (KITCHEN_NOTIFY=off)" in result.stdout, name == "off")
+
     def test_green_run_records_metrics_and_cleanup(self):
         self.configure(["ok|true"], metrics="echo '{\\\"tests\\\": 3}'")
 
