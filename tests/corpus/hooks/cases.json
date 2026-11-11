@@ -2360,9 +2360,10 @@
     {
       "id": "variable-holds-the-command",
       "guard": "deny-unslotted-heavy",
-      "kind": "bypass",
+      "kind": "known-limit",
       "command": "CMD=\"dotnet build\"; $CMD",
-      "expect": "deny"
+      "expect": "allow",
+      "limit": "the parser does not record whether an expansion was quoted, so a variable that holds several words stays one word (`$CMD` is read like `\"$CMD\"`); splitting it would break quoted arguments and paths."
     },
     {
       "id": "dynamic-subcommand",
@@ -2454,6 +2455,81 @@
       "command": "python3 -c \"import subprocess; subprocess.run(['dotnet', 'build'])\"",
       "expect": "allow",
       "limit": "commands started from other languages are not parsed."
+    },
+    {
+      "id": "quoted-argument-is-one-word",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "dotnet 'build report.dll'",
+      "expect": "allow",
+      "review": "review round 1"
+    },
+    {
+      "id": "listed-quoted-word",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "npm run 'build docs'",
+      "expect": "deny",
+      "heavy_commands": [
+        "npm run 'build docs'"
+      ],
+      "review": "review round 1"
+    },
+    {
+      "id": "path-with-a-space",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "\"/opt/my tools/dotnet\" build",
+      "expect": "deny",
+      "review": "review round 1"
+    },
+    {
+      "id": "slotted-with-kitchen-listed",
+      "guard": "deny-unslotted-heavy",
+      "kind": "negative",
+      "command": "kitchen slot -- dotnet build",
+      "expect": "allow",
+      "heavy_commands": [
+        "kitchen",
+        "dotnet build"
+      ],
+      "review": "review round 1"
+    },
+    {
+      "id": "kitchen-listed-not-slotted",
+      "guard": "deny-unslotted-heavy",
+      "kind": "positive",
+      "command": "kitchen slot --report",
+      "expect": "deny",
+      "heavy_commands": [
+        "kitchen",
+        "dotnet build"
+      ],
+      "review": "review round 1"
+    },
+    {
+      "id": "time-format-option",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "/usr/bin/time -f %E dotnet build",
+      "expect": "deny",
+      "review": "review round 1"
+    },
+    {
+      "id": "nice-long-option",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "nice --adjustment 10 dotnet build",
+      "expect": "deny",
+      "review": "review round 1"
+    },
+    {
+      "id": "timeout-long-option",
+      "guard": "deny-unslotted-heavy",
+      "kind": "bypass",
+      "command": "timeout --signal TERM 600 dotnet build",
+      "expect": "deny",
+      "review": "review round 1"
     }
   ]
 }

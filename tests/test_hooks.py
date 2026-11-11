@@ -335,23 +335,27 @@ class UnslottedHeavyTests(HookFixture):
         self.assertEqual((inside.returncode, inside.stderr), (0, ""))
         self.assertEqual(empty.returncode, 2, empty.stderr)
 
-    def test_the_way_out_is_the_same_command_in_a_slot_or_installing_kitchen(self):
+    def test_the_way_out_says_where_the_slot_goes_and_rewrites_nothing(self):
         linked, bare = self.home / "linked-bin", self.home / "bare-bin"
         for folder in (linked, bare):
             folder.mkdir()
             (folder / "python3").symlink_to(sys.executable)
         (linked / "kitchen").write_text("#!/bin/sh\n")
         (linked / "kitchen").chmod(0o755)
-        command = 'cd src && FOO=1 nice dotnet build "My App.sln" -c Release'
-
-        found = self.guard(command, env={**self.env(), "PATH": str(linked)})
-        missing = self.guard(command, env={**self.env(), "PATH": str(bare)})
-
-        self.assertEqual(found.returncode, 2, found.stderr)
-        self.assertIn("Run it as `kitchen slot -- dotnet build 'My App.sln' -c Release`.", found.stderr)
-        self.assertEqual(missing.returncode, 2, missing.stderr)
-        self.assertIn("`kitchen` is not on the PATH: install or link it", missing.stderr)
-        self.assertNotIn("Run it as", missing.stderr)
+        put = "put `kitchen slot -- ` right before `dotnet build` and leave the rest of the command as it is"
+        # a directory, a variable, wrappers, arguments and a redirection: a rewritten command would drop some of them
+        for command in ('cd service && FOO=1 nice dotnet build "My App.sln" -c Release',
+                        "env -C src FOO=1 dotnet build \"My App.sln\" >build.log"):
+            found = self.guard(command, env={**self.env(), "PATH": str(linked)})
+            missing = self.guard(command, env={**self.env(), "PATH": str(bare)})
+            with self.subTest(command):
+                self.assertEqual(found.returncode, 2, found.stderr)
+                self.assertIn("P" + put[1:], found.stderr)
+                self.assertEqual(missing.returncode, 2, missing.stderr)
+                self.assertIn("`kitchen` is not on the PATH: install or link it", missing.stderr)
+                self.assertIn(put, missing.stderr)
+                for result in (found, missing):
+                    self.assertNotIn("My App.sln", result.stderr, "the message presents no rewritten command")
 
 
 class HookPayloadTests(HookFixture):

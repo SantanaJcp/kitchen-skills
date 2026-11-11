@@ -5,9 +5,10 @@
 The list is the project's `.kitchen/heavy-commands`: `heavy-commands` in the folder above this hook's own folder, which
 `kitchen guards` makes `<project>/.kitchen/`. One command prefix per line, in words as typed (`dotnet build`); `#` lines
 and blank lines are ignored. No file, or no entries: everything is allowed. A file that exists but cannot be read
-blocks. A simple command matches when its words begin with a listed prefix's words (the first word compared by its
-basename), after `VAR=x` prefixes and the wrappers shellparse peels (env, nice, time, timeout, nohup, sudo, xargs,
-find -exec, sh -c, eval). `kitchen slot -- ...` itself never matches: its command runs inside the slot. A non-empty
+blocks. A simple command matches when its shell words begin with a listed prefix's words (the first word compared by
+its basename), after `VAR=x` prefixes and the wrappers shellparse peels (env, nice, time, timeout, nohup, sudo, xargs,
+find -exec, sh -c, eval). A simple command that is `kitchen slot -- ...` is exempt before any matching: what follows
+`--` runs inside the slot. The message never rewrites the command: it says where `kitchen slot -- ` goes. A non-empty
 KITCHEN_SLOT in the hook's environment means the session already holds a slot, and allows everything.
 Principles: `encode-lessons` (a rule in a skill is forgotten after a compaction; a guard is not), `isolate` (the CPU is
 shared state: heavy commands queue for it), `no-fallbacks` (a list that cannot be read blocks)."""
@@ -44,14 +45,16 @@ def heavy_prefixes():
 
 
 def words(cmd):
-    """The command's words, None for one the hook cannot know; a value is split on spaces, as a variable that holds
-    `dotnet build` is when the shell runs it."""
-    out = []
-    for arg in cmd.argv:
-        out += [None] if arg.dynamic else (arg.value.split() or [""])
+    """The command's shell words as the parser gives them, None for one the hook cannot know; the first by basename."""
+    out = [None if arg.dynamic else arg.value for arg in cmd.argv]
     if out and out[0] is not None:
         out[0] = os.path.basename(out[0])
     return out
+
+
+def slotted(have):
+    """`kitchen slot -- ...` (kitchen by any path): the command after `--` already runs in a slot."""
+    return have[:1] == ["kitchen"] and have[1:3] == ["slot", "--"]
 
 
 def match(have, more_args, prefix):
@@ -69,35 +72,34 @@ def match(have, more_args, prefix):
     return "yes"
 
 
-def shown(cmd):
-    """The command as the agent can type it again: a first word that holds several (a variable such as CMD="dotnet build")
-    is shown split, as the shell runs it."""
-    first, rest = cmd.argv[0], cmd.argv[1:]
-    head = [first.value] if first.dynamic else [shlex.quote(word) for word in first.value.split()] or ["''"]
-    return " ".join(head + [arg.value if arg.dynamic else shlex.quote(arg.value) for arg in rest])
-
-
 def check(commands, prefixes):
     reasons = []
     linked = shutil.which("kitchen") is not None
     for cmd in commands:
         have = words(cmd)
+        if slotted(have):
+            continue
         found = [(how, prefix) for prefix in prefixes for how in [match(have, cmd.more_args, prefix)] if how]
         if not found:
             continue
         how, prefix = min(found, key=lambda pair: pair[0] != "yes")
-        what = f"`{shown(cmd)}`" + (" (with arguments from xargs or find -exec)" if cmd.more_args else "")
+        # the command's own first words, where the listed ones stand: that is where `kitchen slot -- ` goes
+        head = " ".join(arg.value if arg.dynamic else shlex.quote(arg.value) for arg in cmd.argv[:len(prefix)])
+        listed = " ".join(shlex.quote(word) for word in prefix)
         if how == "maybe":
-            lead = (f"{what} may be `{' '.join(prefix)}`, a heavy command in this project (.kitchen/heavy-commands): a word "
-                    "in it is a variable, a command output or comes from input, so the hook cannot tell.")
+            extra = " with arguments from xargs or find -exec" if cmd.more_args else ""
+            lead = (f"`{head}`{extra} may be `{listed}`, a heavy command in this project (.kitchen/heavy-commands): a word "
+                    "of it is a variable, a command output or comes from input, so the hook cannot tell.")
         else:
-            lead = f"{what} is a heavy command in this project (.kitchen/heavy-commands)."
-        slotted = f"kitchen slot -- {shown(cmd)}"
+            alias = "" if head == listed else f" (listed as `{listed}`)"
+            lead = f"`{head}`{alias} is a heavy command in this project (.kitchen/heavy-commands)."
+        put = (f"put `kitchen slot -- ` right before `{head}` and leave the rest of the command as it is "
+               f"(for example `FOO=1 nice kitchen slot -- {head} ...`).")
         if linked:
-            reasons.append(f"{lead} {WHY} Run it as `{slotted}`.")
+            reasons.append(f"{lead} {WHY} Put{put[3:]}")
         else:
-            reasons.append(f"{lead} {WHY} It runs as `{slotted}`, but `kitchen` is not on the PATH: install or link it "
-                           "(`bin/kitchen install` in the kitchen checkout, then `kitchen doctor`), then run that.")
+            reasons.append(f"{lead} {WHY} `kitchen` is not on the PATH: install or link it (`bin/kitchen install` in the "
+                           f"kitchen checkout, then `kitchen doctor`), then {put}")
     return reasons
 
 
