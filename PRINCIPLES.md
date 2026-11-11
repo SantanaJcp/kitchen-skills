@@ -16,7 +16,7 @@ Done means you saw the observable result: the app, the command output, the recor
   - [*Prove It Works*](principles/prove-it-works.md): after a task, before you say it is done, fixed or safe.
   - [*Test Behavior, Not Implementation*](principles/test-behavior-not-implementation.md): you write, change or keep a test.
   - [*Sequence Work into Verifiable Units*](principles/sequence-verifiable-units.md): multi-step work, and how you stack commits and pull requests.
-- **Enforced by:** the init playbook (every `bin/check` command run and seen to pass, the commit tier green twice and red on a planted defect in a file it runs); `kitchen integrate`; the nightly guard; the gardener reruns its verify steps before publishing; the `audit-verification` skill, and the daily audit that runs it only on a green guard and never ships a fix nobody drove live; the `formal-verification` skill, whose every property goes red on a named mirrored mutation before it counts; the Skeptic lens of `second-opinion`.
+- **Enforced by:** the init playbook (every `bin/check` command run and seen to pass, the commit tier green twice and red on a planted defect in a file it runs, and `kitchen check-cost` PASS); `kitchen integrate`; `kitchen check-cost` times the check in a clone, with HEAD unchanged and right after a commit; the nightly guard; the gardener reruns its verify steps before publishing; the `audit-verification` skill, and the daily audit that runs it only on a green guard and never ships a fix nobody drove live; the `formal-verification` skill, whose every property goes red on a named mirrored mutation before it counts; the Skeptic lens of `second-opinion`.
 
 ## 2. Unknown is never green (`truthful-state`)
 
@@ -26,7 +26,7 @@ Never invent counts, freshness, progress or success. A read that failed is `unkn
 - **When:** every report, every status line, every automation you write.
 - **Includes (pstack):**
   - [*Explain the Number*](principles/explain-the-number.md): before you measure, and before you trust, report or act on a number you measured.
-- **Enforced by:** `status` prints `unknown`, never `0` or `none`; the nightly records `incomplete` and is never green without steps; `integrate --recorded` reuses a PASS only on the same SHAs and check digest; `retro` prints its coverage line; `second-opinion` treats a missing review as a gap; `run-job` never exits 0 without a run and a record line or log of its own.
+- **Enforced by:** `status` prints `unknown`, never `0` or `none`; the nightly records `incomplete` and is never green without steps; `integrate --recorded` reuses a PASS only on the same SHAs and check digest; `check-cost` is UNKNOWN, never PASS, when a run fails or the machine's load changed between runs; `retro` prints its coverage line; `second-opinion` treats a missing review as a gap; `run-job` never exits 0 without a run and a record line or log of its own.
 
 ## 3. No fallbacks; fail loud (`no-fallbacks`)
 
@@ -111,7 +111,7 @@ Parallel work runs in separate worktrees or clones, one writer each. Shared stat
 - **Includes (pstack):**
   - [*Separate Before Serializing Shared State*](principles/separate-before-serializing-shared-state.md): concurrent actors might write the same file, branch, key or state.
   - [*Make Operations Idempotent*](principles/make-operations-idempotent.md): commands, installers and loops that run amid crashes and retries.
-- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector); the automation project lock; `run-job` starts a job in its own unit, never as a child of the agent that asked; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`; `deny-private-publish` blocks publishing text from a fixed path in a temp directory every local user shares.
+- **Enforced by:** `kitchen integrate` (disposable clone, exact SHA vector) and `kitchen check-cost` (a disposable clone that only reads the source); the automation project lock; `run-job` starts a job in its own unit, never as a child of the agent that asked; `install` and `kitchen guards` rerun byte-identical, and the guards run only in the project that carries them; the init playbook works in its own worktree; tests use a throwaway repo and `HOME` and drop `GIT_*`; `deny-private-publish` blocks publishing text from a fixed path in a temp directory every local user shares.
 
 ## 11. Another model checks the work, on a budget (`cross-review`)
 

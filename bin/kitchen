@@ -23,7 +23,7 @@ REPO = Path(os.environ.get("KITCHEN_REPO") or Path(__file__).resolve().parent.pa
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from kitchen import common, credentials, integrate, inventory, journal, status, transcripts  # noqa: E402
-from kitchen import checkplan, environment, legacy, models, principles  # noqa: E402
+from kitchen import checkcost, checkplan, environment, legacy, models, principles  # noqa: E402
 # Principles (`kitchen check`): `small-owned`, `doors`, `encode-lessons`. It caps a SKILL.md at MAX_SKILL_LINES lines,
 # keeps private data out of this public repo, and runs the lints and tests.
 MAX_SKILL_LINES = 150
@@ -38,6 +38,7 @@ EXAMPLES = """examples:
   kitchen check               everything, as integrate does
   kitchen status --since 7d   where every project stands
   kitchen integrate fix/a fix/b --base origin/dev
+  kitchen check-cost .        prove the check costs no more right after a commit
   kitchen init ../some-repo   print the instructions your agent follows to set a repo up
   kitchen guards .            put the kitchen's guards in this repo only
   kitchen principle explain-the-number   read one principle before you apply it
@@ -566,6 +567,12 @@ def cmd_integrate(args: argparse.Namespace) -> int:
     return 0 if record["status"] == "PASS" else 1
 
 
+def cmd_check_cost(args: argparse.Namespace) -> int:
+    record = checkcost.check_cost(Path(args.repo), args.ref, args.command, floor=args.floor)
+    print(checkcost.render(record))
+    return 0 if record["status"] == "PASS" else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="kitchen", description=__doc__, epilog=EXAMPLES,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -661,6 +668,14 @@ def main() -> int:
     integ.add_argument("--check", action="append", help="check command to run instead of the configured ones (repeatable)")
     integ.add_argument("--recorded", action="store_true", help="run nothing: PASS only if a recorded PASS matches the refs' current SHAs")
     integ.set_defaults(func=cmd_integrate)
+
+    cost = sub.add_parser("check-cost", help="in a disposable clone, prove the check costs no more right after a commit than with HEAD unchanged")
+    cost.add_argument("repo", nargs="?", default=".", help="source repository (default: current directory)")
+    cost.add_argument("--ref", default="HEAD", help="commit to check out in the clone (default: HEAD)")
+    cost.add_argument("--command", default=checkcost.DEFAULT_COMMAND, help=f"the check to time (default: {checkcost.DEFAULT_COMMAND})")
+    cost.add_argument("--floor", type=float, default=checkcost.FLOOR,
+                      help=f"seconds a slowdown must reach to count, whatever the ratio (default: {checkcost.FLOOR:g})")
+    cost.set_defaults(func=cmd_check_cost)
 
     princ = sub.add_parser("principle", help="print one principle's section or leaf, or with no name the index chef-mode carries")
     princ.add_argument("name", nargs="?", help="a principle id (`prove`) or a leaf name (`explain-the-number`)")

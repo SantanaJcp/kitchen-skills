@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import plistlib
+import shlex
 import subprocess
 import sys
 import unittest
@@ -958,6 +959,114 @@ class IntegrateTests(ProjectFixture):
 
                 self.assertEqual(result.returncode, 0, result.stdout)
                 self.assertEqual(self.records()[-1]["vector"][0], self.sha("main"))
+
+
+class CheckCostTests(ProjectFixture):
+    """`kitchen check-cost` times a project's check in a disposable clone: before and after HEAD moves."""
+
+    def setUp(self):
+        super().setUp()
+        self.source = self.make_project("shop")
+        self.marks = Path(self.tmp.name) / "marks"
+        self.marks.mkdir()
+
+    def check_cost(self, command, *args, env_extra=None):
+        return self.kitchen("check-cost", str(self.source), "--command", command, *args, env_extra=env_extra)
+
+    def slower_when_head_moved(self, seconds=0.4):
+        """A build that stamps the commit id: it rebuilds everything when HEAD differs from the one it last built."""
+        stamp = shlex.quote(str(self.marks / "last-head"))
+        return f'h=$(git rev-parse HEAD); [ "$(cat {stamp} 2>/dev/null)" = "$h" ] || sleep {seconds}; echo "$h" > {stamp}'
+
+    def assert_verdict(self, result, status, code):
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[-1].split()[0], status, result.stdout)
+
+    def test_a_check_slower_after_a_commit_fails_and_says_why(self):
+        result = self.check_cost(self.slower_when_head_moved(), "--floor", "0.2")
+
+        self.assert_verdict(result, "FAIL", 1)
+        self.assertIn("more right after a commit", result.stdout)
+        self.assertIn("commit id into the build's inputs", result.stdout)
+        self.assertIn("same HEAD again", result.stdout, "a FAIL needs the confirm run")
+        for name in ("warm", "same", "moved", "confirm"):
+            self.assertIn(f"check-cost: {name} started", result.stderr)
+            self.assertRegex(result.stderr, rf"check-cost: {name} done in \d+\.\d s")
+
+    def test_a_check_that_reuses_a_pass_for_an_identical_tree_still_fails(self):
+        # without a fresh probe file before each run, the reuse answers `same` and `moved` alike and hides the rebuild
+        cache = shlex.quote(str(self.marks / "passed"))
+        key = "k=$(git ls-files -co --exclude-standard | while read -r f; do printf '%s ' \"$f\"; cat \"$f\"; done | cksum | cut -d' ' -f1)"
+        reuse = f'{key}; grep -qx "$k" {cache} 2>/dev/null && exit 0; {self.slower_when_head_moved()}; echo "$k" >> {cache}'
+
+        result = self.check_cost(reuse, "--floor", "0.2")
+
+        self.assert_verdict(result, "FAIL", 1)
+        self.assertEqual(len((self.marks / "passed").read_text().splitlines()), 4, "every run built a tree of its own")
+
+    def test_a_check_that_costs_the_same_after_a_commit_passes(self):
+        result = self.check_cost("sleep 0.2", "--floor", "0.3")
+
+        self.assert_verdict(result, "PASS", 0)
+        self.assertNotIn("confirm", result.stderr, "no confirm run when moved is not too slow")
+
+    def test_a_run_that_exits_non_zero_is_unknown_and_names_the_run_and_the_log(self):
+        counter = shlex.quote(str(self.marks / "runs"))
+        failing_third = f'n=$(( $(cat {counter} 2>/dev/null || echo 0) + 1 )); echo "$n" > {counter}; echo "run $n"; [ "$n" -ne 3 ] || exit 3'
+
+        result = self.check_cost(failing_third)
+
+        self.assert_verdict(result, "UNKNOWN", 1)
+        self.assertIn("the moved run of", result.stdout)
+        self.assertIn("exited 3", result.stdout)
+        log = Path(result.stdout.rsplit("(log: ", 1)[1].rstrip(")\n"))
+        self.assertTrue(log.is_file(), result.stdout)
+        self.assertIn("run 3", log.read_text())
+        self.assertTrue(log.is_relative_to(self.home / "state" / "check-cost" / "logs"), log)
+
+    def test_a_ref_that_does_not_resolve_is_unknown(self):
+        result = self.kitchen("check-cost", str(self.source), "--ref", "no-such-branch", "--command", "true")
+
+        self.assert_verdict(result, "UNKNOWN", 1)
+        self.assertIn("cannot resolve 'no-such-branch'", result.stdout)
+
+    def test_the_source_is_untouched_nothing_inherits_git_variables_and_the_work_directory_is_gone(self):
+        (self.source / "untracked.txt").write_text("mine\n")
+        decoy = self.make_project("decoy")
+        hook_env = {"GIT_DIR": str(decoy / ".git"), "GIT_INDEX_FILE": str(decoy / ".git" / "index"), "KITCHEN_REPO": str(decoy)}
+
+        def snapshot(repo):
+            return [subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True).stdout
+                    for args in (("rev-parse", "HEAD"), ("for-each-ref",), ("status", "--porcelain", "--untracked-files=all"))]
+        before = snapshot(self.source), snapshot(decoy)
+        seen = shlex.quote(str(self.marks / "env"))
+
+        result = self.check_cost(f'pwd >> {seen}; env | grep -E "^(GIT_|KITCHEN_REPO=)" >> {seen}; true', env_extra=hook_env)
+
+        self.assert_verdict(result, "PASS", 0)
+        self.assertEqual((snapshot(self.source), snapshot(decoy)), before)
+        lines = (self.marks / "env").read_text().splitlines()
+        self.assertEqual(len(lines), 3, f"warm, same and moved ran, and nothing else was printed: {lines}")
+        self.assertTrue(all(Path(line).is_relative_to(self.home / "state" / "check-cost") for line in lines), lines)
+        self.assertEqual(sorted(p.name for p in (self.home / "state" / "check-cost").iterdir()), ["logs"])
+
+    def test_the_verdict_is_a_function_of_the_three_numbers(self):
+        sys.path.insert(0, str(KITCHEN.parent.parent / "lib"))
+        try:
+            from kitchen.checkcost import verdict
+        finally:
+            sys.path.pop(0)
+        cases = [
+            ((10.0, 15.0, None), "PASS"),     # under the factor
+            ((1.0, 4.0, None), "PASS"),       # 4x, but 3 s is under the floor
+            ((10.0, 40.0, 11.0), "FAIL"),     # slow against same and against confirm
+            ((10.0, 40.0, 35.0), "UNKNOWN"),  # slow against same only: the load changed
+        ]
+        for (same, moved, confirm), status in cases:
+            with self.subTest(same=same, moved=moved, confirm=confirm):
+                self.assertEqual(verdict(same, moved, confirm)[0], status)
+        self.assertIn("costs 3.6x more right after a commit", verdict(10.0, 40.0, 11.0)[1])
+        self.assertIn("load changed", verdict(10.0, 40.0, 35.0)[1])
 
 
 class ModelsTests(KitchenFixture):
