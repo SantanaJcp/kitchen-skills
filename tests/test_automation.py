@@ -221,8 +221,9 @@ class NightlyGuardTests(AutomationFixture):
 
     def test_notifications_off_by_configuration_attempt_nothing_and_record_no_warning(self):
         # A timer user whose desktop belongs to another user has no notification server: notify-send fails as measured
-        # there, and every red run would record `not notified`.
-        self.fake("notify-send", 'echo "notify $*" >> "$CALLS"; echo "The name is not activatable" >&2; exit 1')
+        # there, and every red run would record `not notified`. Both notifiers fail, so the attempt fails on macOS too.
+        for notifier in ("osascript", "notify-send"):
+            self.fake(notifier, 'echo "notify $*" >> "$CALLS"; echo "The name is not activatable" >&2; exit 1')
         for name, setting, attempts, warnings in (("unset", "", 1, ["not notified: see the log"]),
                                                   ("off", "KITCHEN_NOTIFY=off\n", 0, []),
                                                   ("not off", "KITCHEN_NOTIFY=no\n", 0, ["not notified: see the log"]),
