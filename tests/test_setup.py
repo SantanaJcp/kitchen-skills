@@ -311,6 +311,70 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.assertIn(("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs log one line "
                                "and record no warning"), report)
 
+    # Every shape a real config holds (invented words): quoted and bare values, empty and one-line arrays, and arrays over
+    # several lines whose quoted elements hold shell text, with comments, escaped quotes and a `)` that ends a word line.
+    ARRAYS = textwrap.dedent("""\
+        FLORP_URL="git@example.invalid:owner/florp.git"  # where it lives
+        FLORP_BRANCH=dev
+        FLORP_NAME='Florp tools'
+        FLORP_EMPTY=()
+        FLORP_ONE_LINE=("alpha" "beta" "gamma")
+        FLORP_STEPS=(
+          "build|make build && make check"
+          # a comment line inside the array
+          "say|echo \\"quux; frob\\" | wc -l"
+          "tests|make test $WUMBLE"   # trailing comment
+        )
+        FLORP_WORDS=(snork blip
+          zazzle KITCHEN_NOTIFYING
+          wimble)
+        FLORP_GUARD=(prove control)
+        """)
+
+    def assert_unknown(self, report):
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertIn("KITCHEN_NOTIFY in shop.env is unknown", warnings[0], report)
+        self.assertIn("no notification server confirmed", warnings[1])  # unknown is not off: the bus is probed
+        self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
+
+    def test_a_file_with_multi_line_arrays_and_a_plain_assignment_reads_off(self):
+        (self.config / "automation" / "shop.env").write_text(self.ARRAYS + "KITCHEN_NOTIFY=off\n")
+        probed = self.root / "probed"
+
+        report = self.linux_timer_report(f': > {probed}; exit 1')
+
+        self.assertEqual([m for level, m in report if level == "WARN"], [], report)
+        self.assertIn(("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs log one line "
+                               "and record no warning"), report)
+        self.assertFalse(probed.exists())
+
+    def test_the_setting_named_only_inside_a_multi_line_array_is_an_element_not_the_setting(self):
+        # Bash makes "KITCHEN_NOTIFY=off" an element of FLORP_STEPS; the setting stays unset, so the bus is probed.
+        (self.config / "automation" / "shop.env").write_text('FLORP_STEPS=(\n  "a|true"\n  KITCHEN_NOTIFY=off\n)\n')
+
+        report = self.linux_timer_report('echo \'ssss "mako" "emersion" "1.9" "1.2"\'')
+
+        self.assertEqual(report, [("INFO", "timer kitchen-shop-nightly-guard.timer active"),
+                                  ("INFO", "notification server mako answers on the kitchen timers' session bus")])
+
+    def test_a_multi_line_array_does_not_hide_a_condition_after_it(self):
+        (self.config / "automation" / "shop.env").write_text(self.ARRAYS + "if false; then\nKITCHEN_NOTIFY=off\nfi\n")
+
+        self.assert_unknown(self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1'))
+
+    def test_an_array_the_reader_cannot_close_line_by_line_is_unknown(self):
+        for name, text in (("never closed", "KITCHEN_NOTIFY=off\nFLORP=(\n  snork\n"),
+                           ("a quote over two lines", 'KITCHEN_NOTIFY=off\nFLORP=(\n  "snork\n  blip"\n)\n'),
+                           ("a command substitution", 'KITCHEN_NOTIFY=off\nFLORP=(\n  "$(frob)"\n)\n'),
+                           ("a backtick", 'KITCHEN_NOTIFY=off\nFLORP=(\n  "`frob`"\n)\n'),
+                           ("a semicolon outside quotes", "KITCHEN_NOTIFY=off\nFLORP=(\n  snork; blip\n)\n"),
+                           ("a line continuation", "KITCHEN_NOTIFY=off\nFLORP=(\n  snork \\\n)\n"),
+                           ("an expansion that assigns", 'FLORP=(\n  "${KITCHEN_NOTIFY:=off}"\n)\n')):
+            with self.subTest(name):
+                (self.config / "automation" / "shop.env").write_text(text)
+
+                self.assert_unknown(self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1'))
+
     def test_a_file_that_never_names_the_setting_leaves_it_unset_whatever_its_shape(self):
         # The documented config writes its verify steps as a multi-line array; unset still probes the bus.
         (self.config / "automation" / "shop.env").write_text('GARDENER_VERIFY_STEPS=(\n  "build|make build"\n)\n')

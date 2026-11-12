@@ -185,34 +185,45 @@ NOTIFY_ASSIGNMENT = re.compile(r"^(?:export[ \t]+)?KITCHEN_NOTIFY=(.*)$")
 ASSIGNMENT = re.compile(r"^(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=(.*)$")
 
 
-def plain_assignment(line: str) -> bool:
-    """Whether a line is one plain `[export ]NAME=<value>` at the start of the line: one word that may quote and expand $NAME,
-    or a one-line array, then nothing or a comment. Nothing outside single quotes may end the command, start another or run
-    one (; & | < > ` $( ), so the line can hold no condition, block or second command."""
-    match = ASSIGNMENT.match(line)
-    if not match:
-        return False
-    text, index, quote = match.group(1), 0, ""
-    array = text.startswith("(")  # its words may be separated by blanks up to its `)`
-    while index < len(text):
-        char = text[index]
+def plain_line(line: str, array: bool) -> str | None:
+    """How one line of a config Bash sources reads when it is plain: "" when it ends outside an array, "array" when it
+    leaves a multi-line array open, None when it is not plain. Outside an array the line is one `[export ]NAME=<value>` at
+    the start of the line: one word that may quote and expand $NAME, then nothing or a comment; or `NAME=(` with words that
+    open an array. Inside an array (<array>, from the line before) it holds bare words, quoted strings, a comment that
+    starts the line or follows a blank, and maybe the closing `)`, then nothing or a comment. Nothing outside single quotes
+    may run a command (` $( ), nothing outside quotes may end one or start another (; & | < >), and a quote or a word may
+    not continue on the next line, so no line can hold a condition, block or second command."""
+    if not array:
+        match = ASSIGNMENT.match(line)
+        if not match:
+            return None
+        line = match.group(1)
+        array = line.startswith("(")
+        line = line[1:] if array else line
+    index, quote = 0, ""
+    while index < len(line):
+        char = line[index]
         if quote == "'":
             quote = "" if char == "'" else quote
         elif char == "\\":
-            if index + 1 >= len(text):
-                return False  # a line continuation: Bash joins the next line to this word, so that line assigns nothing
+            if index + 1 >= len(line):
+                return None  # a line continuation: Bash joins the next line to this word
             index += 1  # the next character is literal
-        elif char == "`" or text.startswith("$(", index) or (not quote and char in ";&|<>"):
-            return False
-        elif char in " \t" and not quote and not array:
-            rest = text[index:].strip()  # the word ends: then nothing, or a comment; never a command it prefixes
-            return not rest or rest.startswith("#")
-        elif char == ")" and not quote:
-            array = False
-        elif char in "'\"" and quote in ("", char):
-            quote = "" if quote else char
+        elif char == "`" or line.startswith("$(", index) or (not quote and char in ";&|<>("):
+            return None
+        elif quote:
+            quote = "" if char == '"' else quote
+        elif char in "'\"":
+            quote = char
+        elif array and char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return "array"  # a comment inside the array; it goes on
+        elif (char in " \t" and not array) or (char == ")" and array):
+            rest = line[index + 1:].strip()  # the word or the array ends: then nothing, or a comment
+            return "" if not rest or rest.startswith("#") else None
+        elif char == ")":
+            return None
         index += 1
-    return not quote
+    return None if quote else ("array" if array else "")
 
 
 def shell_literal(text: str) -> str | None:
@@ -240,17 +251,23 @@ def shell_literal(text: str) -> str | None:
 
 
 def notify_setting(env: Path) -> str | None:
-    """KITCHEN_NOTIFY as a project's config sets it, "" when no line names it, None when doctor cannot be sure. The jobs
-    source the file with Bash; doctor only reads it, so it trusts a file that names KITCHEN_NOTIFY only when every
-    non-blank, non-comment line is a plain assignment (plain_assignment): a condition or block around an unindented
-    line would decide whether Bash runs it. Each line that names it must be `[export ]KITCHEN_NOTIFY=<literal>`, and the
-    last one wins. Anything else (an unset, a condition, an expansion, a multi-line array) is unknown."""
-    value, plain, named = "", True, False
+    """KITCHEN_NOTIFY as a project's config sets it, "" when no assignment names it, None when doctor cannot be sure. The
+    jobs source the file with Bash; doctor only reads it, so it trusts a file that assigns KITCHEN_NOTIFY only when every
+    line is plain (plain_line): a condition or block around an unindented line would decide whether Bash runs it. Each
+    assignment that names it must be `[export ]KITCHEN_NOTIFY=<literal>`, and the last one wins. Inside a multi-line array
+    the name is an element's text, not an assignment, unless the line expands something (`${KITCHEN_NOTIFY:=…}` would
+    assign it): that is unknown, as are an unset, a condition and an expansion."""
+    value, plain, named, array = "", True, False, False
     for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        plain = plain and plain_assignment(line)
+        inside, state = array, plain_line(line, array)
+        plain, array = plain and state is not None, state == "array"
         if "KITCHEN_NOTIFY" not in line:
+            continue
+        if inside:
+            if "$" in line:
+                return None
             continue
         named = True
         match = NOTIFY_ASSIGNMENT.match(line)
@@ -258,7 +275,7 @@ def notify_setting(env: Path) -> str | None:
         if literal is None:
             return None
         value = literal
-    return value if plain or not named else None
+    return value if (plain and not array) or not named else None
 
 
 def notifications(probe: bool = True) -> list[tuple[str, str]]:
