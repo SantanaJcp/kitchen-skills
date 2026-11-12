@@ -285,6 +285,16 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.assertIn("no notification server confirmed", warnings[1])  # the bus is still probed
         self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
 
+    def test_a_line_continuation_before_the_assignment_makes_the_setting_unknown(self):
+        # Bash joins the two lines: X gets "prefixKITCHEN_NOTIFY=off" and KITCHEN_NOTIFY is never assigned.
+        (self.config / "automation" / "shop.env").write_text("X=prefix\\\nKITCHEN_NOTIFY=off\n")
+
+        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertIn("KITCHEN_NOTIFY in shop.env is unknown", warnings[0])
+        self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
+
     def test_a_file_of_plain_assignments_reads_off(self):
         (self.config / "automation" / "shop.env").write_text(textwrap.dedent("""\
             # shop

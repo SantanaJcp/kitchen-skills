@@ -199,6 +199,8 @@ def plain_assignment(line: str) -> bool:
         if quote == "'":
             quote = "" if char == "'" else quote
         elif char == "\\":
+            if index + 1 >= len(text):
+                return False  # a line continuation: Bash joins the next line to this word, so that line assigns nothing
             index += 1  # the next character is literal
         elif char == "`" or text.startswith("$(", index) or (not quote and char in ";&|<>"):
             return False
