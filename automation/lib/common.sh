@@ -57,6 +57,21 @@ NET_TIMEOUT="${NET_TIMEOUT_SECONDS:-600}"
 WARNINGS=()
 warn() { WARNINGS+=("$1"); log "WARNING: $1"; }
 
+# What this run got for KITCHEN_NOTIFY once Bash sourced the config, for `kitchen doctor`, which never reads the config's
+# text: one word in $STATE_DIR/notify-setting (off, unset for unset or empty, invalid for anything else; never the
+# value), replaced atomically. A record that cannot be written is a warning, never the end of the run.
+record_notify_setting() {
+  local word tmp=""
+  case "${KITCHEN_NOTIFY:-}" in "") word=unset ;; off) word=off ;; *) word=invalid ;; esac
+  if tmp="$(mktemp "$STATE_DIR/.notify-setting.XXXXXX" 2>/dev/null)" && printf '%s\n' "$word" > "$tmp" &&
+    mv -f "$tmp" "$STATE_DIR/notify-setting" 2>/dev/null && [ -f "$STATE_DIR/notify-setting" ]; then
+    return 0
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp"
+  warn "could not record the notify setting in $STATE_DIR/notify-setting; kitchen doctor reports it unknown"
+}
+record_notify_setting
+
 # Secrets out of anything that leaves the machine (stdin to stdout).
 redact() { python3 "$KITCHEN_AUTOMATION/lib/redact.py"; }
 
