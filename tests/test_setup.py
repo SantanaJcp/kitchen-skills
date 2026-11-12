@@ -133,7 +133,8 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.bin.mkdir()
         self.config = self.root / "config"  # never the real ~/.config/kitchen
         (self.config / "automation").mkdir(parents=True)
-        patch = mock.patch.dict(os.environ, {"KITCHEN_CONFIG": str(self.config)})
+        self.state = self.root / "state"  # never the real ~/.local/state/kitchen
+        patch = mock.patch.dict(os.environ, {"KITCHEN_CONFIG": str(self.config), "KITCHEN_STATE": str(self.state)})
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -229,99 +230,80 @@ class EnvironmentDoctorTests(unittest.TestCase):
                                                     "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                                                     "org.freedesktop.Notifications", "GetServerInformation"])
 
-    def test_notifications_off_by_configuration_are_info_and_the_bus_is_not_probed(self):
-        (self.config / "automation" / "shop.env").write_text('BRANCH=dev\nKITCHEN_NOTIFY="off"  # no desktop for this user\n')
+    CONFIGURED = 1_800_000_000  # the config's mtime; a record one minute later, at 2027-01-15T08:01:00Z (date -u -d @...), is fresh
+
+    def recorded(self, project, word, after=60):
+        """A config for <project>, and the notify-setting its last job run left <after> seconds later (None: no run)."""
+        env = self.config / "automation" / f"{project}.env"
+        env.write_text("BRANCH=dev\n")
+        os.utime(env, (self.CONFIGURED, self.CONFIGURED))
+        if word is not None:
+            record = self.state / "automation" / project / "notify-setting"
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_text(word)
+            os.utime(record, (self.CONFIGURED + after, self.CONFIGURED + after))
+
+    def probed_report(self):
         probed = self.root / "probed"
-
         report = self.linux_timer_report(f': > {probed}; echo "Call failed: The name is not activatable" >&2; exit 1')
+        return report, probed.exists()
 
-        self.assertEqual([m for level, m in report if level == "WARN"], [], report)
-        self.assertIn(("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs log one line "
-                               "and record no warning"), report)
-        self.assertFalse(probed.exists())
-
-    def test_a_notify_setting_that_is_not_off_is_flagged_and_the_bus_still_probed(self):
-        (self.config / "automation" / "shop.env").write_text("KITCHEN_NOTIFY=no\n")
-
-        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
-
+    def assert_unknown(self, report, probed, reason):
         warnings = [m for level, m in report if level == "WARN"]
-        self.assertEqual(len(warnings), 2, report)
-        self.assertIn("KITCHEN_NOTIFY in shop.env is 'no': only off (or unset) is valid", warnings[0])
-        self.assertIn("no notification server confirmed on the kitchen timers' session bus", warnings[1])
+        self.assertEqual(warnings[0], f"KITCHEN_NOTIFY for shop is unknown: {reason}; its next job run records it")
+        self.assertIn("no notification server confirmed", warnings[1])  # unknown is not off: the bus is probed
+        self.assertTrue(probed)
 
-    def test_a_hash_inside_the_value_is_part_of_it_as_bash_reads_it(self):
-        (self.config / "automation" / "shop.env").write_text("KITCHEN_NOTIFY=off#typo\n")
+    def test_no_record_is_unknown_and_the_bus_is_probed(self):
+        self.recorded("shop", None)
 
-        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+        self.assert_unknown(*self.probed_report(), "no job of this project has run since the kitchen records the setting")
 
-        warnings = [m for level, m in report if level == "WARN"]
-        self.assertIn("KITCHEN_NOTIFY in shop.env is 'off#typo': only off (or unset) is valid", warnings[0])
-        self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
+    def test_a_record_older_than_the_config_is_unknown_and_the_bus_is_probed(self):
+        self.recorded("shop", "off", after=-60)
 
-    def test_a_notify_setting_doctor_cannot_read_for_sure_is_unknown_not_off(self):
-        for name, text in (("unset later", "KITCHEN_NOTIFY=off\nunset KITCHEN_NOTIFY\n"),
-                           ("conditional", '[ -n "$DESKTOP" ] || KITCHEN_NOTIFY=off\n'),
-                           ("inside a block", "if true; then\n  KITCHEN_NOTIFY=off\nfi\n"),
-                           ("expanded", 'KITCHEN_NOTIFY="$MODE"\n')):
-            with self.subTest(name):
-                (self.config / "automation" / "shop.env").write_text(text)
+        self.assert_unknown(*self.probed_report(), "the config changed after the last run recorded it")
 
-                report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+    def test_a_record_that_is_not_one_of_the_three_words_is_unknown(self):
+        self.recorded("shop", "of\n")
+        record = self.state / "automation" / "shop" / "notify-setting"
 
-                warnings = [m for level, m in report if level == "WARN"]
-                self.assertIn("KITCHEN_NOTIFY in shop.env is unknown", warnings[0])
-                self.assertIn("no notification server confirmed", warnings[1])  # unknown is not off: the bus is probed
-                self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
+        self.assert_unknown(*self.probed_report(), f"{record} holds neither off, unset nor invalid")
 
-    def test_a_condition_around_an_unindented_assignment_makes_the_setting_unknown(self):
-        # Bash never runs the middle line; a reader of single lines would see KITCHEN_NOTIFY=off.
-        (self.config / "automation" / "shop.env").write_text("BRANCH=dev\nif false; then\nKITCHEN_NOTIFY=off\nfi\n")
+    def test_a_fresh_off_for_every_project_is_info_with_its_time_and_the_bus_is_not_probed(self):
+        self.recorded("shop", "off\n")
+        self.recorded("zorp", "off\n")
 
-        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
-
-        warnings = [m for level, m in report if level == "WARN"]
-        self.assertIn("KITCHEN_NOTIFY in shop.env is unknown", warnings[0])
-        self.assertIn("no notification server confirmed", warnings[1])  # the bus is still probed
-        self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
-
-    def test_a_line_continuation_before_the_assignment_makes_the_setting_unknown(self):
-        # Bash joins the two lines: X gets "prefixKITCHEN_NOTIFY=off" and KITCHEN_NOTIFY is never assigned.
-        (self.config / "automation" / "shop.env").write_text("X=prefix\\\nKITCHEN_NOTIFY=off\n")
-
-        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
-
-        warnings = [m for level, m in report if level == "WARN"]
-        self.assertIn("KITCHEN_NOTIFY in shop.env is unknown", warnings[0])
-        self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
-
-    def test_a_file_of_plain_assignments_reads_off(self):
-        (self.config / "automation" / "shop.env").write_text(textwrap.dedent("""\
-            # shop
-            REPO_URL="git@example.invalid:owner/shop.git"
-            export EXTRA_PATH="$HOME/bin"  # tools
-            GARDENER_VERIFY_STEPS=("build|make build" "tests|make test")
-
-            KITCHEN_NOTIFY=off
-            """))
-
-        report = self.linux_timer_report("exit 1")
-
-        self.assertEqual([m for level, m in report if level == "WARN"], [], report)
-        self.assertIn(("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs log one line "
-                               "and record no warning"), report)
-
-    def test_a_file_that_never_names_the_setting_leaves_it_unset_whatever_its_shape(self):
-        # The documented config writes its verify steps as a multi-line array; unset still probes the bus.
-        (self.config / "automation" / "shop.env").write_text('GARDENER_VERIFY_STEPS=(\n  "build|make build"\n)\n')
-
-        report = self.linux_timer_report('echo \'ssss "mako" "emersion" "1.9" "1.2"\'')
+        report, probed = self.probed_report()
 
         self.assertEqual(report, [("INFO", "timer kitchen-shop-nightly-guard.timer active"),
-                                  ("INFO", "notification server mako answers on the kitchen timers' session bus")])
+                                  ("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off, as the last run recorded it) "
+                                           "for shop (recorded 2027-01-15T08:01:00Z), zorp (recorded 2027-01-15T08:01:00Z): "
+                                           "exception runs log one line and record no warning")])
+        self.assertFalse(probed)
 
-    def mac_schedule_report(self, env_text):
-        (self.config / "automation" / "shop.env").write_text(env_text)
+    def test_one_project_that_may_notify_keeps_the_probe(self):
+        self.recorded("shop", "off\n")
+        self.recorded("zorp", "unset\n")
+
+        report, probed = self.probed_report()
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertEqual(len(warnings), 1, report)
+        self.assertIn("no notification server confirmed", warnings[0])
+        self.assertTrue(probed)
+
+    def test_an_invalid_record_is_the_config_error(self):
+        self.recorded("shop", "invalid\n")
+
+        report, probed = self.probed_report()
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertEqual(warnings[0], "KITCHEN_NOTIFY in shop.env is neither off nor unset, as its last run recorded at "
+                                      "2027-01-15T08:01:00Z: only off (or unset) is valid, so its exception runs record `not notified`")
+        self.assertTrue(probed)
+
+    def mac_schedule_report(self):
         agents = self.root / "Library" / "LaunchAgents"
         agents.mkdir(parents=True, exist_ok=True)
         label = "com.kitchen.shop.weekly-gardener"
@@ -334,19 +316,21 @@ class EnvironmentDoctorTests(unittest.TestCase):
         self.assertFalse(probed.exists())  # the bus probe is Linux's
         return report
 
-    def test_on_macos_notifications_off_by_configuration_are_info(self):
-        report = self.mac_schedule_report("KITCHEN_NOTIFY=off\n")
+    def test_on_macos_the_record_is_read_the_same_way_and_nothing_is_probed(self):
+        loaded = ("INFO", "schedule com.kitchen.shop.weekly-gardener loaded")
+        for word, expected in (("off", ("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off, as the last run "
+                                                "recorded it) for shop (recorded 2027-01-15T08:01:00Z): exception runs log "
+                                                "one line and record no warning")),
+                               ("invalid", ("WARN", "KITCHEN_NOTIFY in shop.env is neither off nor unset, as its last run "
+                                                    "recorded at 2027-01-15T08:01:00Z: only off (or unset) is valid, so its "
+                                                    "exception runs record `not notified`")),
+                               (None, ("WARN", "KITCHEN_NOTIFY for shop is unknown: no job of this project has run since the "
+                                               "kitchen records the setting; its next job run records it"))):
+            with self.subTest(word):
+                (self.state / "automation" / "shop" / "notify-setting").unlink(missing_ok=True)
+                self.recorded("shop", word)
 
-        self.assertEqual(report, [("INFO", "schedule com.kitchen.shop.weekly-gardener loaded"),
-                                  ("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs "
-                                           "log one line and record no warning")])
-
-    def test_on_macos_a_notify_setting_that_is_not_off_is_flagged(self):
-        report = self.mac_schedule_report("KITCHEN_NOTIFY=of\n")
-
-        warnings = [m for level, m in report if level == "WARN"]
-        self.assertEqual(len(warnings), 1, report)
-        self.assertIn("KITCHEN_NOTIFY in shop.env is 'of': only off (or unset) is valid", warnings[0])
+                self.assertEqual(self.mac_schedule_report(), [loaded, expected])
 
     def test_a_probe_that_cannot_run_is_a_warning_not_a_pass(self):
         report = self.linux_timer_report(None)

@@ -224,11 +224,12 @@ class NightlyGuardTests(AutomationFixture):
         # there, and every red run would record `not notified`. Both notifiers fail, so the attempt fails on macOS too.
         for notifier in ("osascript", "notify-send"):
             self.fake(notifier, 'echo "notify $*" >> "$CALLS"; echo "The name is not activatable" >&2; exit 1')
-        for name, setting, attempts, warnings in (("unset", "", 1, ["not notified: see the log"]),
-                                                  ("off", "KITCHEN_NOTIFY=off\n", 0, []),
-                                                  ("not off", "KITCHEN_NOTIFY=no\n", 0, ["not notified: see the log"]),
-                                                  ("a # inside the word", "KITCHEN_NOTIFY=off#typo\n", 0,
-                                                   ["not notified: see the log"])):
+        for name, setting, attempts, warnings, word in (("unset", "", 1, ["not notified: see the log"], "unset"),
+                                                        ("off", "KITCHEN_NOTIFY=off\n", 0, [], "off"),
+                                                        ("not off", "KITCHEN_NOTIFY=no\n", 0, ["not notified: see the log"],
+                                                         "invalid"),
+                                                        ("a # inside the word", "KITCHEN_NOTIFY=off#typo\n", 0,
+                                                         ["not notified: see the log"], "invalid")):
             with self.subTest(name):
                 before = len(self.notifications())
                 self.configure(["bad|false"], extra=setting)
@@ -240,6 +241,39 @@ class NightlyGuardTests(AutomationFixture):
                 self.assertEqual(len(self.notifications()) - before, attempts, self.calls_log())
                 self.assertEqual(run["warnings"], warnings, result.stdout)
                 self.assertEqual("notifications off by configuration (KITCHEN_NOTIFY=off)" in result.stdout, name == "off")
+                self.assertEqual(self.notify_record(), word + "\n")  # what kitchen doctor reports, never the value
+
+    def notify_record(self):
+        return (self.state / "automation" / "shop" / "notify-setting").read_text()
+
+    def test_the_record_holds_what_bash_assigned_where_a_reader_of_the_text_would_see_off(self):
+        # Each shape made a Python reader of the config say off while Bash assigned something else (measured on real
+        # Bash): the record comes from Bash after it sourced the file, so doctor follows Bash by construction.
+        for name, setting, word in (("an arithmetic subscript assigns 1", "KITCHEN_NOTIFY=off\nFLORP=([KITCHEN_NOTIFY=1]=x)\n",
+                                     "invalid"),
+                                    ("a CRLF line ends in a carriage return", "KITCHEN_NOTIFY=off\r\n", "invalid"),
+                                    ("an ANSI-C quote swallows the line", "FLORP=$'x\\'\nKITCHEN_NOTIFY=off\n'\n", "unset")):
+            with self.subTest(name):
+                self.configure(["ok|true"], extra=setting)
+
+                result = self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+
+                self.assertEqual(self.nightly()[-1]["status"], "green", result.stdout)
+                self.assertEqual(self.notify_record(), word + "\n")
+
+    def test_a_notify_setting_that_cannot_be_recorded_is_a_warning_not_the_end_of_the_run(self):
+        record = self.state / "automation" / "shop" / "notify-setting"
+        record.mkdir(parents=True)
+        record.chmod(0o555)  # a read-only directory where the record goes: mv cannot put the file there
+        self.configure(["ok|true"], extra="KITCHEN_NOTIFY=off\n")
+
+        result = self.run_job("nightly-guard", "shop", GUARD_NO_REPORT="1")
+
+        run = self.nightly()[-1]
+        self.assertEqual(run["status"], "green", result.stdout)
+        self.assertEqual(run["warnings"], [f"could not record the notify setting in {record}; kitchen doctor reports it unknown"])
+        self.assertEqual(list(record.iterdir()), [])
+        self.assertEqual([p.name for p in record.parent.glob(".notify-setting.*")], [])  # its temp file is gone
 
     def test_green_run_records_metrics_and_cleanup(self):
         self.configure(["ok|true"], metrics="echo '{\\\"tests\\\": 3}'")
