@@ -12,8 +12,8 @@
 #   PUBLISH_LABEL, MAX_CHANGED_LINES, PROTECTED_PATHS (shell patterns never published), EDIT_PATHS (when not
 #   empty, the only shell patterns published), PROSE_ONLY (1: only Markdown prose outside fenced code blocks,
 #   lib/prose_only.py), RESULT_TAG (the job's one result line)
-# and defines result <status> <detail>, refuse <reason> (records refused, returns 1) and stop <reason> (records
-# incomplete, exits). Both jobs use the project's sandbox config: GARDENER_SANDBOX_READ/WRITE/DOMAINS/UNIX_SOCKETS
+# and defines result <status> <detail> (setting RESULT and RESULT_DETAIL), refuse <reason> (records refused, returns 1)
+# and stop <reason> (records incomplete, exits). Both jobs use the project's sandbox config: GARDENER_SANDBOX_READ/WRITE/DOMAINS/UNIX_SOCKETS
 # and GARDENER_ENV_PASS (see README.md).
 # Principles: `isolate` (the agent is sealed; nothing it wrote runs unsealed), `prove` (the job reruns the checks).
 
@@ -27,6 +27,8 @@ SRT="$KITCHEN_AUTOMATION/node_modules/.bin/srt"  # pinned in automation/package.
 RUN_DATE="$(date -u +%Y-%m-%d)"
 PLATFORM_READ=()
 PLATFORM_WRITE=()
+REFUSED_KEPT=""      # set by publish when it refused a branch: where the branch is kept, or why it is not (keep_refused)
+KEEP_PUBLISH_GIT=0  # 1: the refused branch lives only in $JOB_DIR/publish.git, so cleanup keeps it
 
 # Claude's environment: everything it needs to edit, build, test and commit; nothing to publish with.
 run_sealed() {
@@ -180,7 +182,8 @@ cleanup_agent_run() { # ran-agent(0|1)
       log "cleanup FAILED: could not export $BASE_SHA to run it"
     fi
   fi
-  rm -rf "$AGENT_CLONE" "$JOB_DIR/prepare" "$JOB_DIR/cleanup" "$JOB_DIR/verify" "$JOB_DIR/publish.git"
+  rm -rf "$AGENT_CLONE" "$JOB_DIR/prepare" "$JOB_DIR/cleanup" "$JOB_DIR/verify"
+  [ "$KEEP_PUBLISH_GIT" = 1 ] || rm -rf "$JOB_DIR/publish.git"
   find "$LOG_DIR" -name "$AGENT_KIND-*" -mtime +90 -delete
   find "$STATE_DIR/$AGENT_KIND" "$STATE_DIR/$AGENT_KIND-job" -mindepth 1 -maxdepth 1 -mtime +90 -exec rm -rf {} + 2>/dev/null
 }
@@ -253,10 +256,45 @@ verify_tree() {
 
 # Deterministic publication of what the agent committed, from the base BASE_SHA. Returns 1 when it refuses or
 # fails; sets PUBLISHED_URL when it opened the PR, and leaves it empty when there was no branch to publish.
+# A refused branch is kept once its objects were imported, since cleanup deletes the agent's clone: as
+# $JOB_DIR/refused.bundle, or, when the bundle fails, in $JOB_DIR/publish.git if it holds every object itself, which
+# cleanup then keeps. REFUSED_KEPT says which, or why it is not kept; a refused result's detail ends with it.
+publish() {
+  REFUSED_KEPT="" PUBLISH_BRANCH=""
+  publish_checked && return 0
+  local rc=$?
+  keep_refused
+  log "$REFUSED_KEPT"
+  [ "${RESULT:-}" != refused ] || RESULT_DETAIL+="; $REFUSED_KEPT"
+  return "$rc"
+}
+
+# The refused branch, BASE_SHA..head, from the job's own repository (objects re-hashed by fsck; git never runs in
+# the agent's clone).
+keep_refused() {
+  local head
+  if ! head="$(git rev-parse --verify --quiet refs/kitchen/agent 2>/dev/null)"; then
+    REFUSED_KEPT="the refused branch is not kept: the job never imported its objects"
+  elif git update-ref "refs/heads/$PUBLISH_BRANCH" "$head" &&
+    git bundle create -q "$JOB_DIR/refused.bundle" "refs/heads/$PUBLISH_BRANCH" "^$BASE_SHA" >/dev/null 2>&1; then
+    REFUSED_KEPT="the refused branch is kept on the job's machine as $JOB_DIR/refused.bundle (git fetch <bundle> $PUBLISH_BRANCH)"
+  elif rm -f "$GIT_DIR/objects/info/alternates" && git fsck --connectivity-only --no-dangling --no-progress >/dev/null 2>&1; then
+    # Kept only once it holds every object itself: before the repack, its objects are borrowed from the agent's
+    # clone, which cleanup deletes.
+    KEEP_PUBLISH_GIT=1
+    REFUSED_KEPT="the refused branch is kept on the job's machine in the repository $GIT_DIR (ref refs/kitchen/agent, ${head:0:12}): its bundle could not be made"
+  else
+    REFUSED_KEPT="the refused branch is not kept: its bundle could not be made, and the job's repository lacks some of its objects (the import stopped before they were copied in)"
+  fi
+}
+
+redact_known() { python3 "$KITCHEN_AUTOMATION/lib/redact.py" "$GIT_DIR" "$BASE_SHA"; }
+
 # Every check and the published commit use SHAs pinned once (BASE_SHA before Claude ran, the branch's
 # commit and tree right here), never ref names: a leftover agent process could move a ref mid-publish.
 # Git runs with hooks off: the working tree (where project hooks live) was writable by the agent.
-publish() {
+# Text that leaves the machine is redacted, keeping the private terms the base already holds (lib/redact.py).
+publish_checked() {
   local listing br head tree ahead added deleted path pattern allowed changed=0 title
   PUBLISHED_URL=""
   # for-each-ref only reads refs: no hook, filter or fsmonitor of the agent's clone can run.
@@ -266,6 +304,7 @@ publish() {
   [ "$(printf '%s\n' "$listing" | wc -l | tr -d ' ')" = 1 ] || refuse "more than one $AGENT_KIND branch: $(echo $listing)" || return 1
   head="${listing%% *}"
   br="${listing#* }"
+  PUBLISH_BRANCH="$br"
   [[ "$head" =~ ^[0-9a-f]{40}$ ]] || refuse "unexpected object name for $br" || return 1
   # The job's own bare repository: the agent's objects are copied in (alternates, repack, then the alternates
   # are dropped) and every object is hashed again by fsck, so what is checked is what gets pushed.
@@ -303,16 +342,17 @@ publish() {
     code="$(python3 "$KITCHEN_AUTOMATION/lib/prose_only.py" "$GIT_DIR" "$BASE_SHA" "$tree")" ||
       { refuse "$br changes more than prose: $(printf '%s' "$code" | tr '\n' ';' | cut -c1-300)"; return 1; }
   fi
-  # Second layer, independent of the sandbox: no credential-looking content in what would be published.
+  # Second layer, independent of the sandbox: no credential-looking content, and no private term the base does not
+  # already hold, in what would be published.
   local secrets
-  secrets="$(git diff -U0 --no-color "$BASE_SHA" "$tree" | python3 "$KITCHEN_AUTOMATION/lib/scan_diff.py")" ||
-    { refuse "possible secret in the diff: $(printf '%s' "$secrets" | tr '\n' ';' | cut -c1-300)"; return 1; }
+  secrets="$(git diff -U0 --no-color "$BASE_SHA" "$tree" | python3 "$KITCHEN_AUTOMATION/lib/scan_diff.py" "$GIT_DIR" "$BASE_SHA")" ||
+    { refuse "possible secret or private term in the diff: $(printf '%s' "$secrets" | tr '\n' ';' | cut -c1-300)"; return 1; }
   [ -s "$SUMMARY_FILE" ] || refuse "no PR summary at $SUMMARY_FILE" || return 1
   local summary="$JOB_DIR/summary.md"
   copy_agent_file "$SUMMARY_FILE" "$summary" || refuse "the PR summary at $SUMMARY_FILE is not a regular file of its own" || return 1
-  title="$(grep -m1 -v '^[[:space:]]*$' "$summary" | sed -E 's/^#+[[:space:]]*//' | cut -c1-120 | redact)" || refuse "could not read the PR title" || return 1
+  title="$(grep -m1 -v '^[[:space:]]*$' "$summary" | sed -E 's/^#+[[:space:]]*//' | cut -c1-120 | redact_known)" || refuse "could not read the PR title" || return 1
   [ -n "$title" ] || refuse "empty PR title in $SUMMARY_FILE" || return 1
-  awk 'seen { print; next } /[^[:space:]]/ { seen = 1 }' "$summary" | redact > "$JOB_DIR/body.md" ||
+  awk 'seen { print; next } /[^[:space:]]/ { seen = 1 }' "$summary" | redact_known > "$JOB_DIR/body.md" ||
     refuse "could not redact the PR summary" || return 1
   verify_tree "$tree" || return 1
   printf '\n---\n%s\n' "$VERIFY_REPORT" >> "$JOB_DIR/body.md"
@@ -320,9 +360,9 @@ publish() {
   # One commit: the validated tree, on the pinned base, with the agent's messages (redacted) and author.
   local commit
   if [ "$ahead" = 1 ]; then
-    git log -1 --format=%B "$head" | redact > "$JOB_DIR/message.txt"
+    git log -1 --format=%B "$head" | redact_known > "$JOB_DIR/message.txt"
   else
-    { printf '%s\n\n' "$title"; git log --reverse --format='* %B' "$BASE_SHA..$head"; } | redact > "$JOB_DIR/message.txt"
+    { printf '%s\n\n' "$title"; git log --reverse --format='* %B' "$BASE_SHA..$head"; } | redact_known > "$JOB_DIR/message.txt"
   fi || refuse "could not build the commit message" || return 1
   commit="$(GIT_AUTHOR_NAME="$(git log -1 --format=%an "$head")" GIT_AUTHOR_EMAIL="$(git log -1 --format=%ae "$head")" \
     git commit-tree "$tree" -p "$BASE_SHA" -F "$JOB_DIR/message.txt")" || refuse "could not build the commit" || return 1

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Refuses a diff whose added lines look like a credential. Reads `git diff -U0` on stdin.
+"""Refuses a diff whose added lines look like a credential or hold a private term. Reads `git diff -U0` on stdin.
 
-  git diff -U0 --no-color <base> <tree-ish> | scan_diff.py
+  git diff -U0 --no-color <base> <tree-ish> | scan_diff.py [<git-dir> <base>]
 
 A layer independent of the sandbox: whatever the agent managed to read, a secret must not reach a PR.
-Three checks on every added line:
-- the kitchen's own redaction patterns (lib/kitchen, the same ones `kitchen retro` uses);
+Checks on every added line:
+- the kitchen's own credential patterns (lib/kitchen/credentials.py, the ones `kitchen retro` uses): `credential pattern`;
+- the private terms of the denylist, except those the base tree in <git-dir> already holds (lib/project_terms.py: the
+  project's own vocabulary is not a leak into it; without <git-dir> <base>, every term counts): `private term`;
 - known token shapes, kept here so this check does not depend on the kitchen's list;
 - long high-entropy runs (random-looking keys with no known prefix);
 and, per file, the known token shapes on each run of consecutive added lines joined together with quotes,
@@ -13,7 +15,8 @@ and, per file, the known token shapes on each run of consecutive added lines joi
 This catches accidental leaks. Encoded or deliberately disguised exfiltration (base64, hex, reversed
 strings...) is out of its reach; only the boundary stops that (sandboxed reads and the environment
 allowlist, see README).
-Prints one line per finding (file, line, kind; never the value) and exits 1 when anything matched.
+Prints one line per finding (file, line, kind; never the value) and exits 1 when anything matched, 2 (saying why)
+when it cannot tell which terms the base holds.
 """
 import math
 import re
@@ -22,7 +25,10 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
-from kitchen.transcripts import scrub  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kitchen.credentials import redact  # noqa: E402
+from kitchen.common import private_terms  # noqa: E402
+from project_terms import Unknown, args_terms  # noqa: E402
 
 KNOWN = [
     ("GitHub token", r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
@@ -68,7 +74,9 @@ def high_entropy(line: str) -> bool:
 JOIN_STRIP = re.compile(r"""[\s'"`+\\]""")
 
 
-def findings(diff: str) -> list[str]:
+def findings(diff: str, terms: list | None = None) -> list[str]:
+    """<terms>: the private-term patterns to flag; None, every denylist term."""
+    terms = (private_terms() or []) if terms is None else terms
     found, path, line_no = [], "?", 0
     run, run_start, run_flagged = [], 0, False
 
@@ -92,8 +100,10 @@ def findings(diff: str) -> list[str]:
         elif line.startswith("+"):
             added = line[1:]
             kinds = [label for label, pattern in KNOWN if pattern.search(added)]
-            if scrub(added) != added:
-                kinds.append("redaction pattern")
+            if redact(added) != added:
+                kinds.append("credential pattern")
+            if any(term.search(added) for term in terms):
+                kinds.append("private term")
             if not kinds and high_entropy(added):
                 kinds.append("high-entropy string")
             if kinds:
@@ -110,7 +120,12 @@ def findings(diff: str) -> list[str]:
 
 
 def main() -> int:
-    found = findings(sys.stdin.read())
+    try:
+        terms = args_terms(sys.argv[1:])
+    except Unknown as reason:
+        print(reason)
+        return 2
+    found = findings(sys.stdin.read(), terms)
     for finding in found:
         print(finding)
     return 1 if found else 0

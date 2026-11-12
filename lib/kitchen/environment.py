@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .common import state_dir
+from .common import config_dir, state_dir
 
 RECORDS = {"daily-audit": "audit", "weekly-gardener": "gardener"}  # the job's record; the retro keeps only run logs
 
@@ -153,7 +153,7 @@ def launchd(h: Path) -> list[tuple[str, str]]:
         else:
             report.append(("WARN", f"{plist} is present but not loaded by launchctl: load it with "
                                    f"`launchctl bootstrap gui/$(id -u) {plist}`, or move it to the Trash if the job runs elsewhere"))
-    return report
+    return report + notifications(probe=False)  # the bus probe is Linux's: macOS jobs notify with osascript
 
 
 def systemd(h: Path) -> list[tuple[str, str]]:
@@ -172,13 +172,115 @@ def systemd(h: Path) -> list[tuple[str, str]]:
         else:
             report.append(("WARN", f"{timer} is present but {state}: start it with "
                                    f"`systemctl --user enable --now {timer.name}`, or move it to the Trash if the job runs elsewhere"))
-    return report + [notification_server()]
+    return report + notifications()
 
 
 # Asked from a transient unit, so it reaches the session bus the timers get, not this shell's. Shows nothing on screen.
 NOTIFICATION_PROBE = ["systemd-run", "--user", "--wait", "--pipe", "--quiet", "busctl", "--user", "call",
                       "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                       "org.freedesktop.Notifications", "GetServerInformation"]
+
+
+NOTIFY_ASSIGNMENT = re.compile(r"^(?:export[ \t]+)?KITCHEN_NOTIFY=(.*)$")
+ASSIGNMENT = re.compile(r"^(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=(.*)$")
+
+
+def plain_assignment(line: str) -> bool:
+    """Whether a line is one plain `[export ]NAME=<value>` at the start of the line: one word that may quote and expand $NAME,
+    or a one-line array, then nothing or a comment. Nothing outside single quotes may end the command, start another or run
+    one (; & | < > ` $( ), so the line can hold no condition, block or second command."""
+    match = ASSIGNMENT.match(line)
+    if not match:
+        return False
+    text, index, quote = match.group(1), 0, ""
+    array = text.startswith("(")  # its words may be separated by blanks up to its `)`
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif char == "\\":
+            if index + 1 >= len(text):
+                return False  # a line continuation: Bash joins the next line to this word, so that line assigns nothing
+            index += 1  # the next character is literal
+        elif char == "`" or text.startswith("$(", index) or (not quote and char in ";&|<>"):
+            return False
+        elif char in " \t" and not quote and not array:
+            rest = text[index:].strip()  # the word ends: then nothing, or a comment; never a command it prefixes
+            return not rest or rest.startswith("#")
+        elif char == ")" and not quote:
+            array = False
+        elif char in "'\"" and quote in ("", char):
+            quote = "" if quote else char
+        index += 1
+    return not quote
+
+
+def shell_literal(text: str) -> str | None:
+    """The value Bash gives the word that starts <text> (an assignment's right side), when it is a plain literal: unquoted,
+    'single' or "double" quoted parts, then nothing or whitespace and a comment. A `#` starts a comment only after
+    whitespace, as in Bash: `off#typo` is the value `off#typo`. None for anything Bash would expand or run on."""
+    value, quote = "", ""
+    for index, char in enumerate(text):
+        if quote == "'":
+            quote, value = ("", value) if char == "'" else (quote, value + char)
+        elif quote == '"':
+            if char in '$`\\':
+                return None
+            quote, value = ("", value) if char == '"' else (quote, value + char)
+        elif char in "'\"":
+            quote = char
+        elif char in " \t":
+            rest = text[index:].strip()
+            return value if not rest or rest.startswith("#") else None
+        elif char in "$`\\;&|<>(){}[]*?~!":
+            return None
+        else:
+            value += char
+    return None if quote else value
+
+
+def notify_setting(env: Path) -> str | None:
+    """KITCHEN_NOTIFY as a project's config sets it, "" when no line names it, None when doctor cannot be sure. The jobs
+    source the file with Bash; doctor only reads it, so it trusts a file that names KITCHEN_NOTIFY only when every
+    non-blank, non-comment line is a plain assignment (plain_assignment): a condition or block around an unindented
+    line would decide whether Bash runs it. Each line that names it must be `[export ]KITCHEN_NOTIFY=<literal>`, and the
+    last one wins. Anything else (an unset, a condition, an expansion, a multi-line array) is unknown."""
+    value, plain, named = "", True, False
+    for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        plain = plain and plain_assignment(line)
+        if "KITCHEN_NOTIFY" not in line:
+            continue
+        named = True
+        match = NOTIFY_ASSIGNMENT.match(line)
+        literal = shell_literal(match.group(1)) if match else None
+        if literal is None:
+            return None
+        value = literal
+    return value if plain or not named else None
+
+
+def notifications(probe: bool = True) -> list[tuple[str, str]]:
+    """Projects whose config sets KITCHEN_NOTIFY=off are off on purpose (automation/README.md, Notifications); with
+    <probe> (Linux), the server is probed only while a configured project may still notify, or none is configured."""
+    folder = config_dir() / "automation"
+    settings = {env.stem: notify_setting(env) for env in sorted(folder.glob("*.env"))} if folder.is_dir() else {}
+    off = [name for name, value in settings.items() if value == "off"]
+    report = []
+    for name, value in settings.items():
+        if value is None:
+            report.append(("WARN", f"KITCHEN_NOTIFY in {name}.env is unknown: doctor trusts only a file of plain `NAME=value` "
+                                   f"lines with a literal `KITCHEN_NOTIFY=<value>`, and this file holds something else"))
+        elif value not in ("", "off"):
+            report.append(("WARN", f"KITCHEN_NOTIFY in {name}.env is '{value[:40]}': only off (or unset) is valid, so its "
+                                   f"exception runs record `not notified`"))
+    if off:
+        report.append(("INFO", f"notifications off by configuration (KITCHEN_NOTIFY=off) for {', '.join(off)}: exception runs "
+                               f"log one line and record no warning"))
+    if probe and (not settings or len(off) < len(settings)):
+        report.append(notification_server())
+    return report
 
 
 def notification_server() -> tuple[str, str]:

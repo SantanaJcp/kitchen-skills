@@ -62,7 +62,17 @@ redact() { python3 "$KITCHEN_AUTOMATION/lib/redact.py"; }
 
 # A local notification for an exception (never call it on green): redacted, shown on this machine only.
 # Returns non-zero, saying why on stderr, when it was not shown, also when the platform has no notifier.
-notify() { python3 "$KITCHEN_AUTOMATION/lib/notify.py" "$1" "$2"; }
+# KITCHEN_NOTIFY=off in the project's config turns them off on purpose (a timer user with no desktop of its own):
+# nothing is attempted, one INFO line goes to the log, and the run records no warning. Unset or empty: as above. Any
+# other value is a config error: not shown, and the run records `not notified`.
+notify() {
+  case "${KITCHEN_NOTIFY:-}" in
+    "") python3 "$KITCHEN_AUTOMATION/lib/notify.py" "$1" "$2" ;;
+    off) log "INFO: notifications off by configuration (KITCHEN_NOTIFY=off), not shown: $1" ;;
+    *) echo "kitchen notify: KITCHEN_NOTIFY is '${KITCHEN_NOTIFY:0:40}', and only off (or unset) is valid; not shown: $1" >&2
+       return 1 ;;
+  esac
+}
 
 # One open GitHub issue per label and title: a comment on it while it is open, else a new one. The body travels as a
 # file (an argument is capped far below GitHub's body limit). Sets ISSUE_NUMBER; returns 1 when a gh call failed or

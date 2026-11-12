@@ -129,7 +129,7 @@ report_findings() { # prose-fixes-line-or-empty unpublished-reason-or-empty
   gh label create "$ISSUE_LABEL" -R "$GH_REPO" --color FBCA04 --description "Daily verification audit finding" >/dev/null 2>&1 || true
   list_findings_issues "$JOB_DIR/open-issues.json" || { NOT_FILED="could not list the open findings issues"; return 1; }
   python3 "$KITCHEN_AUTOMATION/lib/audit_findings.py" plan "$JOB_DIR/report.md" "$JOB_DIR/open-issues.json" \
-    "$ISSUE_LIST_LIMIT" "$plan" "$header" "$PROJECT" ${2:+"$2"} > "$JOB_DIR/plan.txt" 2> "$JOB_DIR/plan.err" ||
+    "$ISSUE_LIST_LIMIT" "$plan" "$header" "$PROJECT" "$CLONE_DIR/.git" "$SHA" ${2:+"$2"} > "$JOB_DIR/plan.txt" 2> "$JOB_DIR/plan.err" ||
     { NOT_FILED="$(head -c 300 "$JOB_DIR/plan.err")"; return 1; }
   while read -r action number key dir; do
     case "$action" in
@@ -346,6 +346,7 @@ case "$OUTCOME" in
       fi
       # Fixes the report lists on a branch that did not ship are still drift: one more finding says so, and why.
       [ -n "$pr" ] || unpublished="${WARNINGS[${#WARNINGS[@]}-1]#not published: }"
+      [ -n "$pr" ] || [ -z "$REFUSED_KEPT" ] || unpublished+="; $REFUSED_KEPT"
       fixes="${pr:-not published (see the finding unpublished-prose-fixes)}"
     fi
     if report_findings "$fixes" "$unpublished"; then
