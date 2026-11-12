@@ -257,8 +257,8 @@ verify_tree() {
 # Deterministic publication of what the agent committed, from the base BASE_SHA. Returns 1 when it refuses or
 # fails; sets PUBLISHED_URL when it opened the PR, and leaves it empty when there was no branch to publish.
 # A refused branch is kept once its objects were imported, since cleanup deletes the agent's clone: as
-# $JOB_DIR/refused.bundle, or, when the bundle fails, in $JOB_DIR/publish.git, which cleanup then keeps. REFUSED_KEPT
-# says which (or that nothing was imported); a refused result's detail ends with it.
+# $JOB_DIR/refused.bundle, or, when the bundle fails, in $JOB_DIR/publish.git if it holds every object itself, which
+# cleanup then keeps. REFUSED_KEPT says which, or why it is not kept; a refused result's detail ends with it.
 publish() {
   REFUSED_KEPT="" PUBLISH_BRANCH=""
   publish_checked && return 0
@@ -278,9 +278,13 @@ keep_refused() {
   elif git update-ref "refs/heads/$PUBLISH_BRANCH" "$head" &&
     git bundle create -q "$JOB_DIR/refused.bundle" "refs/heads/$PUBLISH_BRANCH" "^$BASE_SHA" >/dev/null 2>&1; then
     REFUSED_KEPT="the refused branch is kept on the job's machine as $JOB_DIR/refused.bundle (git fetch <bundle> $PUBLISH_BRANCH)"
-  else
+  elif rm -f "$GIT_DIR/objects/info/alternates" && git fsck --connectivity-only --no-dangling --no-progress >/dev/null 2>&1; then
+    # Kept only once it holds every object itself: before the repack, its objects are borrowed from the agent's
+    # clone, which cleanup deletes.
     KEEP_PUBLISH_GIT=1
     REFUSED_KEPT="the refused branch is kept on the job's machine in the repository $GIT_DIR (ref refs/kitchen/agent, ${head:0:12}): its bundle could not be made"
+  else
+    REFUSED_KEPT="the refused branch is not kept: its bundle could not be made, and the job's repository lacks some of its objects (the import stopped before they were copied in)"
   fi
 }
 

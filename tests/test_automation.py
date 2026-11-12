@@ -1460,6 +1460,27 @@ class GardenerPublicationTests(AutomationFixture):
         notes = subprocess.run([real_git, "--git-dir", str(kept), "show", "refs/kitchen/agent:notes.txt"], check=True,
                                capture_output=True, text=True, env=clean_env()).stdout
         self.assertIn("Sync with Zorblat nightly.", notes)
+        log = subprocess.run([real_git, "--git-dir", str(kept), "log", "--format=%s", "refs/kitchen/agent"], check=True,
+                             capture_output=True, text=True, env=clean_env()).stdout
+        self.assertIn("More notes", log)  # the whole history, after cleanup deleted the agent's clone
+
+    def test_a_refused_branch_whose_objects_were_never_copied_in_is_reported_not_kept(self):
+        # A full disk can fail the repack and the bundle alike: the job's repository then only borrows the agent's objects
+        # through its alternates, and cleanup deletes the agent's clone they point into.
+        real_git = shutil.which("git")
+        self.fake("git", f'case "$1" in bundle|repack) echo "fatal: injected $1 failure" >&2; exit 128 ;; esac\n'
+                         f'exec {real_git} "$@"')
+
+        result = self.private_term_run(in_base=False)
+
+        self.assert_refused(result, "could not import the agent's objects")
+        jobs = list((self.state / "automation" / "shop" / "gardener-job").glob("*/"))
+        self.assertEqual(len(jobs), 1, result.stdout)
+        detail = self.gardener()[-1]["detail"]
+        self.assertIn("the refused branch is not kept: its bundle could not be made, and the job's repository lacks", detail)
+        self.assertNotIn(str(jobs[0]), detail)  # no path is named as holding the branch
+        self.assertFalse((jobs[0] / "publish.git").exists())
+        self.assertFalse((jobs[0] / "refused.bundle").exists())
 
     def test_a_credential_is_labelled_a_credential_pattern_apart_from_private_terms(self):
         self.configure_publishing()

@@ -274,6 +274,70 @@ class EnvironmentDoctorTests(unittest.TestCase):
                 self.assertIn("no notification server confirmed", warnings[1])  # unknown is not off: the bus is probed
                 self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
 
+    def test_a_condition_around_an_unindented_assignment_makes_the_setting_unknown(self):
+        # Bash never runs the middle line; a reader of single lines would see KITCHEN_NOTIFY=off.
+        (self.config / "automation" / "shop.env").write_text("BRANCH=dev\nif false; then\nKITCHEN_NOTIFY=off\nfi\n")
+
+        report = self.linux_timer_report('echo "Call failed: The name is not activatable" >&2; exit 1')
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertIn("KITCHEN_NOTIFY in shop.env is unknown", warnings[0])
+        self.assertIn("no notification server confirmed", warnings[1])  # the bus is still probed
+        self.assertNotIn("notifications off by configuration", " ".join(m for _, m in report))
+
+    def test_a_file_of_plain_assignments_reads_off(self):
+        (self.config / "automation" / "shop.env").write_text(textwrap.dedent("""\
+            # shop
+            REPO_URL="git@example.invalid:owner/shop.git"
+            export EXTRA_PATH="$HOME/bin"  # tools
+            GARDENER_VERIFY_STEPS=("build|make build" "tests|make test")
+
+            KITCHEN_NOTIFY=off
+            """))
+
+        report = self.linux_timer_report("exit 1")
+
+        self.assertEqual([m for level, m in report if level == "WARN"], [], report)
+        self.assertIn(("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs log one line "
+                               "and record no warning"), report)
+
+    def test_a_file_that_never_names_the_setting_leaves_it_unset_whatever_its_shape(self):
+        # The documented config writes its verify steps as a multi-line array; unset still probes the bus.
+        (self.config / "automation" / "shop.env").write_text('GARDENER_VERIFY_STEPS=(\n  "build|make build"\n)\n')
+
+        report = self.linux_timer_report('echo \'ssss "mako" "emersion" "1.9" "1.2"\'')
+
+        self.assertEqual(report, [("INFO", "timer kitchen-shop-nightly-guard.timer active"),
+                                  ("INFO", "notification server mako answers on the kitchen timers' session bus")])
+
+    def mac_schedule_report(self, env_text):
+        (self.config / "automation" / "shop.env").write_text(env_text)
+        agents = self.root / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        label = "com.kitchen.shop.weekly-gardener"
+        (agents / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label, "StartCalendarInterval": {"Hour": 6}}))
+        self.fake("launchctl", f'printf "PID\\tStatus\\tLabel\\n-\\t0\\t{label}\\n"')
+        probed = self.root / "probed"
+        self.fake("systemd-run", f": > {probed}; exit 1")
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin)}):
+            report = environment().schedules("Darwin", self.root)
+        self.assertFalse(probed.exists())  # the bus probe is Linux's
+        return report
+
+    def test_on_macos_notifications_off_by_configuration_are_info(self):
+        report = self.mac_schedule_report("KITCHEN_NOTIFY=off\n")
+
+        self.assertEqual(report, [("INFO", "schedule com.kitchen.shop.weekly-gardener loaded"),
+                                  ("INFO", "notifications off by configuration (KITCHEN_NOTIFY=off) for shop: exception runs "
+                                           "log one line and record no warning")])
+
+    def test_on_macos_a_notify_setting_that_is_not_off_is_flagged(self):
+        report = self.mac_schedule_report("KITCHEN_NOTIFY=of\n")
+
+        warnings = [m for level, m in report if level == "WARN"]
+        self.assertEqual(len(warnings), 1, report)
+        self.assertIn("KITCHEN_NOTIFY in shop.env is 'of': only off (or unset) is valid", warnings[0])
+
     def test_a_probe_that_cannot_run_is_a_warning_not_a_pass(self):
         report = self.linux_timer_report(None)
 
