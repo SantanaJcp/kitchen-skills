@@ -22,7 +22,7 @@ Report separate sections:
 ## Request: what the request asked for that is missing or partial, what the work does that nobody asked for, and what looks implemented but wrong; quote the request.
 ## Design (design and design+diff reviews only): where the structure fails its goal.
 
-Every finding must cite file:line and a concrete path to failure: the input, state or sequence that breaks it. No path, no finding. Label each finding measured (give the command and its result) or inferred (from reading), and name the principle it breaks when one applies (an id from the kitchen's PRINCIPLES.md, such as `prove` or `no-fallbacks`). Mark a finding BLOCKER when it must stop the merge. Say "no findings" when there are none; do not fill space with style preferences.
+Every finding must cite file:line and a concrete path to failure: the input, state or sequence that breaks it. No path, no finding. Label each finding measured (give the command and its result) or inferred (from reading), and name the principle it breaks when one applies (an id from the kitchen's PRINCIPLES.md, such as `prove` or `no-fallbacks`). Give each finding a proposed severity: P0 loses or corrupts data or money, opens a security or permission hole, or breaks the trunk or the merge gate for everyone; P1 is wrong behavior that normal use or the merge gate hits, with a concrete repro; P2 is real but needs a rare or forced input, or only affects a test, a message or a document; P3 is style, do not report it. The lead sets the final severity. Mark a finding BLOCKER when it must stop the merge. Say "no findings" when there are none; do not fill space with style preferences.
 Length: about 400 words for a small diff; longer only when the findings need it.
 ```
 
