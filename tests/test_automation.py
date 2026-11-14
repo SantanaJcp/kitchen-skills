@@ -1883,7 +1883,16 @@ class DailyAuditTests(AutomationFixture):
             store.write_text(json.dumps(issues))
         """)
     READERS = ("readers-no-assertion", "Readers have no real assertion", "The readers drive checks only its exit code.")
-    WRITERS = ("writers-owed-a-control", "Writers are owed a hand control", "Its assertions changed since the baseline.")
+
+    @staticmethod
+    def owed(*features):
+        """The one finding of the hand controls a sealed pass owes, as the audit prompt prescribes it."""
+        prompt = (AUTOMATION / "prompts" / "audit.md").read_text()
+        heading = re.search(r"heading is exactly `### (hand-controls-owed): ([^`]+)`", prompt)
+        opening = re.search(r"text opens with the line `([^`]+)`", prompt)
+        assert heading and opening, "the audit prompt no longer prescribes the hand-controls-owed finding"
+        items = "".join(f"\n- {name}: its assertions changed; owed `verify control --page {name}`" for name in sorted(features))
+        return heading.group(1), heading.group(2), opening.group(1) + "\n" + items
 
     def setUp(self):
         super().setUp()
@@ -2264,7 +2273,7 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
     def test_two_findings_open_two_issues_each_named_for_the_project_and_its_finding(self):
         sha = self.churn()
         self.audit_config()
-        fenced = ("writers-owed-a-control", "Writers are owed a hand control",
+        fenced = ("writers-no-control", "Writers declare no control",
                   "Its assertions changed.\n\n```md\n### not-a-finding: a heading inside a fence is text\n```")
         self.agent("findings", findings=(self.READERS, fenced))
 
@@ -2274,8 +2283,8 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertEqual(len(self.created()), 2, self.calls_log())
         self.assertEqual(sorted(issue["title"] for issue in self.issues()),
                          ["Audit finding in shop: Readers have no real assertion [readers-no-assertion]",
-                          "Audit finding in shop: Writers are owed a hand control [writers-owed-a-control]"])
-        readers, writers = self.issue("readers-no-assertion"), self.issue("writers-owed-a-control")
+                          "Audit finding in shop: Writers declare no control [writers-no-control]"])
+        readers, writers = self.issue("readers-no-assertion"), self.issue("writers-no-control")
         self.assertIn("The readers drive checks only its exit code.", readers["body"])
         self.assertNotIn("Its assertions changed.", readers["body"])  # each issue holds its own finding only
         self.assertIn("### not-a-finding: a heading inside a fence is text", writers["body"])
@@ -2286,12 +2295,12 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
     def test_a_rerun_with_the_same_findings_opens_nothing_and_a_changed_one_gets_one_comment(self):
         self.churn()
         self.audit_config()
-        self.agent("findings", findings=(self.READERS, self.WRITERS))
+        self.agent("findings", findings=(self.READERS, self.owed("writers")))
         self.guard_then_audit()
         self.assertEqual(len(self.created()), 2, self.calls_log())
 
-        for name, findings, comments in (("same", (self.READERS, self.WRITERS), 0),
-                                         ("changed", (self.READERS, self.WRITERS[:2] + ("Now also the bulk writer.",)), 1)):
+        for name, findings, comments in (("same", (self.READERS, self.owed("writers")), 0),
+                                         ("changed", (self.READERS, self.owed("bulk-writer", "writers")), 1)):
             with self.subTest(name):
                 self.commit_to_origin({f"docs/{name}.md": ("more\n", 0o644)})  # new churn, so the pass runs again
                 sha = self.git(self.origin, "rev-parse", "dev")
@@ -2302,14 +2311,14 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
                 self.assertEqual(result.returncode, 0, result.stdout)
                 seen = (Path(self.tmp.name) / "seen-open-findings.md").read_text()  # the agent saw the open keys
                 self.assertIn("- readers-no-assertion: Audit finding in shop: Readers have no real assertion", seen)
-                self.assertIn("- writers-owed-a-control: ", seen)
+                self.assertIn("- hand-controls-owed: ", seen)
                 self.assertEqual(len(self.created()), 2, self.calls_log())  # never a duplicate
                 self.assertEqual(len(self.commented()), comments, self.calls_log())
                 self.assertEqual(len(self.issues()), 2)
                 self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issues #7, #8)")
-        writers = self.issue("writers-owed-a-control")
+        writers = self.issue("hand-controls-owed")
         self.assertEqual(len(writers["comments"]), 1)
-        self.assertIn("Now also the bulk writer.", writers["comments"][0]["body"])
+        self.assertIn("- bulk-writer: ", writers["comments"][0]["body"])
         self.assertEqual(self.issue("readers-no-assertion")["comments"], [])
         self.assertNotIn("gh issue close", self.calls_log())
 
@@ -2333,6 +2342,46 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertNotIn("gh issue create", calls)
         self.assertNotIn("gh issue close", calls)
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #12)")
+
+    def test_owed_hand_controls_share_one_issue_that_adds_up_and_leave_old_per_feature_issues_open(self):
+        self.churn()
+        self.audit_config()
+        old = {"number": 12, "title": "Audit finding in shop: Readers are owed a hand control [readers-hand-control-owed]",
+               "labels": ["audit-verification-findings"], "open": True, "comments": [],
+               "body": "<!-- kitchen-audit-finding key=readers-hand-control-owed digest=0123456789abcdef -->\nolder text"}
+        (self.bin / "gh-store.json").write_text(json.dumps([old]))
+        # each day lists the features of its own churn: the baseline moves past every filed pass
+        for day, features, comments in ((1, ("writers", "readers", "cards"), 0), (2, ("bulk-writer",), 1), (3, ("bulk-writer",), 1)):
+            with self.subTest(day=day):
+                if day > 1:
+                    self.commit_to_origin({f"docs/day{day}.md": ("more\n", 0o644)})
+                sha = self.git(self.origin, "rev-parse", "dev")
+                self.agent("findings", findings=(self.READERS, self.owed(*features)))
+
+                result = self.guard_then_audit()
+
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(len(self.created()), 2, self.calls_log())  # one issue for every hand control owed
+                self.assertEqual(len(self.commented()), comments, self.calls_log())  # a comment only when the list differs
+                self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issues #13, #14)")
+        hand = self.issue("hand-controls-owed")
+        self.assertEqual(hand["number"], 14)
+        listed = [hand["body"].index(f"- {name}: ") for name in ("cards", "readers", "writers")]
+        self.assertEqual(listed, sorted(listed))
+        self.assertIn("A feature listed anywhere in this issue is owed", hand["body"])  # the issue adds up
+        self.assertIn("- bulk-writer: ", hand["comments"][0]["body"])
+        self.assertEqual([(issue["number"], issue["comments"], issue["open"]) for issue in self.issues() if issue["number"] == 12],
+                         [(12, [], True)])  # the old per-feature issue waits for a hand pass
+        self.assertNotIn("gh issue close", self.calls_log())
+
+    def test_the_skill_and_the_prompt_name_the_one_key_of_the_owed_hand_controls(self):
+        key = self.owed()[0]
+        skill = (AUTOMATION.parent / "skills" / "audit-verification" / "SKILL.md").read_text()
+        sealed = skill.split("## Sealed pass")[1].split("## Edit scope")[0]
+        can_it_fail = re.search(r"^5\. \*\*Can it fail\?\*\*.*$", skill, re.M).group(0)
+        ship = re.search(r"^7\. \*\*Ship or stop\*\*.*$", skill, re.M).group(0)
+        for part in (sealed, can_it_fail, ship):
+            self.assertIn(f"`{key}`", part)
 
     def test_a_fix_the_publication_refuses_under_findings_is_a_warning_and_its_own_finding(self):
         sha = self.churn()
@@ -2378,15 +2427,15 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
     def test_a_failing_issue_report_keeps_the_baseline_and_names_the_finding(self):
         sha = self.churn()
         self.audit_config()
-        self.agent("findings", findings=(self.READERS, self.WRITERS))
+        self.agent("findings", findings=(self.READERS, self.owed("writers")))
 
-        result = self.guard_then_audit(GH_FAIL_ON="Its assertions changed")
+        result = self.guard_then_audit(GH_FAIL_ON="owed `verify control")
 
         self.assertEqual(result.returncode, 0, result.stdout)
         run = self.audits()[-1]
         self.assertEqual(run["status"], "findings")
-        self.assertIn("findings issue report failed, the baseline does not move: not filed: writers-owed-a-control", run["warnings"])
-        self.assertIn("issues #7; not filed: writers-owed-a-control", run["detail"])
+        self.assertIn("findings issue report failed, the baseline does not move: not filed: hand-controls-owed", run["warnings"])
+        self.assertIn("issues #7; not filed: hand-controls-owed", run["detail"])
         self.assertEqual([issue["title"] for issue in self.issues()],
                          ["Audit finding in shop: Readers have no real assertion [readers-no-assertion]"])
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
