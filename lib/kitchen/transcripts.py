@@ -68,7 +68,7 @@ DELEGATED_RESULT = re.compile(r"^Delegated task \S+ (?:\(.*\) )?\[[a-z_-]+\]:\n"
 CODEX_REQUEST = re.compile(r"## My request(?: for Codex)?:\s*\n(.*)", re.S)
 SLASH_COMMAND = re.compile(r"^<command-(?:name|message)>")  # Claude Code's envelope for a slash command I typed
 COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
-COMMAND_ARGS = re.compile(r"<command-args>([^<]*)</command-args>")
+COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 HEARTBEAT = re.compile(r"^<heartbeat>\s*<automation_id>([^<]+)</automation_id>")
 LAUNCH = re.compile(r"\bclaude\b[^\n|;&]*\s(?:-p|--print)\b|\bcodex\s+exec\b")
 # T3 Code tools that start a session with a prompt an agent wrote: the new thread's first message looks typed
@@ -110,7 +110,7 @@ def prompt_text(raw: str) -> str:
 def slash_command(text: str) -> str:
     """`<command-name>/reload-skills</command-name>...` becomes `/reload-skills`, with its arguments."""
     name, args = COMMAND_NAME.search(text), COMMAND_ARGS.search(text)
-    return f"{name.group(1) if name else ''} {args.group(1) if args else ''}".strip() or text
+    return f"{name.group(1) if name else ''} {args.group(1).strip() if args else ''}".strip() or text
 
 
 LAUNCH_WINDOW = datetime.timedelta(minutes=10)  # a launched session starts right after its launch
@@ -476,7 +476,7 @@ def claude_prompts(root: Path, since, launches: list[dict], scheduled: dict[str,
                     reason = None  # the harness recorded a human turn in this session: it outranks the text rules below
                 elif T3_NOTICE.match(text) or DELEGATED_RESULT.match(text):
                     reason = "notification"
-                elif text.startswith((ARTIFACT_SUMMARY, CRASH_TEMPLATE)) or text == RESUME:
+                elif text.startswith((ARTIFACT_SUMMARY, CRASH_TEMPLATE, RESUME)):
                     reason = "harness"
                 elif REVIEW_BRIEF.match(text):
                     reason = "agent-launched"
@@ -543,7 +543,7 @@ def codex_prompts(root: Path, since, launches: list[dict], scheduled: dict[str, 
                         reason = "automation"  # a Codex heartbeat automation posting into this thread
                     elif DELEGATED.match(text):
                         reason = "subagent"
-                    elif "client_id" not in item and (text.startswith(HARNESS + (ARTIFACT_SUMMARY, CRASH_TEMPLATE)) or text == RESUME):
+                    elif "client_id" not in item and text.startswith(HARNESS + (ARTIFACT_SUMMARY, CRASH_TEMPLATE, RESUME)):
                         reason = "harness"
                     elif link == "linked" or ("client_id" not in item and REVIEW_BRIEF.match(text)):
                         reason = "agent-launched"  # an agent sent it through a T3 launch tool (see launch evidence in Claude)
