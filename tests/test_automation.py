@@ -1564,8 +1564,18 @@ printf '#!/bin/sh\\ntouch {evil}\\n' > scripts/hooks/post-checkout
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(ran.read_text(), "ran\n")  # the job judged the published message, and only the clean one passed
         pr = next(line for line in self.calls_log().splitlines() if line.startswith("gh pr create"))
-        self.assertIn("- commit message: accepted by the project's commit-msg hook", Path(pr.split("--body-file ")[1].split()[0]).read_text())
+        self.assertIn("Commit message: accepted by the project's commit-msg hook (scripts/hooks/commit-msg as committed at the base",
+                      Path(pr.split("--body-file ")[1].split()[0]).read_text())
         self.assertTrue(any(b.startswith("gardener/") for b in self.origin_branches()))
+
+    def test_an_attribution_trailer_is_refused_even_without_a_project_hook(self):
+        for line in ("Co-Authored-By: Claude <noreply@anthropic.com>", "co-authored-by : someone", "Generated with [Claude Code](https://claude.com/claude-code)"):
+            with self.subTest(line):
+                self.tearDown(); self.setUp()
+                self.configure_publishing()
+                self.agent(self.commit_script().replace('-m "Tidy notes"', f'-m "Tidy notes" -m "{line}"'))
+
+                self.assert_refused(self.run_job("weekly-gardener", "shop"), "the commit message carries an AI attribution line")
 
     def test_cleanup_never_runs_code_the_agent_wrote(self):
         tmp = Path(self.tmp.name)
@@ -2240,20 +2250,91 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertNotIn("gh pr create", self.calls_log())
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
 
-    def test_the_agent_reads_the_tree_committed_at_the_audited_sha_not_what_the_guard_left_uncommitted(self):
-        # A verifier's control may rewrite a committed control record in the guard's clone without committing it; the
-        # sealed pass must judge the record as committed at the audited SHA.
-        probe = Path(self.tmp.name) / "agent-tree"
+    # A stand-in for a verify skill's static control record check: it prints the committed record.out and exits with
+    # record.rc, and puts a summary on stderr, which the job must not read.
+    RECORD_CHECK = textwrap.dedent("""\
+        #!/bin/sh
+        [ "$1" = --changed-since ] && [ ${#2} = 40 ] || { echo "bad arguments: $*" >&2; exit 3; }
+        cat record.out
+        echo "summary: some pages checked" >&2
+        exit "$(cat record.rc)"
+        """)
+    HELD = f"sha={'a' * 40} at=2026-11-17T09:30:00Z"
+
+    def record_run(self, out, rc, agent_outcome="clean", command="sh bin/record"):
+        """A churn that changes docs/map.md, a committed record check answering <out> and <rc>, and a guard whose control
+        step rewrites the record in its own working tree to say current (a verifier's control may do that)."""
+        facts = Path(self.tmp.name) / "facts"
+        self.commit_to_origin({"bin/record": (self.RECORD_CHECK, 0o755), "record.out": (out, 0o644), "record.rc": (f"{rc}\n", 0o644)})
         sha = self.churn()
-        self.audit_config(guard_steps=(self.PROVE, "control|echo rewritten-by-control > docs/map.md && echo new > record.local"))
-        self.agent("skipped", f'git status --porcelain --untracked-files=all > {probe}; git rev-parse HEAD >> {probe}; cat docs/map.md >> {probe}\n')
+        dirty = f"printf 'current docs/map.md digest=0123456789abcdef {self.HELD}\\n' > record.out && echo 0 > record.rc"
+        self.audit_config(guard_steps=(self.PROVE, f"control|{dirty}"), extra=f'AUDIT_CONTROL_RECORD_CMD="{command}"\n')
+        self.agent(agent_outcome, f'cp "$(dirname "$AUDIT_REPORT_FILE")/control-record.md" {facts} 2>/dev/null || true\n')
+        result = self.guard_then_audit()
+        return result, sha, facts
+
+    def test_a_current_record_is_cited_and_owes_no_control(self):
+        result, sha, facts = self.record_run(f"current docs/map.md digest=0123456789abcdef {self.HELD}\n", 0)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.audits()[-1]["status"], "clean")
+        self.assertIn(f"`docs/map.md`: current, digest 0123456789abcdef; controls held at {'a' * 40} (2026-11-17T09:30:00Z)", facts.read_text())
+        self.assertEqual(self.created(), [])
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification clean (churn) churn at {sha}")
+
+    def test_a_changed_page_whose_committed_record_is_not_current_is_a_finding_the_job_files(self):
+        # The guard's control rewrote record.out to `current` in its clone; the committed record is what counts.
+        for status in ("stale", "partial", "none", "no-controls"):
+            with self.subTest(status):
+                self.tearDown(); self.setUp()
+                result, sha, facts = self.record_run(f"{status} docs/map.md digest=0123456789abcdef\n", 1)
+
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.audits()[-1]["status"], "findings")  # the agent said clean; the record owes a control
+                self.assertIn("The job files its step-5 finding `control-owed-docs-map`", facts.read_text())
+                self.assertEqual([i["title"] for i in self.issues()],
+                                 ["Audit finding in shop: docs/map.md is owed a hand control [control-owed-docs-map]"])
+                self.assertIn(f"says `{status}`", self.issues()[0]["body"])
+                self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha} (issue #7)")
+
+    def test_a_record_check_that_cannot_be_read_blocks_the_pass_before_the_agent(self):
+        cases = (("exit 2", "", 2, "sh bin/record", "exited 2"),
+                 ("missing command", "", 0, "sh bin/no-such-check", "exited 127"),
+                 ("unparsable line", "current docs/map.md digest=short\n", 0, "sh bin/record", "does not parse"),
+                 ("exit contradicts statuses", "stale docs/map.md digest=0123456789abcdef\n", 0, "sh bin/record", "exited 0, but a listed page"))
+        for name, out, rc, command, why in cases:
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                result, sha, _ = self.record_run(out, rc, command=command)
+
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.audits()[-1]["status"], "blocked")
+                self.assertIn(why, self.audits()[-1]["detail"])
+                self.assertNotIn("claude", self.calls_log())  # the agent did not run
+                self.assertEqual(self.journal()[-1]["message"], f"audit-verification blocked churn at {sha}")
+                self.assertEqual(self.journal()[-1]["status"], "blocked")  # a blocked entry never moves the baseline
+                self.assertEqual(self.created(), [])
+
+    def test_a_prose_only_page_change_owes_no_control_and_the_checks_stderr_is_not_read(self):
+        # The churn edits docs/map.md's prose only: the check lists no page, and says so on stderr alone.
+        result, sha, facts = self.record_run("", 0)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.audits()[-1]["status"], "clean")
+        self.assertIn("no feature page changed what runs since the baseline", facts.read_text())
+        self.assertEqual(self.created(), [])
+
+    def test_without_a_record_command_the_facts_say_there_is_no_control_record(self):
+        facts = Path(self.tmp.name) / "facts"
+        self.churn()
+        self.audit_config()
+        self.fake("claude", f'echo "claude" >> "$CALLS"\nprintf "%s\\n" "$@" > {facts}\n'
+                            'echo "# Audit" > "$AUDIT_REPORT_FILE"\necho clean > "$AUDIT_OUTCOME_FILE"\n')
 
         result = self.guard_then_audit()
 
         self.assertEqual(result.returncode, 0, result.stdout)
-        guard_clone = self.state / "automation" / "shop" / "clone"
-        self.assertEqual((guard_clone / "docs" / "map.md").read_text(), "rewritten-by-control\n")  # the guard did dirty its tree
-        self.assertEqual(probe.read_text(), f"{sha}\n{self.MAP}")  # a clean checkout: no change, no untracked file
+        self.assertIn("- control record: no control record (AUDIT_CONTROL_RECORD_CMD is not set)", facts.read_text())
 
     def test_a_prose_fix_whose_message_the_projects_commit_msg_hook_rejects_is_not_published(self):
         self.commit_to_origin({"scripts/hooks/commit-msg": (
@@ -2272,6 +2353,22 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertNotIn("gh pr create", self.calls_log())
         self.assertEqual([b for b in self.origin_branches() if b.startswith("audit/")], [])
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+    def test_the_commit_msg_hook_that_runs_is_the_committed_one_not_a_copy_the_guard_dirtied(self):
+        ran = Path(self.tmp.name) / "hook-ran"
+        self.commit_to_origin({"scripts/hooks/commit-msg": ('#!/bin/sh\n[ -z "${HOOK_RAN:-}" ] || echo committed >> "$HOOK_RAN"\n', 0o755)})
+        sha = self.churn()
+        dirty = "printf '#!/bin/sh\\necho dirtied-hook >&2; exit 1\\n' > scripts/hooks/commit-msg"
+        self.audit_config(guard_steps=(self.PROVE, f"control|{dirty}"), extra=self.FIXES + 'HOOKS_PATH="scripts/hooks"\n')
+        self.agent("changed", self.fix_script())
+
+        result = self.guard_then_audit(HOOK_RAN=str(ran))
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("dirtied-hook", (self.state / "automation" / "shop" / "clone" / "scripts" / "hooks" / "commit-msg").read_text())
+        self.assertEqual(ran.read_text(), "committed\n")
+        self.assertEqual(self.audits()[-1]["status"], "changed")
+        self.assertEqual(self.git(self.origin, "rev-parse", f"audit/{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d}-map^"), sha)
 
     def test_changed_without_authorization_is_refused_and_logged_as_findings(self):
         for name, extra, env in (("no edit paths", "", {}), ("an audit PR still open", self.FIXES, {"OPEN_PRS": "1"})):

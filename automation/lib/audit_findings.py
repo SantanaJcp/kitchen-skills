@@ -4,13 +4,14 @@ issues, and what it sends.
 
   audit_findings.py open <issues.json>
       the open findings issues the agent sees before its pass, one per line: `- <key>: <title> (issue #N)`
-  audit_findings.py plan <report> <issues.json> <limit> <out-dir> <header.md> <project> <git-dir> <sha> [<unpublished-reason>]
+  audit_findings.py plan [--job-findings <file>] <report> <issues.json> <limit> <out-dir> <header.md> <project> <git-dir> <sha> [<unpublished-reason>]
       one line per finding, `<action> <number-or--> <key> <dir>`: `create` (no open issue carries its key),
       `comment` (its open issue's last text differs) or `none` (its open issue already says the same). <dir> holds
       `title` and `body.md`, redacted and cut under GitHub's limits. Redaction keeps the private terms the audited
       tree (<sha> in <git-dir>) already holds: they are the project's own vocabulary (lib/project_terms.py). With
       <unpublished-reason>, the prose fixes the pass committed did not ship, and that is one more finding, keyed
-      `unpublished-prose-fixes`.
+      `unpublished-prose-fixes`. With --job-findings, the findings the job itself found (a Findings section, such as
+      lib/control_record.py writes) are filed too; one of them replaces an agent finding with the same key.
 
 A finding is a `### <key>: <title>` heading inside the report's `## Findings` section, with its text up to the next
 heading of level 3 or less (fenced code blocks are text); the section holds nothing else. The key is kebab-case and the agent keeps it while the
@@ -129,7 +130,8 @@ def cut(text: str, note: str) -> str:
     return text if len(text) <= BODY_LIMIT else text[: BODY_LIMIT - len(note)] + note
 
 
-def plan(report_path, issues_path, limit, out_dir, header_path, project, git_dir, sha, unpublished=None) -> list[str]:
+def plan(report_path, issues_path, limit, out_dir, header_path, project, git_dir, sha, unpublished=None,
+         job_findings=None) -> list[str]:
     report = Path(report_path).read_text(encoding="utf-8", errors="replace")
     try:
         terms = foreign_terms(git_dir, sha)
@@ -140,10 +142,16 @@ def plan(report_path, issues_path, limit, out_dir, header_path, project, git_dir
         return scrub_all(text, terms)
 
     # Redacted before parsing, so a key, a title and a text that leave the machine are all redacted.
-    items = findings(scrub(report))
-    raw_keys = [key for key, _, _ in findings(report)]
+    # A pass the agent called clean has no Findings section; the job's own findings are then all there is.
+    agent_listed = not job_findings or any(SECTION.match(line) for line in report.splitlines())
+    items = findings(scrub(report)) if agent_listed else []
+    raw_keys = [key for key, _, _ in findings(report)] if agent_listed else []
     if raw_keys != [key for key, _, _ in items]:
         raise Refused("redaction changed a finding key; nothing is filed")
+    if job_findings:
+        own = findings(scrub(Path(job_findings).read_text(encoding="utf-8")))
+        mine = {key for key, _, _ in own}
+        items = [item for item in items if item[0] not in mine] + own
     if unpublished is not None:
         items.append((UNPUBLISHED, "Prose fixes the pass committed did not ship",
                       f"The pass committed prose fixes on its branch, and the job did not publish them: {scrub(unpublished)}.\n\n"
@@ -178,7 +186,10 @@ def main() -> int:
                 print(f"- {key}: {title} (issue #{number})")
             return 0
         if action == "plan":
-            print("\n".join(plan(args[0], args[1], int(args[2]), *args[3:])))
+            job = None
+            if args[:1] == ["--job-findings"]:
+                job, args = args[1], args[2:]
+            print("\n".join(plan(args[0], args[1], int(args[2]), *args[3:], job_findings=job)))
             return 0
     except Refused as reason:
         print(reason, file=sys.stderr)
