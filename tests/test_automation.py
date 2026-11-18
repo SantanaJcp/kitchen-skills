@@ -2240,6 +2240,21 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertNotIn("gh pr create", self.calls_log())
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
 
+    def test_the_agent_reads_the_tree_committed_at_the_audited_sha_not_what_the_guard_left_uncommitted(self):
+        # A verifier's control may rewrite a committed control record in the guard's clone without committing it; the
+        # sealed pass must judge the record as committed at the audited SHA.
+        probe = Path(self.tmp.name) / "agent-tree"
+        sha = self.churn()
+        self.audit_config(guard_steps=(self.PROVE, "control|echo rewritten-by-control > docs/map.md && echo new > record.local"))
+        self.agent("skipped", f'git status --porcelain --untracked-files=all > {probe}; git rev-parse HEAD >> {probe}; cat docs/map.md >> {probe}\n')
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        guard_clone = self.state / "automation" / "shop" / "clone"
+        self.assertEqual((guard_clone / "docs" / "map.md").read_text(), "rewritten-by-control\n")  # the guard did dirty its tree
+        self.assertEqual(probe.read_text(), f"{sha}\n{self.MAP}")  # a clean checkout: no change, no untracked file
+
     def test_a_prose_fix_whose_message_the_projects_commit_msg_hook_rejects_is_not_published(self):
         self.commit_to_origin({"scripts/hooks/commit-msg": (
             "#!/bin/sh\nif grep -qi '^co-authored-by:' \"$1\"; then echo 'no AI attribution' >&2; exit 1; fi\n", 0o755)})

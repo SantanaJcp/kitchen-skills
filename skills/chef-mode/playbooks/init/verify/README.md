@@ -23,7 +23,7 @@ Every project gets one verification skill so every agent proves behavior the sam
 | `diff` | Compare two captures, ignoring volatile fields, to prove "no behavior change" |
 | `prove` | Clean start → every feature drive block in map order → teardown; exit 0 only when every step passes |
 | `cleanup` | Stop only what `launch` started; keep the evidence |
-| `record` (optional) | Read the committed control record, without Docker or network: per feature page, a digest of what runs (drive blocks and the controls that target it, not prose) and the control runs that held at it. Print one line per page, `<current\|stale\|none\|no-controls> <page> digest=<hex> [sha=<sha> at=<iso>]`; with `--changed-since <ref>`, exit 1 when a changed page is not `current` |
+| `record` (optional) | Read the committed control record, without Docker or network: per feature page, a digest of what runs (drive blocks and the controls that target it, not prose) and the control runs that held at it. Print one line per page in the map's README order, `<status> <page> digest=<16 hex>[ sha=<sha> at=<iso>]`, status `current`, `partial` (a declared control has no held run at this digest yet), `stale`, `none` or `no-controls`. With `--changed-since <ref>` list only changed pages (none: empty stdout, summary on stderr) and exit 1 when one is not `current`; exit 2 when the record or the ref is unreadable or invalid |
 
 ## Rules that keep it honest
 
