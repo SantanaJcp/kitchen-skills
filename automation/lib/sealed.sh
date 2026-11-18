@@ -103,9 +103,10 @@ with os.fdopen(fd, "rb") as source, open(sys.argv[2], "wb") as copy:
 }
 
 # srt runs the job's verification; it is a node script, and EXTRA_PATH must reach node under launchd.
-require_srt() {
-  [ -x "$SRT" ] || stop "$VERIFY_STEPS_NAME is set and srt is not installed: npm ci --ignore-scripts --prefix $KITCHEN_AUTOMATION"
-  PATH="$TOOL_PATH" command -v node >/dev/null || stop "$VERIFY_STEPS_NAME is set and srt needs node, which is not on EXTRA_PATH"
+require_srt() { # [why srt is needed]
+  local why="${1:-$VERIFY_STEPS_NAME is set}"
+  [ -x "$SRT" ] || stop "$why and srt is not installed: npm ci --ignore-scripts --prefix $KITCHEN_AUTOMATION"
+  PATH="$TOOL_PATH" command -v node >/dev/null || stop "$why and srt needs node, which is not on EXTRA_PATH"
 }
 
 # What the sandboxes need beyond the project's paths, per platform: PLATFORM_READ, PLATFORM_WRITE, AGENT_SHELL.
@@ -364,6 +365,29 @@ publish_checked() {
   else
     { printf '%s\n\n' "$title"; git log --reverse --format='* %B' "$BASE_SHA..$head"; } | redact_known > "$JOB_DIR/message.txt"
   fi || refuse "could not build the commit message" || return 1
+  # The project's own commit-msg hook judges the message: the copy committed at the base, read from the job's own
+  # repository, never a working-tree file a guard step or the agent could have rewritten. It runs from the job's
+  # clone, unsandboxed like the guard's steps (it is the base's code), and only when the project's hooks folder
+  # (HOOKS_PATH, or the clone's hooks path) is inside the repository.
+  local hooks hook_note
+  hooks="$(unset GIT_DIR; git -C "$CLONE_DIR" config --get kitchen.projectHooksPath || true)"
+  case "$hooks" in "$CLONE_DIR"/*) hooks="${hooks#"$CLONE_DIR"/}" ;; esac
+  hooks="${hooks#./}"
+  hooks="${hooks%/}"
+  if [ -n "$hooks" ] && [ "${hooks#/}" = "$hooks" ] && git cat-file -e "$BASE_SHA:$hooks/commit-msg" 2>/dev/null; then
+    git show "$BASE_SHA:$hooks/commit-msg" > "$JOB_DIR/commit-msg" && chmod +x "$JOB_DIR/commit-msg" ||
+      refuse "could not read the project's commit-msg hook at the base" || return 1
+    (unset GIT_DIR; cd "$CLONE_DIR" && bounded 120 "$JOB_DIR/commit-msg" "$JOB_DIR/message.txt") > "$JOB_DIR/commit-msg.log" 2>&1 ||
+      { refuse "the project's commit-msg hook rejects the commit message: $(tr '\n' ';' < "$JOB_DIR/commit-msg.log" | cut -c1-300)"; return 1; }
+    hook_note="accepted by the project's commit-msg hook ($hooks/commit-msg as committed at the base; run by the job, not sandboxed)"
+  else
+    hook_note="no commit-msg hook committed in the project's hooks folder (${hooks:-none set}) checked it"
+  fi
+  # Whatever the hook said, the job publishes no AI attribution: a project's merge gate may reject it.
+  ! grep -Eiq '^co-authored-by[[:blank:]]*:|generated with \[?claude code' "$JOB_DIR/message.txt" ||
+    { refuse "the commit message carries an AI attribution line (Co-Authored-By or Generated with Claude Code)"; return 1; }
+  printf '\nCommit message: %s.\n' "$hook_note" >> "$JOB_DIR/body.md"
+
   commit="$(GIT_AUTHOR_NAME="$(git log -1 --format=%an "$head")" GIT_AUTHOR_EMAIL="$(git log -1 --format=%ae "$head")" \
     git commit-tree "$tree" -p "$BASE_SHA" -F "$JOB_DIR/message.txt")" || refuse "could not build the commit" || return 1
   [ "$(git rev-parse "$commit^{tree}")" = "$tree" ] || refuse "the built commit does not hold the validated tree" || return 1

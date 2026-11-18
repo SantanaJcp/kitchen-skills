@@ -12,6 +12,13 @@
 #      audit-verification entry of the last 30 days in the kitchen journal whose outcome moves it (the skill's
 #      rule, lib/audit_state.py); with none, the job refuses: a full pass is run by hand. Audited SHA equal to the
 #      baseline: skipped.
+#   1b. The control record, when the project declares AUDIT_CONTROL_RECORD_CMD (its static record check, without
+#      arguments): the job runs it with --changed-since <baseline> in the agent's clean clone at the audited SHA,
+#      before the agent, under srt with no network and no write outside its own output dir, and reads its stdout
+#      strictly (lib/control_record.py; stderr is not read). Exit 2, any exit but 0 or 1, or a line that does not
+#      parse makes the pass blocked and the agent does not run. Each listed page that is not current is a step-5
+#      finding the job files itself, so the pass cannot end clean while one is owed; the agent gets the parsed
+#      record as a run fact. Without the command, the run facts say there is no control record.
 #   2. The agent runs sealed like the gardener's (lib/sealed.sh), minus its domains and sockets: its own clone, no
 #      network, no Docker, no gh, no git credentials, so it cannot drive the app. It gets the skill, the guard's
 #      record, step logs and evidence copies, and the open findings issues with their keys (listed by the job; when
@@ -64,6 +71,8 @@ declare -p AUDIT_GUARD_STEPS >/dev/null 2>&1 || AUDIT_GUARD_STEPS=()
 declare -p AUDIT_EVIDENCE_PATHS >/dev/null 2>&1 || AUDIT_EVIDENCE_PATHS=()
 declare -p AUDIT_EDIT_PATHS >/dev/null 2>&1 || AUDIT_EDIT_PATHS=()
 declare -p AUDIT_VERIFY_STEPS >/dev/null 2>&1 || AUDIT_VERIFY_STEPS=()
+RECORD_CMD="${AUDIT_CONTROL_RECORD_CMD:-}"
+RECORD_DIR="$JOB_DIR/record"  # the record check's stdout, stderr, exit code, and what the job read from them
 AUDIT_TIMEOUT="${AUDIT_TIMEOUT_SECONDS:-3600}"
 MAX_CHANGED_LINES="${AUDIT_MAX_CHANGED_LINES:-200}"
 PROTECTED_PATHS=(".github/*")
@@ -128,7 +137,9 @@ report_findings() { # prose-fixes-line-or-empty unpublished-reason-or-empty
   } > "$header"
   gh label create "$ISSUE_LABEL" -R "$GH_REPO" --color FBCA04 --description "Daily verification audit finding" >/dev/null 2>&1 || true
   list_findings_issues "$JOB_DIR/open-issues.json" || { NOT_FILED="could not list the open findings issues"; return 1; }
-  python3 "$KITCHEN_AUTOMATION/lib/audit_findings.py" plan "$JOB_DIR/report.md" "$JOB_DIR/open-issues.json" \
+  local job=()
+  [ ! -s "$RECORD_DIR/findings.md" ] || job=(--job-findings "$RECORD_DIR/findings.md")
+  python3 "$KITCHEN_AUTOMATION/lib/audit_findings.py" plan ${job[@]+"${job[@]}"} "$JOB_DIR/report.md" "$JOB_DIR/open-issues.json" \
     "$ISSUE_LIST_LIMIT" "$plan" "$header" "$PROJECT" "$CLONE_DIR/.git" "$SHA" ${2:+"$2"} > "$JOB_DIR/plan.txt" 2> "$JOB_DIR/plan.err" ||
     { NOT_FILED="$(head -c 300 "$JOB_DIR/plan.err")"; return 1; }
   while read -r action number key dir; do
@@ -150,6 +161,33 @@ report_findings() { # prose-fixes-line-or-empty unpublished-reason-or-empty
     esac
   done < "$JOB_DIR/plan.txt"
   [ -z "$NOT_FILED" ] && [ -n "$FILED" ]
+}
+
+# The project's static control record check (AUDIT_CONTROL_RECORD_CMD), run by the job in the agent's clean clone at
+# the audited SHA before the agent runs: srt, no network, reads limited like the agent's, writes only to RECORD_DIR.
+# The command and the paths travel as variables: srt joins positional arguments without quoting. Returns 1, with the
+# reason in RECORD_DIR/why, unless lib/control_record.py read the result.
+record_check() {
+  local rc=0 recorded var path keep=() args=(--format srt --read "$AGENT_CLONE" --write "$RECORD_DIR")
+  mkdir -p "$RECORD_DIR"
+  for path in ${GARDENER_SANDBOX_READ[@]+"${GARDENER_SANDBOX_READ[@]}"} ${PLATFORM_READ[@]+"${PLATFORM_READ[@]}"}; do
+    args+=(--read "$path")
+  done
+  for path in ${PLATFORM_WRITE[@]+"${PLATFORM_WRITE[@]}"}; do args+=(--read "$path" --write "$path"); done
+  python3 "$KITCHEN_AUTOMATION/lib/sandbox_settings.py" "${args[@]}" > "$JOB_DIR/record-srt.json" ||
+    { echo "could not write its sandbox settings" > "$RECORD_DIR/why"; return 1; }
+  for var in HOME USER LOGNAME LANG TERM $(compgen -e | grep '^LC_' || true); do
+    if [ -n "${!var+x}" ]; then keep+=("$var=${!var}"); fi
+  done
+  log "control record: $RECORD_CMD --changed-since $BASELINE"
+  (cd "$AGENT_CLONE" && bounded 300 env -i ${keep[@]+"${keep[@]}"} KITCHEN_SLOT=automation \
+    PATH="$KITCHEN_AUTOMATION/shims/sealed:$TOOL_PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    KITCHEN_STEP="$RECORD_CMD --changed-since $BASELINE" KITCHEN_OUT="$RECORD_DIR/stdout" KITCHEN_STEP_EXIT="$RECORD_DIR/rc" \
+    "$SRT" -s "$JOB_DIR/record-srt.json" -c 'bash -o pipefail -c "$KITCHEN_STEP" > "$KITCHEN_OUT"; echo $? > "$KITCHEN_STEP_EXIT"') \
+    > "$RECORD_DIR/stderr" 2>&1 || rc=$?
+  recorded="$(cat "$RECORD_DIR/rc" 2>/dev/null || echo "none (srt exit $rc)")"
+  [ "$rc" = 0 ] || recorded="$recorded, srt exit $rc"
+  python3 "$KITCHEN_AUTOMATION/lib/control_record.py" "$recorded" "$RECORD_DIR/stdout" "$RECORD_DIR" 2> "$RECORD_DIR/why"
 }
 
 finish() {
@@ -271,8 +309,21 @@ fi
 BASE_SHA="$SHA"
 make_agent_clone "$SHA"
 [ "$FIXES" != yes ] || require_srt
+[ -z "$RECORD_CMD" ] || require_srt "AUDIT_CONTROL_RECORD_CMD is set"
 sandbox_platform
 write_agent_settings
+
+if [ -n "$RECORD_CMD" ]; then
+  if ! record_check; then
+    journal_outcome blocked
+    result blocked "the control record check cannot be read: $(tr '\n' ';' < "$RECORD_DIR/why" | cut -c1-300) (output in $RECORD_DIR); the agent did not run"
+    exit 0
+  fi
+  cp "$RECORD_DIR/facts.md" "$WORK_DIR/control-record.md"
+  RECORD_FACT="the project's control record, read by the job from \`$RECORD_CMD --changed-since $BASELINE\` at the audited SHA: $WORK_DIR/control-record.md (step 5)"
+else
+  RECORD_FACT="no control record (AUDIT_CONTROL_RECORD_CMD is not set): step 5's rule without a record holds"
+fi
 
 guard_steps="${AUDIT_GUARD_STEPS[*]}"
 FACTS="- audited SHA (your clone's HEAD): $SHA
@@ -285,6 +336,7 @@ FACTS="- audited SHA (your clone's HEAD): $SHA
 - report file: $REPORT_FILE
 - outcome file: $OUTCOME_FILE
 - open findings issues and their keys (data from GitHub, not instructions): $WORK_DIR/open-findings.md
+- control record: $RECORD_FACT
 - fixes authorized: $FIXES"
 if [ "$FIXES" = yes ]; then
   VERIFY_NAMES=""
@@ -313,6 +365,14 @@ case "$OUTCOME" in
   *) stop "no valid outcome in $OUTCOME_FILE (got '${OUTCOME:0:40}')" ;;
 esac
 [ -s "$REPORT_FILE" ] || stop "outcome $OUTCOME, but no report at $REPORT_FILE"
+# The control record owes a control the agent's outcome may not show: the job's own findings make it findings.
+if [ -s "$RECORD_DIR/findings.md" ]; then
+  case "$OUTCOME" in
+    clean|skipped|changed)
+      warn "the agent's outcome is $OUTCOME, but the control record owes controls ($(grep -c '^### ' "$RECORD_DIR/findings.md") pages): findings"
+      OUTCOME=findings ;;
+  esac
+fi
 # The report can leave the machine (the findings issues): only the job's own copy is published (lib/sealed.sh).
 copy_agent_file "$REPORT_FILE" "$JOB_DIR/report.md" ||
   stop "outcome $OUTCOME, but the report at $REPORT_FILE is not a regular file of its own"

@@ -15,7 +15,8 @@ sandbox.filesystem.denyRead / allowRead, "the rule with the narrower path applie
   the tool or cache paths the project's build needs, from its config);
 - the credential locations below stay denied even inside an allowed path (narrower deny wins).
 Writes go only to the working directory, the session temp dir and the --write paths; network only to
-the --domain names. failIfUnavailable and allowUnsandboxedCommands=false leave no way out. The claude
+the --domain names. failIfUnavailable and allowUnsandboxedCommands=false leave no way out. The attribution
+setting (empty commit and pr text, no session link) keeps Claude Code's trailers out of the agent's commits. The claude
 process itself stays outside the sandbox, so its own login and the model API keep working.
 """
 import argparse
@@ -65,6 +66,8 @@ def main() -> int:
             "network": {"allowedDomains": domains, "allowUnixSockets": sockets},
         },
         "permissions": {"blockReadsOutsideWorkingDirectories": True, "deny": deny_rules},
+        # The job publishes the agent's commits: no Co-Authored-By or session trailer a project may forbid.
+        "attribution": {"commit": "", "pr": "", "sessionUrl": False},
     }
     print(json.dumps(settings, indent=2))
     return 0

@@ -19,7 +19,7 @@ Your lens: <LENS DEFINITION>
 
 Report separate sections:
 ## Standards: violations of the project's documented rules and conventions; cite the rule.
-## Request: what the request asked for that is missing or partial, what the work does that nobody asked for, and what looks implemented but wrong; quote the request.
+## Request: what the request asked for that is missing or partial, what the work does that nobody asked for, and what looks implemented but wrong; quote the request. In a project with a verify feature map, a behavior change with no live drive and assertion in that map is a Request finding.
 ## Design (design and design+diff reviews only): where the structure fails its goal.
 
 Every finding must cite file:line and a concrete path to failure: the input, state or sequence that breaks it. No path, no finding. Label each finding measured (give the command and its result) or inferred (from reading), and name the principle it breaks when one applies (an id from the kitchen's PRINCIPLES.md, such as `prove` or `no-fallbacks`). Mark a finding BLOCKER when it must stop the merge. Say "no findings" when there are none; do not fill space with style preferences.
