@@ -75,7 +75,7 @@ Match the request to one row and copy its steps into your todo list. A skill nam
 1. Your first message on a task restates, in your own words, the goal, what is out of scope and the smallest change you expect. Do not wait for confirmation. If the evidence rules out what was asked, show it and stop. Every worker brief, right after its chef-mode line, and every final report opens with that goal.
 2. Read the project's AGENTS.md and `decisions.md`; do not ask what is already decided there.
 3. Name the data shape first; make the smallest change that does the job (`small-owned`, `design`).
-4. Prove it on the project's own check and verify method (see Verification). A behavior change ships with a test that fails without it.
+4. Prove it on the project's own check and verify method (see Verification). A behavior change ships with a test that fails without it; where the project keeps a verify feature map, the same PR updates that behavior's live drive and assertion in the map, and runs and records its controls where the project keeps a control record.
 5. Review and merge as the door and the project's rung allow (see Doors and the trust ladder). Read `second-opinion` in full before you write any reviewer brief.
 6. Report: what changed, how it was proved, what is left, the decisions owed.
 

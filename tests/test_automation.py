@@ -1255,6 +1255,8 @@ class GardenerPublicationTests(AutomationFixture):
         for path in ("~/.ssh", "~/Library/Keychains", "~/.config/gh", "~/.git-credentials", "~/.netrc", "~/.aws"):
             self.assertIn(path, sandbox["filesystem"]["denyRead"])
         self.assertIn("Read(~/.ssh/**)", settings["permissions"]["deny"])
+        # the job publishes the agent's commits: Claude Code adds no attribution trailer a project may forbid
+        self.assertEqual(settings["attribution"], {"commit": "", "pr": "", "sessionUrl": False})
         self.assertEqual(sandbox["network"]["allowedDomains"], ["nuget.org"])
         self.assertIn(f"{os.environ['HOME']}/.nuget", sandbox["filesystem"]["allowWrite"])
         # reads are an allowlist: the whole home is denied, then exactly the job's paths are re-opened
@@ -1536,6 +1538,34 @@ printf '#!/bin/sh\\ntouch {evil}\\n' > scripts/hooks/post-checkout
 
         self.assertEqual((published.returncode, guard.returncode), (0, 0), published.stdout + guard.stdout)
         self.assertFalse(evil.exists())
+
+    NO_TRAILER_HOOK = textwrap.dedent("""\
+        #!/bin/sh
+        # The project's merge gate: no AI attribution in commits.
+        if grep -qi '^co-authored-by:' "$1"; then echo "commit-msg: AI attribution is not allowed" >&2; exit 1; fi
+        [ -z "${HOOK_RAN:-}" ] || echo ran >> "$HOOK_RAN"  # only the job passes it; the agent's sandbox does not
+        """)
+
+    def test_a_message_the_projects_commit_msg_hook_rejects_is_refused_and_a_clean_one_publishes(self):
+        ran = Path(self.tmp.name) / "hook-ran"
+        self.commit_to_origin({"scripts/hooks/commit-msg": (self.NO_TRAILER_HOOK, 0o755)})
+        self.configure_publishing(extra='HOOKS_PATH="scripts/hooks"')
+        # the agent's clone forwards the same hook; an agent that skips it must still not reach the merge gate
+        trailer = self.commit_script().replace('-m "Tidy notes"', '--no-verify -m "Tidy notes" -m "Co-Authored-By: Claude <noreply@anthropic.com>"')
+        self.assertNotEqual(trailer, self.commit_script())
+        self.agent(trailer)
+
+        self.assert_refused(self.run_job("weekly-gardener", "shop", HOOK_RAN=str(ran)),
+                            "the project's commit-msg hook rejects the commit message: commit-msg: AI attribution is not allowed")
+
+        self.agent(self.commit_script())
+        result = self.run_job("weekly-gardener", "shop", HOOK_RAN=str(ran))
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(ran.read_text(), "ran\n")  # the job judged the published message, and only the clean one passed
+        pr = next(line for line in self.calls_log().splitlines() if line.startswith("gh pr create"))
+        self.assertIn("- commit message: accepted by the project's commit-msg hook", Path(pr.split("--body-file ")[1].split()[0]).read_text())
+        self.assertTrue(any(b.startswith("gardener/") for b in self.origin_branches()))
 
     def test_cleanup_never_runs_code_the_agent_wrote(self):
         tmp = Path(self.tmp.name)
@@ -2208,6 +2238,24 @@ cat "$work/guard/evidence/prove-again/.verify/evidence/ledger.jsonl" > {tmp}/sec
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("outcome clean, but the agent committed audit/", result.stdout)
         self.assertNotIn("gh pr create", self.calls_log())
+        self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
+
+    def test_a_prose_fix_whose_message_the_projects_commit_msg_hook_rejects_is_not_published(self):
+        self.commit_to_origin({"scripts/hooks/commit-msg": (
+            "#!/bin/sh\nif grep -qi '^co-authored-by:' \"$1\"; then echo 'no AI attribution' >&2; exit 1; fi\n", 0o755)})
+        sha = self.churn()
+        self.audit_config(extra=self.FIXES + 'HOOKS_PATH="scripts/hooks"\n')
+        script = self.fix_script().replace('-am "docs: correct the map"',
+                                           '--no-verify -am "docs: correct the map" -m "Co-Authored-By: Claude <noreply@anthropic.com>"')
+        self.assertNotEqual(script, self.fix_script())
+        self.agent("changed", script)
+
+        result = self.guard_then_audit()
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("the project's commit-msg hook rejects the commit message: no AI attribution", result.stdout)
+        self.assertNotIn("gh pr create", self.calls_log())
+        self.assertEqual([b for b in self.origin_branches() if b.startswith("audit/")], [])
         self.assertEqual(self.journal()[-1]["message"], f"audit-verification findings churn at {sha}")
 
     def test_changed_without_authorization_is_refused_and_logged_as_findings(self):

@@ -364,6 +364,21 @@ publish_checked() {
   else
     { printf '%s\n\n' "$title"; git log --reverse --format='* %B' "$BASE_SHA..$head"; } | redact_known > "$JOB_DIR/message.txt"
   fi || refuse "could not build the commit message" || return 1
+  # The project's own commit-msg hook judges the message, as git would run it in the job's clone: the base's hooks
+  # (install_push_guard forwards them), never the agent's tree. A message the project's merge gate would reject,
+  # such as an attribution trailer its AGENTS.md forbids, is refused here instead of opening a PR that is red.
+  # No hook in the project's hooks folder (HOOKS_PATH in the config) checks nothing, and the PR body says so.
+  local msg_hook
+  msg_hook="$(unset GIT_DIR; git -C "$CLONE_DIR" config --get kitchen.projectHooksPath)/commit-msg" || refuse "cannot read the clone's hooks path" || return 1
+  case "$msg_hook" in /*) ;; *) msg_hook="$CLONE_DIR/$msg_hook" ;; esac
+  (unset GIT_DIR; cd "$CLONE_DIR" && bounded 120 git hook run --ignore-missing commit-msg -- "$JOB_DIR/message.txt") \
+    > "$JOB_DIR/commit-msg.log" 2>&1 ||
+    { refuse "the project's commit-msg hook rejects the commit message: $(tr '\n' ';' < "$JOB_DIR/commit-msg.log" | cut -c1-300)"; return 1; }
+  if [ -x "$msg_hook" ]; then
+    printf -- '- commit message: accepted by the project'"'"'s commit-msg hook\n' >> "$JOB_DIR/body.md"
+  else
+    printf -- '- commit message: not checked, the project'"'"'s hooks folder has no commit-msg hook\n' >> "$JOB_DIR/body.md"
+  fi
   commit="$(GIT_AUTHOR_NAME="$(git log -1 --format=%an "$head")" GIT_AUTHOR_EMAIL="$(git log -1 --format=%ae "$head")" \
     git commit-tree "$tree" -p "$BASE_SHA" -F "$JOB_DIR/message.txt")" || refuse "could not build the commit" || return 1
   [ "$(git rev-parse "$commit^{tree}")" = "$tree" ] || refuse "the built commit does not hold the validated tree" || return 1

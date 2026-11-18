@@ -23,10 +23,11 @@ Every project gets one verification skill so every agent proves behavior the sam
 | `diff` | Compare two captures, ignoring volatile fields, to prove "no behavior change" |
 | `prove` | Clean start → every feature drive block in map order → teardown; exit 0 only when every step passes |
 | `cleanup` | Stop only what `launch` started; keep the evidence |
+| `record` (optional) | Read the committed control record, without Docker or network: per feature page, a digest of what runs (drive blocks and the controls that target it, not prose) and the control runs that held at it. Print one line per page, `<current\|stale\|none\|no-controls> <page> digest=<hex> [sha=<sha> at=<iso>]`; with `--changed-since <ref>`, exit 1 when a changed page is not `current` |
 
 ## Rules that keep it honest
 
 - A guard test in the project fails when a new entry point (route, command, screen) is missing from `features/`.
 - `prove` never weakens an expectation to pass; a defect found by the verifier is listed in the map as evidence until it is fixed.
-- The verifier must be able to fail: `audit-verification` breaks an expectation on purpose and expects red.
+- The verifier must be able to fail: `audit-verification` breaks an expectation on purpose and expects red. A project that keeps a control record lets the sealed daily audit cite a page's controls instead of flagging every changed page; its check refuses a changed page without a `current` record.
 - Build it by interrogating the repo, not the user: how the app starts, authenticates, what can be driven and what evidence can be captured. Prove it once end to end before calling it done.

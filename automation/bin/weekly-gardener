@@ -10,7 +10,8 @@
 #   2. After Claude exits, this script validates the branch's final tree against origin/$BRANCH: the only
 #      gardener branch, 1+ commits, at most GARDENER_MAX_CHANGED_LINES changed lines (default 400), none of
 #      GARDENER_PROTECTED_PATHS (default: .github/*), no credential-looking content in the added lines
-#      (lib/scan_diff.py). It then publishes ONE new commit holding exactly that
+#      (lib/scan_diff.py), and a commit message the project's own commit-msg hook accepts (the base's hook, run
+#      from the job's clone). It then publishes ONE new commit holding exactly that
 #      validated tree on top of origin/$BRANCH, never the agent's history (a file added and removed again
 #      there would otherwise be published), and opens the PR.
 #   3. Before publishing, the job reruns GARDENER_VERIFY_STEPS itself on that exact tree, written from the
