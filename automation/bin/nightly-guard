@@ -1,217 +1,51 @@
 #!/usr/bin/env bash
-# Nightly guard: build, test and prove the tip of the project's branch.
-# Principles: `prove`, `truthful-state` (never green without steps; a report that could not compare is never "nothing to
-# report"), `owner-attention` (one issue while red; one issue per green-run warning kind, closed when it clears).
-# Opens (or comments on) one GitHub issue when a step fails and closes it when the branch is green.
-# Every record lists the steps that finished with their seconds. GUARD_STEP_BUDGETS (optional, "name|seconds") warns
-# when a step runs over its budget, never changing the verdict; a green run over budget opens (or comments on) one
-# issue labelled <GUARD_LABEL>-budget, closed by the next green run within every budget.
-# GUARD_REPORT_CMD (optional) runs in the clone after a green run only, with no stdin and a deadline
-# (GUARD_REPORT_TIMEOUT_SECONDS), never changing the verdict: each line it prints, or a non-zero exit or the deadline,
-# is a warning and opens (or comments on) one issue labelled <GUARD_LABEL>-report; a run with no line and exit 0 closes it.
-# After each step the daily audit cites (AUDIT_GUARD_STEPS), the guard keeps a copy of AUDIT_EVIDENCE_PATHS from its
-# clone in $STATE_DIR/evidence/<run>/<step>/, for the newest EVIDENCE_KEEP runs that kept any.
-# A red or incomplete run also shows a local notification (lib/kitchen/notify.py); a green one never does.
-# Every run that holds the lock is exactly one line in the nightly history read by `kitchen status`: "running"
-# from the start, replaced when the run ends, however it ends:
-#   green / red          the steps' verdict; problems around it (cleanup, metrics, issue report) go to "warnings"
-#   incomplete           interrupted or aborted before a verdict; failed_step names the phase. A "running" line
-#                        left by a run killed with SIGKILL is closed as incomplete by the next run.
-# A run skipped as busy (another job of this project held the clone for LOCK_WAIT_SECONDS) never held the lock:
-# it only logs and writes no record, so it can neither mask the result of the run that held the lock nor race that
-# run's own writes to the record. A night with no run at all shows as `overdue` in `kitchen status`.
+# Nightly guard: sync a dedicated clone, run the project's nightly steps with a timeout and a lock,
+# write one JSON line, open/comment one GitHub issue while red and close it when green, and notify on exceptions.
+# Principles: `prove`, `truthful-state` (never green without steps), `owner-attention` (one issue while red,
+# closed when green), `isolate` (dedicated clone, project lock).
 # Usage: nightly-guard <project>
-# Trial run (neither recorded nor reported): GUARD_ONLY="build,fast-tests" nightly-guard <project>
-source "$(dirname "$0")/../lib/common.sh" "$1" nightly
+# Trial run (neither recorded nor reported): GUARD_ONLY="build,tests" nightly-guard <project>
+source "$(dirname "$0")/../lib/common.sh" "$1"
 
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 RUN_LOG="$LOG_DIR/guard-$RUN_ID.log"
 exec > >(tee -a "$RUN_LOG") 2>&1
 
 ISSUE_TITLE="Nightly guard failing on $BRANCH"
-BUDGET_TITLE="Nightly guard over its time budget on $BRANCH"
-REPORT_TITLE="Nightly guard report on $BRANCH"
-EVIDENCE_DIR="$STATE_DIR/evidence"
-EVIDENCE_KEEP=3
-declare -p GUARD_STEP_BUDGETS >/dev/null 2>&1 || GUARD_STEP_BUDGETS=()
-declare -p AUDIT_GUARD_STEPS >/dev/null 2>&1 || AUDIT_GUARD_STEPS=()
-declare -p AUDIT_EVIDENCE_PATHS >/dev/null 2>&1 || AUDIT_EVIDENCE_PATHS=()
+STEP_TIMEOUT="${STEP_TIMEOUT_SECONDS:-3600}"
 TRIAL="${GUARD_ONLY:-}"
 VERDICT="incomplete"
 PHASE="start"
 FAILED=""
 FAILED_LOG=""
-STARTED=0   # 1 once a project command may have started something that needs cleanup
+STARTED=0
 SHA=""
 CLEANUP="skipped"
-METRICS="skipped"
-DONE_NAMES=()     # the steps that finished, in order, with their whole seconds and green/red
+DONE_NAMES=()
 DONE_SECONDS=()
 DONE_STATUS=()
-BUDGET_NAMES=()   # the valid budgets: step name and seconds
-BUDGET_SECONDS=()
-OVER_BUDGET=()    # "<step> <s>s > <budget>s" for each finished step over its budget
 
-# Each gh call ends the function with 1 on failure; the caller records it as a warning.
 report_failure() { # step sha log-file
   [ "${GUARD_NO_REPORT:-0}" = 1 ] && { log "issue report suppressed (GUARD_NO_REPORT)"; return 0; }
   local last_lines body_file="$LOG_DIR/guard-$RUN_ID-issue.md"
   last_lines="$(tail -60 "$3" | redact)" || return 1
   printf 'Step **%s** failed on `%s` at %s (run %s).\n\nLast lines of the log (secrets redacted):\n\n```\n%s\n```\n\nFull log on the guard machine: `%s`' \
     "$1" "$2" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_ID" "$last_lines" "$RUN_LOG" > "$body_file" || return 1
-  report_issue "$GUARD_LABEL" B60205 "Nightly guard on the shared branch" "$ISSUE_TITLE" "$body_file"
+  report_issue "${GUARD_LABEL:-nightly-guard}" B60205 "Nightly guard on the shared branch" "$ISSUE_TITLE" "$body_file"
 }
 
 report_green() { # sha
   [ "${GUARD_NO_REPORT:-0}" = 1 ] && return 0
   local existing
-  existing="$(open_issue_number "$GUARD_LABEL" "$ISSUE_TITLE")" || return 1
+  existing="$(open_issue_number "${GUARD_LABEL:-nightly-guard}" "$ISSUE_TITLE")" || return 1
   [ -z "$existing" ] && return 0
-  gh issue close "$existing" -R "$GH_REPO" --comment "Green again on \`$1\` (run $RUN_ID)." >/dev/null || return 1
+  gh_bounded issue close "$existing" -R "$GH_REPO" --comment "Green again on \`$1\` (run $RUN_ID)." >/dev/null || return 1
   log "closed issue #$existing"
 }
 
-# Green runs only: a red or incomplete run stopped early and proves nothing about time. Without a valid budget the
-# issue is left as is.
-report_budget() { # sha
-  [ "${GUARD_NO_REPORT:-0}" = 1 ] && return 0
-  [ ${#BUDGET_NAMES[@]} -gt 0 ] || return 0
-  local label="$GUARD_LABEL-budget" existing over="" i body_file="$LOG_DIR/guard-$RUN_ID-budget-issue.md"
-  if [ ${#OVER_BUDGET[@]} = 0 ]; then
-    existing="$(open_issue_number "$label" "$BUDGET_TITLE")" || return 1
-    [ -z "$existing" ] && return 0
-    gh issue close "$existing" -R "$GH_REPO" --comment "Every budgeted step within its budget on \`$1\` (run $RUN_ID)." >/dev/null || return 1
-    log "closed budget issue #$existing"
-    return 0
-  fi
-  for ((i = 0; i < ${#OVER_BUDGET[@]}; i++)); do over+="- ${OVER_BUDGET[$i]}"$'\n'; done
-  printf 'Green on `%s` at %s (run %s), with steps over their time budget (GUARD_STEP_BUDGETS):\n\n%s\nEvery step of the run:\n\n%s\n' \
-    "$1" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_ID" "$over" "$(step_table)" > "$body_file" || return 1
-  report_issue "$label" FBCA04 "Nightly guard step over its time budget" "$BUDGET_TITLE" "$body_file"
-}
-
-# Green runs only, like the budget: GUARD_REPORT_CMD runs in the clone. Each non-blank line it prints (redacted) is a
-# warning and an item in the issue. A non-zero exit means it could not compare: a warning and the issue too, with its
-# stderr tail, never "nothing to report". No line and exit 0 closes the issue. Without the command nothing runs and the
-# issue is left as is. It reads no stdin and has a deadline (GUARD_REPORT_TIMEOUT_SECONDS, whole seconds, default 600;
-# bounded stops its whole process group): a report that waits must not hold the record, nor the project lock, forever.
-run_report() { # sha
-  [ -n "${GUARD_REPORT_CMD:-}" ] || return 0
-  local out="$LOG_DIR/guard-$RUN_ID-report.out" err="$LOG_DIR/guard-$RUN_ID-report.err" rc lines line items="" count=0
-  local label="$GUARD_LABEL-report" existing stderr_tail outcome body_file="$LOG_DIR/guard-$RUN_ID-report-issue.md"
-  local timeout="${GUARD_REPORT_TIMEOUT_SECONDS:-600}" started ended why=""
-  if [[ ! "$timeout" =~ ^[1-9][0-9]*$ ]]; then
-    warn "report not run: GUARD_REPORT_TIMEOUT_SECONDS=$timeout is not whole seconds"
-    return 0
-  fi
-  started=$SECONDS
-  (cd "$CLONE_DIR" && bounded "$timeout" bash -c "$GUARD_REPORT_CMD") < /dev/null > "$out" 2> "$err"
-  rc=$?
-  ended="exited $rc"
-  [ "$rc" = 0 ] || why="exit $rc"
-  # bounded exits 124 on its deadline; a command that exits 124 by itself before it is still "exit 124"
-  if [ "$rc" = 124 ] && [ $((SECONDS - started)) -ge "$timeout" ]; then ended="timed out after ${timeout}s"; why="$ended"; fi
-  log "report $ended (stdout $out, stderr $err)"
-  [ -z "$why" ] || warn "report could not compare ($why)"
-  lines="$(redact < "$out")" || return 1
-  while IFS= read -r line; do
-    [ -n "${line//[[:space:]]/}" ] || continue
-    warn "report: $line"
-    items+="- $line"$'\n'; count=$((count + 1))
-  done <<< "$lines"
-  [ "${GUARD_NO_REPORT:-0}" = 1 ] && return 0
-  if [ "$rc" = 0 ] && [ "$count" = 0 ]; then
-    existing="$(open_issue_number "$label" "$REPORT_TITLE")" || return 1
-    [ -z "$existing" ] && return 0
-    gh issue close "$existing" -R "$GH_REPO" --comment "Nothing to report on \`$1\` (run $RUN_ID): GUARD_REPORT_CMD printed no line and exited 0." >/dev/null || return 1
-    log "closed report issue #$existing"
-    return 0
-  fi
-  if [ "$rc" = 0 ]; then
-    outcome="GUARD_REPORT_CMD $ended."$'\n'
-  else
-    # the whole stderr is redacted before it is cut: a private key cut from its BEGIN line would no longer be found
-    stderr_tail="$(redact < "$err" | tail -20)" || return 1
-    outcome="$(printf 'GUARD_REPORT_CMD %s: **the report could not compare**, so this run says nothing about what it reports, and is not "nothing to report". Last lines of its stderr (secrets redacted):\n\n```\n%s\n```\n' "$ended" "$stderr_tail")"$'\n'
-  fi
-  [ "$count" -gt 0 ] && outcome+=$'\n'"Its $count line(s) (secrets redacted):"$'\n\n'"$items"
-  printf 'Green on `%s` at %s (run %s). %s\nFull output on the guard machine: `%s` and `%s`\n' \
-    "$1" "$(date -u +%Y-%m-%dT%H:%MZ)" "$RUN_ID" "$outcome" "$out" "$err" > "$body_file" || return 1
-  report_issue "$label" FBCA04 "Nightly guard report on a green run" "$REPORT_TITLE" "$body_file"
-}
-
-step_table() {
-  local i
-  for ((i = 0; i < ${#DONE_NAMES[@]}; i++)); do printf -- '- %s: %ss, %s\n' "${DONE_NAMES[$i]}" "${DONE_SECONDS[$i]}" "${DONE_STATUS[$i]}"; done
-}
-
-# The steps that finished, one "<seconds> <status> <name>" line each, as lib/record.py reads them.
 step_lines() {
   local i
   for ((i = 0; i < ${#DONE_NAMES[@]}; i++)); do printf '%s %s %s\n' "${DONE_SECONDS[$i]}" "${DONE_STATUS[$i]}" "${DONE_NAMES[$i]}"; done
-}
-
-is_step() { # name
-  local entry
-  for entry in ${GUARD_STEPS[@]+"${GUARD_STEPS[@]}"}; do [ "${entry%%|*}" = "$1" ] && return 0; done
-  return 1
-}
-
-# A budget only ever warns: a malformed entry or one that names no step is a warning, never a failure. Seconds are a
-# whole number without a leading zero (bash would read 010 as octal).
-read_budgets() {
-  local entry name seconds
-  for entry in ${GUARD_STEP_BUDGETS[@]+"${GUARD_STEP_BUDGETS[@]}"}; do
-    name="${entry%%|*}"; seconds="${entry#*|}"
-    if [[ "$entry" != *"|"* ]] || [ -z "$name" ] || [[ ! "$seconds" =~ ^[1-9][0-9]*$ ]]; then
-      warn "malformed step budget: ${entry:-<empty>} (want name|seconds)"
-    elif ! is_step "$name"; then
-      warn "step budget for $name, which is not a step"
-    else
-      BUDGET_NAMES+=("$name"); BUDGET_SECONDS+=("$seconds")
-    fi
-  done
-}
-
-check_budgets() {
-  local i j
-  for ((i = 0; i < ${#DONE_NAMES[@]}; i++)); do
-    for ((j = 0; j < ${#BUDGET_NAMES[@]}; j++)); do
-      [ "${DONE_NAMES[$i]}" = "${BUDGET_NAMES[$j]}" ] && [ "${DONE_SECONDS[$i]}" -gt "${BUDGET_SECONDS[$j]}" ] || continue
-      OVER_BUDGET+=("${DONE_NAMES[$i]} ${DONE_SECONDS[$i]}s > ${BUDGET_SECONDS[$j]}s")
-      warn "over budget: ${DONE_NAMES[$i]} ${DONE_SECONDS[$i]}s > ${BUDGET_SECONDS[$j]}s"
-    done
-  done
-}
-
-# A copy of each AUDIT_EVIDENCE_PATHS entry as the step left it: a later step that writes the same path cannot
-# overwrite it. Only for steps the audit cites, never in a trial run; a missing path is a warning.
-snapshot_evidence() { # step
-  local step="$1" cited="" entry path dest
-  for entry in ${AUDIT_GUARD_STEPS[@]+"${AUDIT_GUARD_STEPS[@]}"}; do [ "$entry" = "$step" ] && cited=1; done
-  [ -n "$cited" ] && [ -z "$TRIAL" ] && [ ${#AUDIT_EVIDENCE_PATHS[@]} -gt 0 ] || return 0
-  dest="$EVIDENCE_DIR/$RUN_ID/$step"
-  mkdir -p "$dest" || { warn "evidence of $step not kept: cannot create $dest"; return 0; }
-  for path in "${AUDIT_EVIDENCE_PATHS[@]}"; do
-    path="${path%/}"
-    case "/$path/" in
-      //*|*/../*) warn "evidence path ${path:-<empty>} is not inside the clone: not kept"; continue ;;
-    esac
-    if [ ! -e "$CLONE_DIR/$path" ]; then
-      warn "evidence missing after $step: $path"
-    elif ! { mkdir -p "$(dirname "$dest/$path")" && cp -R "$CLONE_DIR/$path" "$dest/$path"; }; then
-      rm -rf "${dest:?}/$path"  # a partial copy (disk full, an unreadable file) is no evidence: the audit then refuses
-      warn "evidence of $step not kept: copying $path failed"
-    fi
-  done
-  log "evidence of $step kept in $dest"
-}
-
-# Keeps the evidence of the newest EVIDENCE_KEEP runs (run ids sort by start time).
-prune_evidence() {
-  local runs=() dir i
-  for dir in "$EVIDENCE_DIR"/*/; do [ -d "$dir" ] && runs+=("${dir%/}"); done
-  for ((i = 0; i + EVIDENCE_KEEP < ${#runs[@]}; i++)); do rm -rf "${runs[$i]}"; done
 }
 
 run_cleanup() {
@@ -228,49 +62,7 @@ run_cleanup() {
   fi
 }
 
-record_metrics() {
-  METRICS="none"
-  [ -n "${METRICS_CMD:-}" ] && [ -z "$TRIAL" ] || return 0
-  local snapshot="$HISTORY_DIR/$RUN_ID-${SHA:0:12}.json" metrics_log="$LOG_DIR/guard-$RUN_ID-metrics.log"
-  if (cd "$CLONE_DIR" && bash -c "$METRICS_CMD") > "$snapshot" 2> "$metrics_log" &&
-    python3 - "$snapshot" "$HISTORY_DIR/history.jsonl" "$SHA" "$RUN_ID" "$VERDICT" 2>> "$metrics_log" <<'PY'
-import json, sys
-snapshot, history, sha, run_id, verdict = sys.argv[1:]
-data = json.load(open(snapshot))
-with open(history, "a") as handle:
-    handle.write(json.dumps({"sha": sha, "run_id": run_id, "guard_green": verdict == "green", "metrics": data}) + "\n")
-PY
-  then
-    METRICS="ok"
-    log "metrics recorded"
-  else
-    METRICS="failed"
-    log "metrics FAILED: no snapshot for this run (log $metrics_log)"
-    warn "metrics failed"
-  fi
-}
-
-# HISTORY_MIRROR (optional): an rsync destination that gets history.jsonl after each recorded run, for a gardener
-# that runs on another host and reads the trend there. A failed copy is a warning, never a silent skip.
-mirror_history() {
-  [ -n "${HISTORY_MIRROR:-}" ] && [ "$METRICS" = ok ] || return 0
-  local mirror_log="$LOG_DIR/guard-$RUN_ID-mirror.log"
-  if [[ ! "$HISTORY_MIRROR" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*:[^-] ]]; then  # an option-like value would copy nothing and still exit 0
-    log "metrics history mirror FAILED: HISTORY_MIRROR=$HISTORY_MIRROR is not host:path"
-    warn "history mirror failed"
-    return 0
-  fi
-  # bounded: macOS's openrsync can outlive --timeout while its ssh child hangs; the record must still be written.
-  if bounded "${HISTORY_MIRROR_SECONDS:-120}" rsync -q --timeout=60 -e "ssh -o BatchMode=yes -o ConnectTimeout=20" -- \
-      "$HISTORY_DIR/history.jsonl" "$HISTORY_MIRROR" > "$mirror_log" 2>&1; then
-    log "metrics history mirrored to $HISTORY_MIRROR"
-  else
-    log "metrics history mirror FAILED (log $mirror_log)"
-    warn "history mirror failed"
-  fi
-}
-
-# Runs on every exit: cleanup, metrics, issue report, exactly one record. Nothing here aborts.
+# Runs on every exit: cleanup, issue report, notification, one JSON record line. Nothing here aborts.
 finish() {
   local rc=$? code
   trap - EXIT INT TERM HUP
@@ -279,26 +71,20 @@ finish() {
     [ -z "$FAILED" ] && FAILED="$PHASE"
     warn "aborted during $PHASE (exit $rc)"
   fi
-  check_budgets
   run_cleanup
-  case "$VERDICT" in green|red) [ "$STARTED" = 1 ] && record_metrics && mirror_history ;; esac
   if [ -n "$TRIAL" ]; then
     log "trial run (GUARD_ONLY=$TRIAL): not recorded in the nightly history, issue left as is"
   elif [ "$VERDICT" != "skipped: busy" ]; then
     case "$VERDICT" in
       red) report_failure "$FAILED" "$SHA" "$FAILED_LOG" || warn "issue report failed" ;;
-      green)
-        report_green "$SHA" || warn "issue report failed"
-        report_budget "$SHA" || warn "budget issue report failed"
-        run_report "$SHA" || warn "report issue failed" ;;
+      green) report_green "$SHA" || warn "issue report failed" ;;
     esac
     case "$VERDICT" in
       red|incomplete) notify "kitchen nightly: $PROJECT $VERDICT" "failed: ${FAILED:-unknown} on ${SHA:0:8} (run $RUN_ID)" ||
         warn "not notified: see the log" ;;
     esac
-    record_nightly "$VERDICT" "$FAILED" "$CLEANUP" "$METRICS" "$SHA" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" "$(step_lines)" \
+    record_nightly "$VERDICT" "$FAILED" "$CLEANUP" "$SHA" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" "$(step_lines)" \
       ${WARNINGS[@]+"${WARNINGS[@]}"} || log "FAILED to write the nightly record $NIGHTLY_RECORD"
-    prune_evidence
   fi
   find "$LOG_DIR" -name 'guard-*' -mtime +30 -delete
   case "$VERDICT" in
@@ -319,12 +105,12 @@ log "guard start: project=$PROJECT branch=$BRANCH"
 PHASE="lock"
 if [ "$LOCK_STATE" = busy ]; then
   VERDICT="skipped: busy"
-  log "guard skipped: busy (another job of $PROJECT held the clone for ${LOCK_WAIT_SECONDS:-3600}s); not recorded"
+  log "guard skipped: busy (another run of $PROJECT held the clone for ${LOCK_WAIT_SECONDS:-3600}s); not recorded"
   exit 75
 fi
 if [ -z "$TRIAL" ]; then
   close_stale_records "$RUN_ID"
-  record_nightly running "" "$CLEANUP" "$METRICS" "" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" ""
+  record_nightly running "" "$CLEANUP" "" "$RUN_ID" "$RUN_LOG" "$STARTED_AT" ""
 fi
 
 PHASE="sync"
@@ -342,8 +128,6 @@ if [ "${NEEDS_DOCKER:-0}" = 1 ] && ! docker_ready; then
   exit 1
 fi
 
-# Each step runs strict (bash -e -o pipefail): `false; true` and `false | true` fail it. A run in which no step
-# ran proves nothing: it is recorded incomplete (failed_step "config"), never green.
 bad_steps="$(malformed_steps ${GUARD_STEPS[@]+"${GUARD_STEPS[@]}"})"
 if [ -n "$bad_steps" ]; then
   PHASE="config"
@@ -352,7 +136,7 @@ if [ -n "$bad_steps" ]; then
   warn "malformed guard step"
   exit 2
 fi
-read_budgets
+
 verdict="green"
 ran=0
 for entry in ${GUARD_STEPS[@]+"${GUARD_STEPS[@]}"}; do
@@ -365,17 +149,26 @@ for entry in ${GUARD_STEPS[@]+"${GUARD_STEPS[@]}"}; do
   log "step $name"
   step_start=$SECONDS
   step_status=green
-  bash -e -o pipefail -c "$cmd" > "$step_log" 2>&1 || step_status=red
+  rc=0
+  bounded "$STEP_TIMEOUT" bash -e -o pipefail -c "$cmd" > "$step_log" 2>&1 || rc=$?
   step_seconds=$((SECONDS - step_start))
+  if [ "$rc" != 0 ]; then
+    step_status=red
+  fi
   DONE_NAMES+=("$name"); DONE_SECONDS+=("$step_seconds"); DONE_STATUS+=("$step_status")
   log "step $name $step_status in ${step_seconds}s"
-  snapshot_evidence "$name"
   if [ "$step_status" = red ]; then
-    log "step $name FAILED (log $step_log)"
+    if [ "$rc" = 124 ] && [ "$step_seconds" -ge "$STEP_TIMEOUT" ]; then
+      log "step $name TIMED OUT after ${STEP_TIMEOUT}s (log $step_log)"
+      warn "step $name timed out after ${STEP_TIMEOUT}s"
+    else
+      log "step $name FAILED (log $step_log)"
+    fi
     verdict="red"; FAILED="$name"; FAILED_LOG="$step_log"
     break
   fi
 done
+
 if [ "$ran" = 0 ]; then
   PHASE="config"
   FAILED="config"

@@ -1,4 +1,3 @@
 #!/bin/sh
-# Lint skills, scan for private data (the repo is public) and run the tests the staged paths need.
-# Plain `bin/kitchen check` (and integrate) still runs every test.
-exec "$(git rev-parse --show-toplevel)/bin/kitchen" check --fast
+# Lint skills, scan for private data (the repo is public) and run the full test suite.
+exec "$(git rev-parse --show-toplevel)/bin/kitchen" check

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kitchen: install, check and inspect the personal agent setup.
+"""kitchen: install, check and maintain the personal agent setup.
 
 One source of truth for Claude Code and Codex, and nothing always on: the kitchen runs when you type /chef-mode.
   skills/<name>/      -> ~/.claude/skills/<name> and ~/.agents/skills/<name>   (chef-mode and the skills it routes to)
@@ -22,9 +22,8 @@ from pathlib import Path
 REPO = Path(os.environ.get("KITCHEN_REPO") or Path(__file__).resolve().parent.parent).resolve()
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-from kitchen import common, credentials, integrate, inventory, journal, status, transcripts  # noqa: E402
-from kitchen import checkcost, checkplan, environment, legacy, models, principles  # noqa: E402
-from kitchen import slot  # noqa: E402
+from kitchen import common, credentials, environment, guards, transcripts  # noqa: E402
+
 # Principles (`kitchen check`): `small-owned`, `doors`, `encode-lessons`. It caps a SKILL.md at MAX_SKILL_LINES lines,
 # keeps private data out of this public repo, and runs the lints and tests.
 MAX_SKILL_LINES = 150
@@ -34,16 +33,11 @@ LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
 BLOCK_SCALARS = {">", "|", ">-", "|-", ">+", "|+"}
 EXAMPLES = """examples:
   kitchen install             link chef-mode and the skills; then run `kitchen doctor`
-  kitchen doctor              prove links, agent CLIs and schedules on this machine
-  kitchen check --fast        what the pre-commit hook runs: lint, safety scan, tests for the staged paths
-  kitchen check               everything, as integrate does
-  kitchen status --since 7d   where every project stands
-  kitchen integrate fix/a fix/b --base origin/dev
-  kitchen check-cost .        prove the check costs no more right after a commit
+  kitchen doctor              prove links, python, gh, and the nightly timer on this machine
+  kitchen check               lint skills, scan for private data and secrets, run every test
   kitchen init ../some-repo   print the instructions your agent follows to set a repo up
-  kitchen guards .            put the kitchen's guards in this repo only
-  kitchen principle explain-the-number   read one principle before you apply it
-  kitchen slot -- make test   wait for one of this user's N slots, then run a build or test suite
+  kitchen guards .            put the kitchen's guard in this repo only
+  kitchen retro --since 7d    extract your prompts from Claude Code and Codex transcripts
 
 run `kitchen <command> --help` for a command's options."""
 
@@ -70,11 +64,6 @@ def cli_link(h: Path) -> Path:
     return h / ".local" / "bin" / "kitchen"
 
 
-def old_agent_dirs(h: Path) -> list[Path]:
-    """Where an older install linked a `chef` agent; install removes those links (Claude Code could pick it unasked)."""
-    return [h / ".claude" / "agents", h / ".codex" / "agents"]
-
-
 def planned_links(h: Path) -> list[tuple[Path, Path]]:
     links = [(target / skill.name, skill) for skill in repo_skills() for target in skill_target_dirs(h)]
     links.append((cli_link(h), REPO / "bin" / "kitchen"))
@@ -91,8 +80,7 @@ def owned(link: Path) -> bool:
 
 
 def owned_links_in_targets(h: Path) -> list[Path]:
-    dirs = skill_target_dirs(h) + old_agent_dirs(h)
-    found = [d / entry for d in dirs if d.is_dir() for entry in os.listdir(d)]
+    found = [d / entry for d in skill_target_dirs(h) if d.is_dir() for entry in os.listdir(d)]
     found += [cli_link(h)]
     return [p for p in found if owned(p)]
 
@@ -106,34 +94,19 @@ def cmd_install(args: argparse.Namespace) -> int:
     h = home()
     plan = planned_links(h)
     conflicts = [link for link, _ in plan if (link.exists() or link.is_symlink()) and not owned(link)]
-    hook_files = legacy.hook_files(h, REPO)
-    unreadable = [f for f in hook_files if f.problem]
-    if (conflicts or unreadable) and not args.backup:
+    if conflicts and not args.backup:
         print("Refusing to install: these paths exist and are not managed by kitchen.")
         for link in conflicts:
             print(f"  {link}")
-        for file in unreadable:
-            print(f"  {file.problem}; the old kitchen guards cannot be looked for in it")
         print("Inspect them, then rerun with --backup to move them to ~/.kitchen-backups/.")
         return 1
 
     backup_root = h / ".kitchen-backups" / datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-
-    def move_aside(path: Path, why: str) -> None:
-        dest = backup_root / path.relative_to(h) if path.is_relative_to(h) else backup_root / path.name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(path), str(dest))
-        print(f"backed up  {path} -> {dest}{why}")
-
     for link in conflicts:
-        move_aside(link, "")
-    for file in unreadable:
-        move_aside(file.path, "")
-    for path in legacy.rule_files(h, REPO):
-        move_aside(path, " (written by an older install; the kitchen no longer writes your agent rules: chef-mode carries its own)")
-    choice = legacy.rules_choice(common.config_dir())
-    if choice:
-        move_aside(choice, " (the old --rules choice; nothing reads it now)")
+        dest = backup_root / link.relative_to(h) if link.is_relative_to(h) else backup_root / link.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(link), str(dest))
+        print(f"backed up  {link} -> {dest}")
 
     wanted = {link: source for link, source in plan}
     for link in owned_links_in_targets(h):
@@ -150,14 +123,10 @@ def cmd_install(args: argparse.Namespace) -> int:
         link.symlink_to(source, target_is_directory=source.is_dir())
         print(f"linked     {link} -> {source}")
 
-    for line in legacy.remove_hooks([f for f in hook_files if not f.problem]):
-        print(line)
-
     set_hooks_path()
     print(f"installed  {len(repo_skills())} skills (chef-mode routes to the rest); "
           "nothing runs until you type /chef-mode (Claude Code) or $chef-mode (Codex)")
     print("next:      in each repo you choose, type /chef-mode init (or run `kitchen init <repo>` for the instructions)")
-    print("next:      kitchen models, to set which model reviews each author's work and which runs delegated work (each person sets their own)")
     print("next:      kitchen doctor")
     return 0
 
@@ -180,13 +149,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         elif link not in wanted:
             failures.append(f"stale link {link}: its source is no longer an installable skill; run `bin/kitchen install`")
 
-    failures += legacy.doctor(h, REPO, common.config_dir())
-    for author in models.AUTHORS:
-        try:
-            models.get("reviewer", author)
-        except models.ModelsError as error:
-            warnings.append(f"second-opinion on {author}'s work will run on the session model, not cross-model: {error}")
-
     on_path = shutil.which("kitchen", path=os.environ.get("PATH", ""))
     if not on_path or Path(on_path).resolve() != (REPO / "bin" / "kitchen").resolve():
         warnings.append(f"`kitchen` on PATH is {on_path or 'missing'}; add {cli_link(h).parent} to PATH so skills and rules can call it")
@@ -196,9 +158,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         failures.append("pre-commit hook inactive: run `bin/kitchen install` (sets core.hooksPath=.githooks)")
 
     infos: list[str] = []
-    probes = environment.tools(REPO, common.config_dir()) + environment.schedules(platform.system(), h) \
-        + environment.agent_scratch(platform.system(), h)
-    for level, line in probes:
+    for level, line in environment.tools() + environment.schedules(platform.system(), h):
         {"FAIL": failures, "WARN": warnings, "INFO": infos}[level].append(line)
 
     unmanaged = sorted(
@@ -309,11 +269,7 @@ def git_bytes(*args: str) -> bytes:
 
 
 def publishable_texts() -> list[tuple[str, str]]:
-    """(label, text) for every file the next commit or push can publish.
-
-    The working tree and the index can differ: a secret staged and then removed from the working
-    file would still be committed. So the exact staged blobs are scanned too, read NUL-safe.
-    """
+    """(label, text) for every file the next commit or push can publish (working tree and staged blobs)."""
     working: dict[str, bytes] = {}
     for raw in git_bytes("ls-files", "-z", "-co", "--exclude-standard").split(b"\0"):
         name = os.fsdecode(raw)
@@ -374,57 +330,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
     if args.lint_only:
         return 0
-    modules = checkplan.test_modules(REPO)
-    run, skipped = checkplan.select(modules, checkplan.staged_paths(REPO)) if args.fast else (modules, [])
-    for module, why in skipped:
-        print(f"SKIP  {module}: {why} (`bin/kitchen check` runs it)")
-    if checkplan.AUTOMATION_SUITE in run:
-        problem = environment.automation_tools_problem(REPO)
-        if problem:
-            print(f"FAIL  {problem}")
-            return 1
-    if args.fast and not run:
-        print("OK    tests: none needed for the staged paths")
-        return 0
     # A git hook exports GIT_DIR, GIT_INDEX_FILE and friends. Tests build throwaway repos; inheriting those
     # variables would point their git commands at this repo (in a worktree: commits, branches, core.bare).
     test_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    selection = [checkplan.dotted(m) for m in run] if args.fast else ["discover", "-s", "tests", "-t", "."]
-    tests = subprocess.run([sys.executable, "-m", "unittest", *selection], cwd=REPO, env=test_env)
+    tests = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."], cwd=REPO, env=test_env)
     return tests.returncode
-
-
-def cmd_log(args: argparse.Namespace) -> int:
-    entry = journal.write(args.message, args.status, Path.cwd())
-    print(f"logged  {entry['status']} · {entry['repo']} @ {entry['sha'] or 'no git'} · {entry['agent']}")
-    problem = journal.notify_owner(entry)
-    if problem:
-        print(f"kitchen log: {problem}", file=sys.stderr)
-    return 0
-
-
-def cmd_status(args: argparse.Namespace) -> int:
-    since = common.parse_since(args.since)
-    by_name = {project.name: project for project in common.projects()}
-    repos = [by_name.get(p) or Path(p).resolve() for p in args.paths] or common.projects()
-    if not repos:
-        print(f"No projects: list one path per line in {common.config_dir() / 'projects.txt'}, or pass paths.")
-        return 1
-    report = status.build(repos, since)
-    report["setup"] = legacy.doctor(home(), REPO, common.config_dir())
-    if args.exceptions:
-        lines = status.exceptions(report)
-        if lines:
-            print("\n".join(lines))
-        return 1 if lines else 0
-    print(json.dumps(report, indent=2, ensure_ascii=False) if args.json else status.render(report, args.since))
-    return 0
-
-
-def cmd_inventory(args: argparse.Namespace) -> int:
-    report = inventory.build(REPO)
-    print(json.dumps(report, indent=2, ensure_ascii=False) if args.json else inventory.render(report))
-    return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -441,98 +351,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_guards(args: argparse.Namespace) -> int:
-    from kitchen import guards  # local import: keeps this subcommand out of the shared import line
     try:
         return guards.run(Path(args.path).resolve(), REPO, args.check)
     except guards.GuardsError as error:
         print(f"FAIL  {error}", file=sys.stderr)
         return 1
-
-
-def cmd_models(args: argparse.Namespace) -> int:
-    try:
-        if getattr(args, "project", None) is not None and args.role != "worker":
-            raise models.ModelsError(f"--project is for the worker's accounts; a {args.role} runs on the instance of its provider")
-        if args.action in ("set", "remove") and args.project is not None:
-            return worker_project(args)
-        if args.action in ("set", "remove"):
-            missing = [f"--{f}" for f in (("provider",) if args.action == "remove" else models.FIELDS) if getattr(args, f) is None]
-            if missing:
-                raise models.ModelsError(f"pass {', '.join(missing)}")
-        if args.action in ("set", "add", "remove"):
-            if args.action == "add" and args.role not in models.PER_AUTHOR:
-                raise models.ModelsError(f"`{args.role}` is one model: `kitchen models set {args.role}` replaces it")
-            if args.action == "remove":
-                models.remove(args.role, args.author, args.provider, args.model)
-            else:
-                entry = {"provider": args.provider, "model": args.model, "effort": args.effort, "tier": args.tier}
-                if args.accounts is not None:
-                    if args.role in models.PER_AUTHOR:
-                        raise models.ModelsError(f"--accounts is for the worker; a {args.role} runs on the instance of its provider")
-                    entry["accounts"] = args.accounts.split(",")
-                models.put(args.role, args.author, [entry] if args.action == "set" else models.current(args.role, args.author) + [entry])
-            print(f"{args.action:<11}{models.label(args.role, args.author)} in {models.path()}")
-            return 0
-        if args.action == "get" and args.role == "worker":
-            return worker_get(args)
-        if args.action == "get":
-            if args.job or args.urgent or args.index is not None:
-                raise models.ModelsError("--job, --urgent and --index are for the worker")
-            entries = models.current(args.role, args.author)
-            if not entries:  # the review runs on the session model, said on stderr (owner, 2026-10-29)
-                print(models.unset(args.role, args.author), file=sys.stderr)
-                if not args.command:
-                    print("{}" if args.t3 else "[]" if args.json else "session model")
-                return 0
-            if args.command:
-                print("\n".join(models.shell(models.command(e)) for e in entries))
-            elif args.t3:
-                print("\n".join(json.dumps(models.t3(e)) for e in entries))
-            else:
-                print(json.dumps(entries) if args.json else "\n".join(models.describe(e) for e in entries))
-            return 0
-        print(models.render())
-        return 0
-    except models.ModelsError as error:
-        print(f"FAIL  {error}", file=sys.stderr)
-        return 1
-
-
-def worker_project(args: argparse.Namespace) -> int:
-    """`set|remove worker --project <name>`: one project's account list, which holds accounts and nothing else."""
-    given = [f"--{f}" for f in models.FIELDS if getattr(args, f, None) is not None]
-    if given:
-        raise models.ModelsError(f"a project entry holds only --accounts; {', '.join(given)} belong to `{models.set_command('worker', None)}`")
-    if args.action == "set" and args.accounts is None:
-        raise models.ModelsError("pass --accounts <t3-instance-id,...>: a project entry is its account list")
-    models.put_project(args.project, args.accounts.split(",") if args.action == "set" else None)
-    print(f"{args.action:<11}worker in {args.project} in {models.path()}")
-    return 0
-
-
-def worker_get(args: argparse.Namespace) -> int:
-    """One delegated worker's target. Unset, it runs on the session model: an empty target, said on stderr (owner, 2026-10-29)."""
-    if not args.job:
-        raise models.ModelsError(f"pass --job {' or --job '.join(models.JOBS)}: the job sets the worker's effort")
-    models.key(args.role, args.author)
-    project = args.project if args.project is not None else models.here(Path.cwd())
-    entry = models.worker(args.job, args.urgent, args.index or 0, project)
-    if entry is None:
-        print(models.unset(args.role, None), file=sys.stderr)
-        if not args.command:
-            print("{}" if args.json or args.t3 else "session model")
-        return 0
-    if project is None:
-        print("note: not inside a git repository and no --project: the worker uses the default accounts", file=sys.stderr)
-    if args.command:
-        print(models.shell(models.command(entry, writes=True)))
-        if entry.get("account"):
-            print(f"note: account {entry['account']} is a T3 provider instance; the CLI call runs on the CLI's own login", file=sys.stderr)
-    elif args.t3:
-        print(json.dumps(models.t3(entry)))
-    else:
-        print(json.dumps(entry) if args.json else models.describe(entry))
-    return 0
 
 
 def cmd_retro(args: argparse.Namespace) -> int:
@@ -545,130 +368,31 @@ def cmd_retro(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_principle(args: argparse.Namespace) -> int:
-    try:
-        print(principles.show(REPO, args.name), end="")
-        return 0
-    except principles.PrincipleError as error:
-        print(f"FAIL  {error}", file=sys.stderr)
-        return 1
-
-
-def cmd_integrate(args: argparse.Namespace) -> int:
-    repo = Path(args.repo).resolve()
-    project = args.project or repo.name
-    try:
-        base = integrate.base_for(project, args.base)
-    except integrate.IntegrateError as error:
-        print(f"FAIL  {project}: {error}")
-        return 1
-    if args.recorded:
-        valid, message = integrate.recorded(repo, base, args.refs, project, args.check)
-        print(f"{'PASS' if valid else 'FAIL'}  {project}: {message}")
-        return 0 if valid else 1
-    record = integrate.integrate(repo, base, args.refs, project, args.check)
-    print(integrate.render(record))
-    return 0 if record["status"] == "PASS" else 1
-
-
-def cmd_check_cost(args: argparse.Namespace) -> int:
-    record = checkcost.check_cost(Path(args.repo), args.ref, args.command)
-    print(checkcost.render(record))
-    return 0 if record["status"] == "PASS" else 1
-
-
-def cmd_slot(args: argparse.Namespace) -> int:
-    command = args.cmd[1:] if args.cmd[:1] == ["--"] else args.cmd
-    try:
-        if args.report:
-            if command:
-                print("kitchen slot: --report takes no command", file=sys.stderr)
-                return 2
-            print(slot.report(common.parse_since(args.since), args.since))
-            return 0
-        if not command:
-            print(slot.show_state())
-            return 0
-        return slot.run_command(command)
-    except (slot.SlotError, ValueError) as error:
-        print(f"kitchen slot: {error}", file=sys.stderr)
-        return 125
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(prog="kitchen", description=__doc__, epilog=EXAMPLES,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    install = sub.add_parser("install", help="link chef-mode and the skills for Claude Code and Codex; take out what older installs left")
+    install = sub.add_parser("install", help="link chef-mode and the skills for Claude Code and Codex")
     install.add_argument("--backup", action="store_true", help="move conflicting unmanaged paths to ~/.kitchen-backups/")
     install.set_defaults(func=cmd_install)
 
-    doctor = sub.add_parser("doctor", help="verify links, leftovers of older installs, agent CLIs, automation tools and schedules")
+    doctor = sub.add_parser("doctor", help="verify links, python, gh, and the nightly timer")
     doctor.set_defaults(func=cmd_doctor)
 
-    check = sub.add_parser("check", help="lint skills and run the repo tests")
+    check = sub.add_parser("check", help="lint skills, scan for private data, and run every test")
     check.add_argument("--lint-only", action="store_true")
-    check.add_argument("--fast", action="store_true", help="run only the test modules the staged paths need (the pre-commit hook)")
     check.add_argument("--skills-dir", help="lint this directory instead of the repo skills")
     check.set_defaults(func=cmd_check)
-
-    log = sub.add_parser("log", help="leave a checkpoint for kitchen status (autonomous runs)")
-    log.add_argument("message")
-    log.add_argument("--status", choices=journal.STATUSES, default="note")
-    log.set_defaults(func=cmd_log)
-
-    stat = sub.add_parser("status", help="where every project stands: git, PRs, nightly guard, gardener, journal, decisions")
-    stat.add_argument("paths", nargs="*", help="project paths or configured project names; default: ~/.config/kitchen/projects.txt")
-    stat.add_argument("--since", default="24h", help="journal window, e.g. 24h or 7d")
-    stat_output = stat.add_mutually_exclusive_group()
-    stat_output.add_argument("--json", action="store_true")
-    stat_output.add_argument("--exceptions", action="store_true", help="print only the lines that are not green; exit 1 when there are any")
-    stat.set_defaults(func=cmd_status)
-
-    inv = sub.add_parser("inventory", help="skills, rule files and automations the agents can see, and their drift")
-    inv.add_argument("--json", action="store_true")
-    inv.set_defaults(func=cmd_inventory)
 
     init_cmd = sub.add_parser("init", help="print the instructions your agent follows to set one repo up (the same as /chef-mode init)")
     init_cmd.add_argument("path", nargs="?", default=".", help="repository to set up (default: the current directory)")
     init_cmd.set_defaults(func=cmd_init)
 
-    guards_cmd = sub.add_parser("guards", help="copy the kitchen's guards into one repo and run them there from .claude/settings.json and .codex/hooks.json")
+    guards_cmd = sub.add_parser("guards", help="install the kitchen's guard and after-compact hook into one repo")
     guards_cmd.add_argument("path", nargs="?", default=".", help="repository (default: the current directory)")
     guards_cmd.add_argument("--check", action="store_true", help="write nothing; fail while the repo's guards differ from this kitchen's")
     guards_cmd.set_defaults(func=cmd_guards)
-
-    mod = sub.add_parser("models", help="which models review each author's work (the reviewers second-opinion runs) and run delegated work, in your own setup")
-    mod_sub = mod.add_subparsers(dest="action")
-    mod_get = mod_sub.add_parser("get", help="print one role's models, one per line; an unset reviewer fails with the command that sets it, an unset worker runs on the session model")
-    mod_set = mod_sub.add_parser("set", help="set one role to one model, replacing any others")
-    mod_add = mod_sub.add_parser("add", help="add a model to one reviewer role; second-opinion runs each, in parallel")
-    mod_remove = mod_sub.add_parser("remove", help="remove one model from one role")
-    for p_role in (mod_get, mod_set, mod_add, mod_remove):
-        p_role.add_argument("role", choices=models.ROLES)
-        p_role.add_argument("--author", choices=models.AUTHORS, help="reviewer only, and required there: who wrote the work; the reviewer runs another family's model")
-    mod_get.add_argument("--project", help="worker: whose account list to use (default: the repository of the current directory)")
-    mod_set.add_argument("--project", help="worker: set this project's account list, which replaces the default accounts there only")
-    mod_remove.add_argument("--project", help="worker: remove this project's account list")
-    mod_add.set_defaults(project=None)
-    get_output = mod_get.add_mutually_exclusive_group()
-    get_output.add_argument("--json", action="store_true")
-    get_output.add_argument("--command", action="store_true", help="print each model's CLI call (codex exec or claude -p), one per line; the prompt goes last")
-    get_output.add_argument("--t3", action="store_true", help="print the target JSON for T3's delegate_task, one per line")
-    mod_get.add_argument("--job", choices=tuple(models.JOBS), help="worker: judgment keeps the configured effort, hardest raises it one step, routine lowers it one")
-    mod_get.add_argument("--urgent", action="store_true", help="worker: the fast tier (CI or trunk red, someone blocked now); standard otherwise")
-    mod_get.add_argument("--index", type=int, help="worker: the worker's place in its batch, from 0; picks accounts[index %% len]")
-    for p_entry in (mod_set, mod_add):  # required for add here; for set, unless --project, in cmd_models
-        p_entry.add_argument("--provider", required=p_entry is mod_add, choices=models.PROVIDERS)
-        p_entry.add_argument("--model", required=p_entry is mod_add, help="a model id, or `default` for that tool's own default")
-        p_entry.add_argument("--effort", required=p_entry is mod_add, choices=models.EFFORTS)
-        p_entry.add_argument("--tier", required=p_entry is mod_add, choices=models.TIERS)
-    mod_set.add_argument("--accounts", help="worker: T3 provider instance ids, comma-separated, in the order a batch alternates them")
-    mod_add.set_defaults(accounts=None)
-    mod_remove.add_argument("--provider", choices=models.PROVIDERS, help="required, unless --project")
-    mod_remove.add_argument("--model", help="which one, when more than one runs on that provider")
-    mod.set_defaults(func=cmd_models, action=None)
 
     retro = sub.add_parser("retro", help="my prompts from Claude Code and Codex transcripts, in every account and listed source")
     retro.add_argument("--since", default="7d")
@@ -681,32 +405,6 @@ def main() -> int:
     retro.add_argument("--home-only", action="store_true",
                        help="read only this HOME's Claude and Codex dirs, not retro-sources.txt (what a remote source runs)")
     retro.set_defaults(func=cmd_retro)
-
-    integ = sub.add_parser("integrate", help="merge branches in order onto a base in a disposable clone and run the project's checks after each merge")
-    integ.add_argument("refs", nargs="+", help="branches, SHAs or pr:<number>, in merge order")
-    integ.add_argument("--repo", default=".", help="source repository (default: current directory)")
-    integ.add_argument("--base", help="ref to merge onto (default: the project's `base` in integrate.toml; there is no other default)")
-    integ.add_argument("--project", help="project name in ~/.config/kitchen/integrate.toml (default: repo folder name)")
-    integ.add_argument("--check", action="append", help="check command to run instead of the configured ones (repeatable)")
-    integ.add_argument("--recorded", action="store_true", help="run nothing: PASS only if a recorded PASS matches the refs' current SHAs")
-    integ.set_defaults(func=cmd_integrate)
-
-    cost = sub.add_parser("check-cost", help="in a disposable clone, prove the check costs no more right after a commit than with HEAD unchanged")
-    cost.add_argument("repo", nargs="?", default=".", help="source repository (default: current directory)")
-    cost.add_argument("--ref", default="HEAD", help="commit to check out in the clone (default: HEAD)")
-    cost.add_argument("--command", default=checkcost.DEFAULT_COMMAND, help=f"the check to time (default: {checkcost.DEFAULT_COMMAND})")
-    cost.set_defaults(func=cmd_check_cost)
-
-    princ = sub.add_parser("principle", help="print one principle's section or leaf, or with no name the index chef-mode carries")
-    princ.add_argument("name", nargs="?", help="a principle id (`prove`) or a leaf name (`explain-the-number`)")
-    princ.set_defaults(func=cmd_principle)
-
-    slot_cmd = sub.add_parser("slot", help="run a heavy command (a build, a test suite) in one of this user's N slots, waiting for a free one; "
-                              "with no command, show who holds them")
-    slot_cmd.add_argument("--report", action="store_true", help="how long runs waited and ran, per project (to size N)")
-    slot_cmd.add_argument("--since", default="7d", help="--report window, e.g. 24h or 7d")
-    slot_cmd.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- command", help="the command and its arguments")
-    slot_cmd.set_defaults(func=cmd_slot)
 
     args = parser.parse_args()
     return args.func(args)

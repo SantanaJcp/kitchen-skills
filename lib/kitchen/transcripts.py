@@ -97,34 +97,36 @@ def slash_command(text: str) -> str:
 
 
 LAUNCH_WINDOW = datetime.timedelta(minutes=10)  # a launched session starts right after its launch
-_SHELLPARSE = None
+_GUARD = None
 
 
-def shellparse():
-    """The guards' shell parser (hooks/shellparse.py): which commands a Bash call actually runs."""
-    global _SHELLPARSE
-    if _SHELLPARSE is None:
-        path = Path(__file__).resolve().parents[2] / "hooks" / "shellparse.py"
-        spec = importlib.util.spec_from_file_location("kitchen_shellparse", path)
+def _guard():
+    """The guard's shlex-based command splitter (hooks/kitchen-guard): which commands a Bash call actually runs."""
+    global _GUARD
+    if _GUARD is None:
+        import importlib.machinery
+        path = Path(__file__).resolve().parents[2] / "hooks" / "kitchen-guard"
+        loader = importlib.machinery.SourceFileLoader("kitchen_guard", str(path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
         module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module  # its dataclasses look themselves up there
-        spec.loader.exec_module(module)
-        _SHELLPARSE = module
-    return _SHELLPARSE
+        sys.modules[loader.name] = module
+        loader.exec_module(module)
+        _GUARD = module
+    return _GUARD
 
 
 def launched(command: str, cwd: str | None) -> list[dict]:
     """The `claude -p` / `codex exec` calls a Bash command really runs, with the directory each runs in. A command
     that only mentions one (a heredoc, an echo, a string in a script) launches nothing. A command the parser cannot
     read is kept as one launch of unknown directory, so it can only make a session `unknown`, never `agent-launched`."""
-    sp = shellparse()
+    guard = _guard()
     try:
-        calls = sp.commands(command, cwd)
-    except (sp.ParseError, RecursionError, ValueError):
+        calls = guard.split_commands(command, cwd)
+    except (guard.SplitError, RecursionError, ValueError):
         return [{"command": command, "dir": None}]
     out = []
     for call in calls:
-        argv = [a.value for a in call.argv]
+        argv = call.argv
         if (call.name == "claude" and any(a in ("-p", "--print") for a in argv[1:])) or (call.name == "codex" and argv[1:2] == ["exec"]):
             # each argument quoted, so a short prompt still matches only as a whole argument (see matches_launch)
             quoted = " ".join('"' + " ".join(a.split()) + '"' for a in argv)

@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# GIT_SSH_COMMAND and askpass during the gardener's generation phase: no remote access, no credentials.
-echo "kitchen automation: remote access is not available to the agent; the job publishes" >&2
-exit 1

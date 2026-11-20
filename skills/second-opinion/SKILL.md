@@ -1,81 +1,66 @@
 ---
 name: second-opinion
-description: "Cross-model review of a diff before merge, or of a whole setup in design-review mode: reviewers run on the other model (every reviewer you set in `kitchen models`, in parallel, through T3's delegate_task or their CLI), on two separate axes (standards and the request), and the lead triages every finding into act on, consider, noted or dismissed. Use before merging or opening a PR, when I ask for a review, and always when a change touches auth, tenant scope, sync, data or migrations."
+description: "Cross-model review of a diff or design before merge: one run per reviewer from ~/.config/kitchen/models.toml with Skeptic, Architect, and Minimalist lenses plus all 13 principles in one prompt, triaged by the lead on a two-round budget. Use before merging or opening a PR, when asked for a review, and always on auth, tenant scope, sync, data, or migrations."
 disable-model-invocation: true
 ---
 
 # second-opinion
 
-The value is a model other than the author looking at the final work. The lead's job is to filter that review, not to forward it.
+A model other than the author checks the final work; the lead filters findings instead of forwarding raw noise.
 
-## 0. Who wrote it
+## 0. Author and mode
 
-Identify the authoring model before anything else: `Co-Authored-By` trailers in `git log <base>..<head>`, the brief that produced the work, or the delegator's message. Say it in one line.
+- Identify the authoring model from `Co-Authored-By`, the brief, or the delegator; say it in one line (unknown = treat as your own model).
+- If you were launched as a reviewer by another lead, review and return; launch no reviewers.
+- Pick mode: **Diff** (resolve base and head SHAs, `git diff --stat <base>...<head>`; empty diff fails), **Design** (pin SHA and exact files/folders), or **Design+diff** (both; report Design findings separately). State intent in two lines and quote the originating request.
 
-- You are a different model from the author: you are one reviewer. Apply the lenses from step 2 yourself, one pass per lens, on the same axes, and in step 3 run only the reviewers from `kitchen models` that are not you (another provider or another model); none configured, review alone. Send it back to the author's model only as step 3's said-aloud fallback.
-- You are the author's model: run the reviewers from `kitchen models` (step 3).
-- You were launched as a reviewer by another lead: review and return; launch no reviewers of your own.
-- Author unknown: say so and treat it as written by your own model.
+## 1. Reviewers (one run per reviewer)
 
-## 1. Pin it
+Read `~/.config/kitchen/models.toml` directly (`[[reviewer.<author>]]`, where `<author>` is `claude` or `codex`; several reviewers are allowed). Refuse any reviewer of the author's own family.
 
-Pick the mode:
+- Run **one** review pass per configured reviewer (all reviewers in parallel), saving each output to `$DIR/review-<n>.md`. If you are already a different model from the author, you are one reviewer yourself and launch only the other configured reviewers.
+- **T3 Code**: one async `delegate_task` per reviewer (`role: "review"`, distinct `clientRequestId`), using the instance from `orchestrator_capabilities` matching `provider` (`codex` or `claudeAgent`) and the entry's `model`, `effort`, and `tier`.
+- **CLI**: `codex exec --skip-git-repo-check -s read-only ... -o "$DIR/review-<n>.md" "<prompt>"` or `claude -p "<prompt>" > "$DIR/review-<n>.md"`.
+- **Fallback, said aloud** (`no-fallbacks` exception): if no reviewer is configured, or one is refused/unreachable, run the review yourself on the session model (`$DIR/review-<n>-session.md`) and open the reply with `not a cross-model review` naming each failed reviewer and error. Confirm every output file is non-empty before reading; a missing review is a gap, not a pass.
 
-- **Diff review** (default): resolve the base ref and head SHA with `git rev-parse`; run `git diff --stat <base>...<head>`. A bad ref or an empty diff fails here.
-- **Design review**: the whole setup, not a diff (rules, skills, automation, architecture). Pin the commit SHA and the exact list of files or folders in scope.
-- **Design+diff**: both at once, when the change only makes sense against the whole setup. Declare it, pin both (range and file list), and report Design findings apart from the diff's Standards and Request findings.
+## 2. Single reviewer prompt
 
-State the intent in two lines and name the originating request: issue, my message, or spec.
+Fill the placeholders and send one prompt per reviewer (read-only):
 
-## 2. Size the panel
+```
+You are reviewing a <code change | design | design+diff>. Review only; do not edit files.
+Intent: <two lines>
+Originating request: <quoted request>
+Repo: <path> | Pinned: base <full SHA>, head <full SHA>; inspect `git diff <base>...<head>` (or Design files at <SHA>).
+Checkout: read at pinned head only (<worktree> or `git show <sha>:<path>`). Do not switch branches in a shared checkout.
+Forbidden: edits, commits, checkout/switch, reset, stash, push, merge, installs, deploys, migrations, mutating network calls.
+Authorized tests: <exact commands or "none">. Project rules: <repo>/AGENTS.md.
 
-| Work under review | Reviewers |
-|---|---|
-| Under 50 lines, 1–2 files | Skeptic |
-| Up to 200 lines, up to 5 files | Skeptic, Architect |
-| Larger, or any design or design+diff review | Skeptic, Architect, Minimalist |
+Apply all three lenses in one pass:
+- Skeptic: inputs/states/orderings that break; swallowed errors; unproven claims; tests that cannot fail on broken behavior or assert implementation/recomputed expectations.
+- Architect: structural fit, leaking responsibilities, scale/concurrency/ordering assumptions.
+- Minimalist: what can be deleted, single-call abstractions, reader load (>3 files to trace a value).
 
-Auth, tenant scope, sync, data and migrations always get the Skeptic, whatever the size, on the other model: the reviewers from `kitchen models`, with their effort and tier.
+Check against the 13 kitchen principles (every finding MUST name the principle id it violates):
+`prove`, `truthful-state`, `no-fallbacks`, `root-cause`, `encode-lessons`, `owner-attention`, `doors`, `evidence`, `small-owned`, `isolate`, `cross-review`, `handoff`, `design`.
 
-## 3. Run on the other model
+Report separate sections:
+## Standards (rule violations; cite the rule)
+## Request (missing/partial/unrequested/wrong; in a repo with a verify feature map, a behavior change without a live drive + assertion there is a Request finding)
+## Design (design and design+diff only)
 
-A same-model review defeats the purpose: use the session model only as the fallback below. The reviewers are the person's own setup: `kitchen models get reviewer --author <claude|codex>` (the author's family) prints one per line. Run every lens on every reviewer, all in parallel, and save each to `$DIR/<lens>-<n>.md`, n being the reviewer's line. Every reviewer that runs counts; no configured reviewer is skipped, and no model but the session one, below, stands in.
+Every finding cites `file:line`, a concrete failure path, measured (command + result) or inferred, and the principle id it violates. Mark merge-blocking issues BLOCKER (P0/P1). Say "no findings" when clean; skip style nits.
+```
 
-**Fallback, said aloud** (owner, 2026-10-29; `no-fallbacks`' one exception): reviewer not configured (`get` says so on stderr and prints none; unless you review as another model, step 0), refused, or unreachable. Run yourself, on the session model, only its lenses that left no review: one pass per lens, saved as `$DIR/<lens>-<n>-session.md`. A lens it did finish keeps its own file. The reply's first line then says "not a cross-model review", naming each reviewer that failed and its error.
+## 3. Budget, triage, and merge danger
 
-- **T3 Code** (`delegate_task` is available): one async `delegate_task` per lens and reviewer, role `review`, a distinct `clientRequestId` each. Target: the instance in `orchestrator_capabilities` whose `driverKind` is the provider (`codex`, or `claudeAgent` for claude); the model id exactly as that instance lists it (omit it for `default`); the effort option (`reasoningEffort` on Codex, `effort` on Claude); the tier (`serviceTier` `default` or `priority` on Codex; `fastMode` on Claude).
-- **Claude Code or Codex CLI**: `kitchen models get reviewer --author <a> --command` prints each reviewer's call, in the same order; append `"<prompt>"`, then `-o "$DIR/<lens>-<n>.md"` for codex or `> "$DIR/<lens>-<n>.md"` for claude.
-- **Anywhere a reviewer's provider cannot be reached** (a cloud session without it): the fallback above; name the missing provider.
-
-Build each prompt from [reviewer-prompt.md](reviewer-prompt.md). Before reading, confirm every output file exists and is not empty. A missing review is a gap, not a pass.
-
-## 4. Lead judgment
-
-You hold the full context; the reviewers saw a diff or a file list. Merge each lens's reports first: a finding two reviewers both report is one finding, marked as agreed. For every finding, trace the code: a hypothetical input the callers can never pass is not a finding. Every finding you keep carries:
-
-- its **axis**: Standards, Request or (design and design+diff reviews) Design;
-- its **evidence**: measured (the command you ran and what came out) or inferred (the `file:line` you read);
-- its **principle**, when one applies: the PRINCIPLES.md id it breaks.
-
-Then place it in exactly one bucket:
-
-- **Act on**: a real, concrete P0 or P1, however many there are. Only these are fixed before merge (chef-mode's review budget).
-- **Consider**: real but optional, or a judgment call for me.
-- **Noted**: true, not worth action now.
-- **Dismissed**: with the reason. This list is a trust mechanism: it lets me overrule you.
-
-If every finding is a nit, the work is probably fine; say so. Be slow to dismiss security and correctness findings, especially when two reviewers agree.
-
-Keep the axes separate. Do not merge or rerank Standards findings against Request findings.
-
-## 5. Merge danger
-
-One line each: two-way or one-way door; blast radius; the one fact the change is safe because of, and how far it is proven (said, pointed at the line, walked the failure, ran it, reproduced it in the app).
-
-For permissions, publication, migrations, or verification changes, test the critical safety invariant across its real boundary or a failure sequence. State what remains unproven. Reuse deterministic gates; do not repeat them without a changed input or unresolved concern.
+- **Two-round budget per PR**: round 1 is the open review above; round 2 reruns **only** round 1's confirmed P0/P1 repros against the fixes.
+- **Lead triage**: merge duplicate findings across reviewers (mark as agreed), verify each against the real code, keep axes separate, and bucket every finding with its axis, evidence, and principle id:
+  - **Act on** (confirmed P0/P1 — only these are fixed before merge), **Consider** (optional/judgment), **Noted** (true, defer), **Dismissed** (with reason so the owner can overrule).
+- **Merge danger**: one line each for two-way vs one-way door, blast radius, the key safety fact and how far it is proven (said -> pointed at line -> walked failure -> ran -> reproduced live), plus what remains unproven.
 
 ## Reply
 
-Verdict in one line, which starts with "not a cross-model review" (each failed reviewer and its error) when the fallback ran; author model and review route (direct, reviewers on which CLI, or both); Act on; Consider; Noted; Dismissed; Merge danger; reviewers run (route: delegate_task or CLI; provider, model, effort, tier; output files). Change no code during the review unless I asked you to resolve the findings.
+Verdict (starting with `not a cross-model review` + errors if fallback ran); author model and review route; Act on; Consider; Noted; Dismissed; Merge danger; reviewers run (route, provider/model/effort/tier, output files). Change no code during the review unless asked.
 
 Principles (the kitchen's PRINCIPLES.md): `cross-review`, `evidence`, `no-fallbacks`.

@@ -1,8 +1,0 @@
-{
-  "name": "kitchen-automation",
-  "private": true,
-  "description": "Pinned tools for the kitchen automation jobs. Install with: npm ci --ignore-scripts --prefix automation",
-  "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.78"
-  }
-}
