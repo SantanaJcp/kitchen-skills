@@ -1,6 +1,6 @@
 ---
 name: retro
-description: "Retrospective over my Claude Code and Codex transcripts: find the corrections I had to repeat and propose the strongest fix for each, from code to memory. Proposes only; never applies. Use when I ask for a retro, or from the weekly automation."
+description: "Retrospective over my Claude Code and Codex transcripts: find the corrections I had to repeat and propose the strongest fix for each, from code to memory. Proposes only; never applies. Use when I ask for a retro."
 disable-model-invocation: true
 ---
 

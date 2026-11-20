@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# gh during the gardener's generation phase: every call is refused. The job publishes after the agent exits.
-echo "kitchen automation: gh is not available to the agent; commit on your gardener branch and stop, the job publishes" >&2
-exit 1

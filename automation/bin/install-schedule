@@ -1,41 +1,22 @@
 #!/usr/bin/env bash
-# Schedules the kitchen jobs: launchd on macOS, systemd user timers on Linux.
-# Usage:
-#   install-schedule <project> [guard-hour] [gardener-weekday] [gardener-hour]   defaults: 02:00 daily, Monday 06:00
-#   install-schedule --gardener <project> [weekday] [hour]                       the gardener alone; default Monday 06:00
-#   install-schedule --guard <project> [hour]                                     the nightly guard alone; default 02:00 daily
-#   install-schedule --audit <project> [hour]                                     the daily audit; default 04:00, after the guard
-#   install-schedule --retro [weekday] [hour]                                    default: Monday 07:00
-#   install-schedule --triggered --audit <project> | --gardener <project> | --retro
-# Weekdays are numbered as launchd does: 0 or 7 Sunday, 1 Monday ... 6 Saturday.
-# --triggered installs an agent job with no time of its own: the systemd service without its timer, or the launchd job
-# without StartCalendarInterval, which automation/bin/run-job starts and waits for (a T3 scheduled task, for one). It runs
-# exactly as when timed, in the same unit. Installing a job in one form removes the other form's timer. The nightly guard
-# is never triggered: it stays on its own timer.
+# Schedules the nightly guard: launchd on macOS, systemd user timer on Linux.
+# Usage: install-schedule [--guard] <project> [hour]    (default: 02:00 daily)
 set -euo pipefail
 
-TRIGGERED=0
-args=()
-for arg in "$@"; do
-  if [ "$arg" = --triggered ]; then TRIGGERED=1; else args+=("$arg"); fi
-done
-set -- ${args[@]+"${args[@]}"}
-if [ "$TRIGGERED" = 1 ]; then
-  case "${1:-}" in
-    --audit|--gardener) [ $# -eq 2 ] || { echo "usage: install-schedule --triggered $1 <project> (a triggered job has no time: its trigger sets it)" >&2; exit 2; } ;;
-    --retro) [ $# -eq 1 ] || { echo "usage: install-schedule --triggered --retro (a triggered job has no time: its trigger sets it)" >&2; exit 2; } ;;
-    *) echo "install-schedule: only the agent jobs can be --triggered (--audit, --gardener, --retro); the nightly guard stays on its timer" >&2; exit 2 ;;
-  esac
-fi
+[ "${1:-}" = --guard ] && shift
+PROJECT="${1:?usage: install-schedule <project> [hour]}"
+HOUR="${2:-2}"
 
 AUTOMATION="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_ROOT="${KITCHEN_STATE:-$HOME/.local/state/kitchen}"
+CONFIG="${KITCHEN_CONFIG:-$HOME/.config/kitchen}/automation/$PROJECT.env"
+[ -f "$CONFIG" ] || { echo "no config for $PROJECT ($CONFIG)" >&2; exit 2; }
+
 PLATFORM="$(uname)"
 case "$PLATFORM" in
   Darwin) AGENTS="$HOME/Library/LaunchAgents" ;;
   Linux)
     AGENTS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-    # User timers stop with the user's last session unless lingering is on.
     if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
       echo "lingering is off for $(id -un): timers would stop at logout. Run: loginctl enable-linger $(id -un)" >&2
       exit 2
@@ -44,128 +25,58 @@ case "$PLATFORM" in
 esac
 mkdir -p "$AGENTS"
 
-# ProcessType Standard, not Background: macOS throttles Background jobs' CPU and I/O, which roughly doubled the
-# nightly's test time and tripped a project's 3-minute test timeout (measured 2026-10-05: 4m38s and 6m11s
-# scheduled vs 2m40s to 3m09s run by hand).
-write_plist() { # label log-dir weekday-or-empty hour program-args...
-  local label="$1" log_dir="$2" weekday="$3" hour="$4"; shift 4
-  local plist="$AGENTS/$label.plist" args="" calendar=""
-  for arg in "$@"; do args="$args<string>$arg</string>"; done
-  if [ "$TRIGGERED" = 0 ]; then  # triggered: no calendar and no RunAtLoad, so launchd starts it only when kickstarted
-    calendar="<dict>"
-    [ -z "$weekday" ] || calendar="$calendar<key>Weekday</key><integer>$weekday</integer>"
-    calendar="
-  <key>StartCalendarInterval</key>$calendar<key>Hour</key><integer>$hour</integer><key>Minute</key><integer>0</integer></dict>"
-  fi
-  mkdir -p "$log_dir"
-  cat > "$plist" <<PLIST
+LOG_DIR="$STATE_ROOT/automation/$PROJECT/logs"
+mkdir -p "$LOG_DIR"
+
+if [ "$PLATFORM" = Darwin ]; then
+  LABEL="com.kitchen.$PROJECT.nightly-guard"
+  PLIST="$AGENTS/$LABEL.plist"
+  # ProcessType Standard, not Background: macOS throttles Background jobs' CPU and I/O.
+  cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$label</string>
+  <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
-  <array>$args</array>$calendar
-  <key>StandardOutPath</key><string>$log_dir/launchd.log</string>
-  <key>StandardErrorPath</key><string>$log_dir/launchd.log</string>
+  <array><string>/bin/bash</string><string>$AUTOMATION/bin/nightly-guard</string><string>$PROJECT</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>$HOUR</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>$LOG_DIR/launchd.log</string>
+  <key>StandardErrorPath</key><string>$LOG_DIR/launchd.log</string>
   <key>ProcessType</key><string>Standard</string>
 </dict>
 </plist>
 PLIST
-  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$plist"
-  if [ "$TRIGGERED" = 1 ]; then echo "installed $label triggered: no schedule; automation/bin/run-job starts it"; else echo "scheduled $label"; fi
-}
-
-# PrivateTmp=yes gives each run a /tmp of its own: the gardener's sandboxes need to write /tmp on Linux and
-# refuse to run without it.
-write_units() { # label log-dir weekday-or-empty hour program-args...
-  local label="$1" log_dir="$2" weekday="$3" hour="$4"; shift 4
-  local days=(Sun Mon Tue Wed Thu Fri Sat Sun) exec_line="" arg on_calendar
-  for arg in "$@"; do
-    # systemd has its own quoting and % specifiers: refuse what would need either rather than half-escape it
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  echo "scheduled $LABEL"
+else
+  LABEL="kitchen-${PROJECT//./-}-nightly-guard"
+  for arg in /bin/bash "$AUTOMATION/bin/nightly-guard" "$PROJECT"; do
     [[ "$arg" =~ ^[A-Za-z0-9_./@+-]+$ ]] || { echo "install-schedule: cannot pass '$arg' to systemd unquoted; move kitchen to a plain path" >&2; exit 2; }
-    exec_line="$exec_line $arg"
   done
-  on_calendar="*-*-* $(printf '%02d' "$hour"):00:00"
-  [ -z "$weekday" ] || on_calendar="${days[$weekday]} $on_calendar"
-  mkdir -p "$log_dir"
-  cat > "$AGENTS/$label.service" <<UNIT
+  ON_CALENDAR="*-*-* $(printf '%02d' "$HOUR"):00:00"
+  cat > "$AGENTS/$LABEL.service" <<UNIT
 [Unit]
-Description=kitchen $label
+Description=kitchen $LABEL
 
 [Service]
 Type=oneshot
-ExecStart=${exec_line# }
-PrivateTmp=yes
-StandardOutput=append:$log_dir/systemd.log
-StandardError=append:$log_dir/systemd.log
+ExecStart=/bin/bash $AUTOMATION/bin/nightly-guard $PROJECT
+StandardOutput=append:$LOG_DIR/systemd.log
+StandardError=append:$LOG_DIR/systemd.log
 UNIT
-  if [ "$TRIGGERED" = 1 ]; then
-    if [ -f "$AGENTS/$label.timer" ]; then  # what a timed install left: stop it before its file goes
-      systemctl --user disable --now "$label.timer" >/dev/null
-      rm "$AGENTS/$label.timer"
-    fi
-    systemctl --user daemon-reload
-    echo "installed $label triggered: no timer; automation/bin/run-job starts it"
-    return 0
-  fi
-  cat > "$AGENTS/$label.timer" <<UNIT
+  cat > "$AGENTS/$LABEL.timer" <<UNIT
 [Unit]
-Description=kitchen $label
+Description=kitchen $LABEL
 
 [Timer]
-OnCalendar=$on_calendar
+OnCalendar=$ON_CALENDAR
 
 [Install]
 WantedBy=timers.target
 UNIT
   systemctl --user daemon-reload
-  systemctl --user enable --now "$label.timer" >/dev/null
-  echo "scheduled $label ($on_calendar)"
-}
-
-schedule() {
-  if [ "$PLATFORM" = Darwin ]; then write_plist "com.kitchen.$1" "${@:2}"; else write_units "kitchen-${1//./-}" "${@:2}"; fi
-}
-
-needs_config() {
-  [ -f "${KITCHEN_CONFIG:-$HOME/.config/kitchen}/automation/$1.env" ] || { echo "no config for $1" >&2; exit 2; }
-}
-
-install_srt() {
-  # The gardener reruns its checks under srt, pinned with its integrity hashes in package-lock.json.
-  npm ci --ignore-scripts --no-audit --no-fund --prefix "$AUTOMATION" >/dev/null
-  echo "installed srt $("$AUTOMATION/node_modules/.bin/srt" --version)"
-}
-
-case "${1:-}" in
-  --retro)
-    schedule retro "$STATE_ROOT/retro/logs" "${2:-1}" "${3:-7}" /bin/bash "$AUTOMATION/bin/weekly-retro" ;;
-  --guard)
-    PROJECT="${2:?usage: install-schedule --guard <project> [hour]}"
-    needs_config "$PROJECT"
-    schedule "$PROJECT.nightly-guard" "$STATE_ROOT/automation/$PROJECT/logs" "" "${3:-2}" \
-      /bin/bash "$AUTOMATION/bin/nightly-guard" "$PROJECT" ;;
-  --audit)
-    # No catch-up of a missed run (no Persistent=): it waits for the next one, after the next guard (owner, 2026-10-12).
-    PROJECT="${2:?usage: install-schedule --audit <project> [hour]}"
-    needs_config "$PROJECT"
-    install_srt
-    schedule "$PROJECT.daily-audit" "$STATE_ROOT/automation/$PROJECT/logs" "" "${3:-4}" \
-      /bin/bash "$AUTOMATION/bin/daily-audit" "$PROJECT" ;;
-  --gardener)
-    PROJECT="${2:?usage: install-schedule --gardener <project> [weekday] [hour]}"
-    needs_config "$PROJECT"
-    install_srt
-    schedule "$PROJECT.weekly-gardener" "$STATE_ROOT/automation/$PROJECT/logs" "${3:-1}" "${4:-6}" \
-      /bin/bash "$AUTOMATION/bin/weekly-gardener" "$PROJECT" ;;
-  *)
-    PROJECT="${1:?usage: install-schedule <project> | --guard <project> | --gardener <project> | --audit <project> | --retro}"
-    needs_config "$PROJECT"
-    install_srt
-    schedule "$PROJECT.nightly-guard" "$STATE_ROOT/automation/$PROJECT/logs" "" "${2:-2}" \
-      /bin/bash "$AUTOMATION/bin/nightly-guard" "$PROJECT"
-    schedule "$PROJECT.weekly-gardener" "$STATE_ROOT/automation/$PROJECT/logs" "${3:-1}" "${4:-6}" \
-      /bin/bash "$AUTOMATION/bin/weekly-gardener" "$PROJECT" ;;
-esac
+  systemctl --user enable --now "$LABEL.timer" >/dev/null
+  echo "scheduled $LABEL ($ON_CALENDAR)"
+fi

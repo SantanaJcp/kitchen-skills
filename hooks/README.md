@@ -1,17 +1,19 @@
 # Agent hooks
 
-One script per guard. Claude Code and Codex run each one before every Bash command (`PreToolUse`): the script reads the tool call as JSON on stdin, exits 0 to allow it, or exits 2 with a message on stderr that tells the agent what to do instead.
+Two scripts, installed per project with `kitchen guards <repo>` (into `.kitchen/hooks/`, wired from `.claude/settings.json` and `.codex/hooks.json`; in this repo, those settings call `hooks/` directly).
 
-They are per project: `kitchen guards <repo>` copies them into the repo's `.kitchen/hooks/` and runs them from its `.claude/settings.json` and `.codex/hooks.json`, so they guard that project only. `kitchen install` adds none to your global settings, and takes out the ones older installs added.
+- `kitchen-guard` (`PreToolUse` on `Bash`): one process per shell call, fronted by a POSIX-sh prefilter that exits 0 without starting Python when the call mentions none of `git`, `rm`, or `gh`. Blocks with exit 2 and an actionable message on stderr:
+  1. `git commit --no-verify` / `-n`, `--no-verify` on hooked git commands, and `core.hooksPath` overrides;
+  2. recursive `rm` outside temp/scratch dirs (including per-user agent CLI scratch dirs such as `claude-<uid>` under temp/cache roots);
+  3. `git push` to `dev`, `main`, `master`, or a pattern in `~/.config/kitchen/shared-branches.txt`;
+  4. private-terms denylist matches in text published (`git commit`, `gh pr/issue`) from a kitchen checkout.
+  Fails closed (exit 2) on unreadable input or an unparseable command mentioning `git`, `rm`, or `gh`.
+- `chef-mode-after-compact` (`SessionStart` on `compact`): prints the 13 principles (one line each) and tells the agent to re-read `chef-mode/SKILL.md` if it was in chef mode. No transcript parsing.
 
-`chef-mode-after-compact` is the one hook that is not a guard: it runs after a compaction (`SessionStart`, source `compact`), reads the session's transcript, and when chef-mode was loaded tells the agent to read its `SKILL.md` again, with the `## Principles` index in `additionalContext`. It prints nothing in a session without chef-mode, and exits 2 with the reason on stderr when it cannot read its input or the transcript (on `SessionStart` that blocks nothing; Claude Code shows it to the person). It blocks nothing, so it has no attack corpus; `AfterCompactTests` in `tests/test_hooks.py` feeds it transcripts.
+Attack corpus and known limits (`eval`, nested `$(...)`, `xargs`, `find -exec`, ANSI-C escapes, git aliases, scripts in files, piped shells): `tests/corpus/hooks/cases.json`.
 
-`deny-unslotted-heavy` is opt-in per project: it blocks only the command prefixes listed in `.kitchen/heavy-commands` (`heavy-commands` in the folder above its own, so it reads the list of the project that carries it), and only when they do not run through `kitchen slot --`.
-
-`shellparse.py` is shared: it turns the command string into the commands it would run. Every guard has positive, negative, bypass and known-limit cases in `tests/corpus/hooks/cases.json`; a new guard or a newly found evasion starts there.
-
-Try one by hand:
+Try it by hand:
 
 ```bash
-echo '{"tool_name":"Bash","cwd":"/srv","tool_input":{"command":"git push origin dev"}}' | hooks/deny-shared-push; echo "exit $?"
+echo '{"tool_name":"Bash","cwd":"/srv","tool_input":{"command":"git push origin dev"}}' | hooks/kitchen-guard; echo "exit $?"
 ```

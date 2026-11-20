@@ -1,6 +1,6 @@
 # init: set one repo up for agents
 
-The owner chooses the guardrails; you build and prove them on a branch, in one pull request the owner merges. Per repo, never automatic: only the repo you were pointed at. The guards you add run in this repo only.
+The owner chooses the guardrails; you build and prove them on a branch, in one pull request the owner merges. Per repo, never automatic: only the repo you were pointed at. The guard you add runs in this repo only.
 
 Copy these steps into your todo list.
 
@@ -16,49 +16,43 @@ Work in a worktree on a new branch `kitchen/init` from the shared base: in T3 Co
 - Hooks: `git config core.hooksPath`, `.githooks/`, `.husky/`, pre-commit config; a secret scanner.
 - Agent files: `AGENTS.md`, `CLAUDE.md`, `.claude/settings.json`, `.codex/`, `decisions.md`, `.agents/skills/verify-*`, `bin/check`.
 - `.gitignore` rules that would hide a new file (a .NET `bin/` rule hides `bin/check`).
-- The owner's kitchen config, if it lists this repo: `~/.config/kitchen/integrate.toml` (checks the owner already trusts) and `projects.txt`.
 - Branch protection, read-only: `gh api repos/<owner>/<repo>/branches/<base>/protection`.
 
 ## 2. Ask once
 
 One message of numbered questions. For each: what is there today, one sentence on what yes does, your recommendation. Leave out a piece that already exists and works; say so in one line instead.
 
-1. **Guards.** `kitchen guards .` copies `deny-no-verify`, `deny-shared-push`, `deny-recursive-rm`, `deny-private-publish` and `deny-unslotted-heavy` (makes the builds and test suites listed in `.kitchen/heavy-commands` run through `kitchen slot --`) into `.kitchen/hooks/` and runs them before every shell command, plus `chef-mode-after-compact`, which brings chef mode back after a compaction, from `.claude/settings.json` and `.codex/hooks.json`. Recommend yes.
-2. **Check contract.** `bin/check` with the tiers `commit` (seconds to a minute), `integrate` (everything a merge needs), `nightly` and `verify-tree`, and `--list`; from [check.sh](init/check.sh), filled with commands this repo really runs. Recommend yes.
+1. **Guards.** `kitchen guards .` installs `kitchen-guard` (blocks `--no-verify` / `-n` / `core.hooksPath`, recursive `rm` outside temp/scratch, pushes to shared branches) and `chef-mode-after-compact` into `.kitchen/hooks/`, wired from `.claude/settings.json` and `.codex/hooks.json`. Recommend yes.
+2. **Check contract.** `bin/check` with the tiers `commit` (seconds to a minute), `integrate` (everything a merge needs), `nightly`, and `verify-tree`, and `--list`; from [check.sh](init/check.sh), filled with commands this repo really runs. Recommend yes.
 3. **Pre-commit hook.** `.githooks/pre-commit` from [pre-commit.sh](init/pre-commit.sh): a secret scan on the staged changes, then `bin/check commit`. Recommend yes when the commit tier takes under a minute.
-4. **Verify method.** `.agents/skills/verify-<repo>/` from [verify/](init/verify/), with a feature map and a guard test that fails when an entry point is missing from it. Recommend yes when the repo has a UI, an API or a CLI to drive.
-5. **AGENTS.md.** A `## Verify` section naming `bin/check` and the verify skill, and the line `Autonomy: propose` or `Autonomy: merge` (the rungs are in chef-mode's Doors and the trust ladder), followed by the sentence "It applies in chef mode (`/chef-mode`); outside it, open the pull request and leave the merge to the owner." Recommend `propose` until the owner has seen the guardrails work.
+4. **Verify method.** `.agents/skills/verify-<repo>/` from [verify/](init/verify/), with a feature map and a guard test that fails when an entry point is missing from it. Recommend yes when the repo has a UI, an API, or a CLI to drive.
+5. **AGENTS.md.** A `## Verify` section naming `bin/check` and the verify skill, and `Autonomy: propose` or `Autonomy: merge` (from chef-mode's ladder), followed by "It applies in chef mode (`/chef-mode`); outside it, open the pull request and leave the merge to the owner." Recommend `propose` until the owner has seen the guardrails work.
 6. **decisions.md.** From [decisions.md](init/decisions.md), with each one-way door below as an owed `- [ ]`. Recommend yes when it is missing.
-7. **The owner's kitchen** (personal config, never committed). Append the repo path to `~/.config/kitchen/projects.txt` (`kitchen status`, the nightly guard), and a `[projects.<folder>]` table with `base` and `checks = ["bin/check integrate"]` to `~/.config/kitchen/integrate.toml` (`kitchen integrate`). Append only; a file you cannot parse is reported, not rewritten.
-8. **Quality baseline** (optional). Today: whatever the repo measures (file sizes, layer violations, coverage, lint counts), or nothing. If yes: a script that prints those numbers as JSON and a committed baseline file; in the owner's `~/.config/kitchen/automation/<repo>.env`, `METRICS_CMD` records a snapshot after each nightly run, and `QUALITY_CMD` and `BASELINE_FILE` let the weekly gardener propose small changes that improve them, regenerating the baseline in the same change. A ratchet test that only lets a number shrink makes it a gate. Recommend yes only when the owner wants the numbers to move; a baseline nobody reads is noise.
-9. **Formal check** (optional). Offer it only when the repo has concurrency, retries, ordering, permissions, money or sync; otherwise leave it out without a line. Today: any `formal-<area>` skill, and the promise you would check, with `file:line`. If yes: after this pull request, follow the `formal-verification` skill (next to chef-mode, create mode) on its own branch and pull request; it is not part of init's proof. Recommend yes only when that promise is one a break would cost real harm and the tests do not reach.
+7. **Formal check** (optional). Offer only when the repo has concurrency, retries, ordering, permissions, money, or sync; otherwise omit. Today: any `formal-<area>` skill and the promise to check (`file:line`). If yes: follow `formal-verification` on its own branch after this PR.
 
-One-way doors are printed, never run: a ruleset or branch protection that requires the check on the shared base, with the exact `gh api` command. They go in the pull request body as numbered decisions.
+One-way doors are printed, never run: a ruleset or branch protection requiring the check on the shared base, with the exact `gh api` command. They go in the pull request body as numbered decisions.
 
 ## 3. Build what was answered yes
 
-- `bin/check`: every command is one you ran in this repo and saw pass; nothing guessed stays in. When `integrate.toml` already lists checks for the repo, start from those. Keep the commit tier fast; put the full build and the slow suites in `integrate`.
+- `bin/check`: every command is one you ran in this repo and saw pass; nothing guessed stays in. Keep `commit` fast; put full builds and slow suites in `integrate`.
 - Long runs print progress; never sit silent for minutes.
-- Keep the template's `kitchen slot` stanza above `cd`: `integrate`, `nightly` and `verify-tree` then wait for one of the owner's slots, so parallel agents do not all build at once; `commit` stays out, because the pre-commit hook waits on it.
 - A file `.gitignore` hides gets a `!` exception in `.gitignore`, not `git add -f`.
 - Guards: `kitchen guards .`, then `kitchen guards . --check` must print OK.
-- Guards, heavy commands: write `.kitchen/heavy-commands`, one command prefix per line, with the build and test commands from section 1 that you ran and saw take more than about half a minute; nothing guessed.
 
 ## 4. Prove it
 
 Prove each piece the owner said yes to; a piece they declined has nothing to prove.
 
-1. Check contract: `bin/check commit` green twice in a row, from a clean tree.
-2. Check cost: commit the work on `kitchen/init` first (check-cost measures the committed HEAD, not the working tree), then `kitchen check-cost .` prints PASS (it may first wait for one of the owner's slots; the wait is not timed); run it again after any later change to the check. A FAIL means the check costs several times more right after a commit than with HEAD unchanged, usually because the build puts the commit id into its inputs: fix that before you hand it over.
-3. Check contract, negative control: plant a defect in a file the commit tier actually runs (a test it executes, in a language its commands cover), run `bin/check commit`, see it fail, revert the defect. Still green means the tier does not cover that file: fix the tier or pick a file it runs. Never report done on a control that stayed green.
-4. Check contract: `bin/check integrate` green once.
-5. Pre-commit hook: `git config core.hooksPath .githooks`, stage the planted defect and run `git commit`: the hook must refuse it. Revert.
-6. Guards: each one blocks its probe in this repo: pipe `{"tool_name":"Bash","cwd":"<repo>","tool_input":{"command":"git push origin HEAD:<base>"}}` into `.kitchen/hooks/deny-shared-push` and see exit 2 (likewise `git commit --no-verify -m x` for `deny-no-verify`, `rm -rf /x` for `deny-recursive-rm`, `gh pr create --body-file /tmp/x.md` for `deny-private-publish`). `deny-unslotted-heavy`: when `.kitchen/heavy-commands` has entries, its first entry blocks and the same command passes after `kitchen slot -- `; when it has none (nothing took half a minute), say so in the pull request and probe nothing.
+1. Check contract: `bin/check commit` green twice in a row from a clean tree.
+2. Check contract, negative control: plant a defect in a file `commit` runs, run `bin/check commit`, see it fail, revert the defect. Never report done on a control that stayed green.
+3. Check contract: `bin/check integrate` green once.
+4. Pre-commit hook: `git config core.hooksPath .githooks`, stage the planted defect and run `git commit`: the hook must refuse it. Revert.
+5. Guards: pipe `{"tool_name":"Bash","cwd":"<repo>","tool_input":{"command":"..."}}` into `.kitchen/hooks/kitchen-guard` for `git push origin HEAD:<base>`, `git commit --no-verify -m x`, and `rm -rf /x` and see exit 2 on each.
 
 Keep each command and its last lines of output for the pull request.
 
 ## 5. Hand it over
 
-Commit what is left on `kitchen/init` (step 4 already committed the work), push the branch, open the pull request to the base. Its body: what was added and why, the evidence from step 4 (both green runs, the check-cost PASS, the red control and its revert, the guard probes), the one-way doors as numbered decisions with their commands, and two lines for the owner: Claude Code loads the guards in a session started at the repo root; in Codex, trust the project and open `/hooks` once to approve them. The owner merges this pull request, whatever the rung.
+Commit the work on `kitchen/init`, push the branch, and open the pull request to the base. Its body: what was added and why, the evidence from step 4, the one-way doors as numbered decisions with their commands, and two lines for the owner: Claude Code loads the guards in a session started at the repo root; in Codex, trust the project and open `/hooks` once to approve them. The owner merges this pull request, whatever the rung.
 
-Report PASS, ISSUES or BLOCKED with that evidence, and the decisions the owner owes.
+Report PASS, ISSUES, or BLOCKED with that evidence, and the decisions the owner owes.

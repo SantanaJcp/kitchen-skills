@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
-"""The nightly, gardener and audit histories (`kitchen status` reads the first two): one JSON line per run, rewritten in
-place by run_id.
+"""Nightly guard history: one JSON line per run, rewritten in place by run_id.
 
-  record.py <file> write <status> <failed_step> <cleanup> <metrics> <sha> <run_id> <log> <started> <steps> [warning...]
-  record.py <file> gardener <status> <detail> <run_id> <log> <started> [warning...]
-  record.py <file> audit <status> <detail> <sha> <baseline> <run_id> <log> <started> [warning...]
+  record.py <file> write <status> <failed_step> <cleanup> <sha> <run_id> <log> <started> <steps> [warning...]
   record.py <file> close-stale <current-run-id>
   record.py <file> mark-survivors <run-id> <pids>
-  record.py <file> find <started-at-or-after> <pid>
-
-`find` prints the newest line of one run as it is in the file: the run whose run_id ends in -<pid> (lib/common.sh takes it
-from the job's main process) and that started at or after the given time, in the jobs' format. Prints nothing, and exits
-1, when no line matches.
-
-A run writes "running" when it starts and replaces that line when it ends. A "running" line left by a
-run that was killed (SIGKILL cannot be trapped) is closed as "incomplete" by the next run that holds
-the project lock, since no other run can still be alive then.
-
-A nightly's <steps> are the steps that finished, in order, one line each: `<seconds> <green|red> <name>`; they are
-recorded as `steps`, a list of {"name", "seconds", "status"}. Records written before `steps` existed have no such key.
 """
 import datetime
 import json
@@ -80,28 +65,10 @@ def main() -> int:
                                        f"survivors {pids} still held files in the clone after TERM and KILL"])
         save(path, entries)
         return 0
-    if action == "find":
-        started, pid = args
-        found = [entry for entry in entries if isinstance(entry, dict) and str(entry.get("run_id", "")).endswith(f"-{pid}")
-                 and str(entry.get("started") or "") >= started]
-        if not found:
-            return 1
-        print(json.dumps(found[-1]))
-        return 0
     now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    if action == "gardener":
-        status, detail, run_id, log, started, *warnings = args
-        entry = {"ts": now, "started": started, "status": status, "detail": detail or None, "warnings": warnings,
-                 "run_id": run_id, "log": log}
-    elif action == "audit":
-        status, detail, sha, baseline, run_id, log, started, *warnings = args
-        entry = {"ts": now, "started": started, "status": status, "detail": detail or None, "sha": sha or None,
-                 "baseline": baseline or None, "warnings": warnings, "run_id": run_id, "log": log}
-    else:
-        status, failed, cleanup, metrics, sha, run_id, log, started, steps, *warnings = args
-        entry = {"ts": now, "started": started, "sha": sha or None, "status": status, "failed_step": failed or None,
-                 "cleanup": cleanup, "metrics": metrics, "steps": parse_steps(steps), "warnings": warnings,
-                 "run_id": run_id, "log": log}
+    status, failed, cleanup, sha, run_id, log, started, steps, *warnings = args
+    entry = {"ts": now, "started": started, "sha": sha or None, "status": status, "failed_step": failed or None,
+             "cleanup": cleanup, "steps": parse_steps(steps), "warnings": warnings, "run_id": run_id, "log": log}
     for index, existing in enumerate(entries):
         if isinstance(existing, dict) and existing.get("run_id") == run_id:
             entries[index] = entry

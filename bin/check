@@ -1,35 +1,16 @@
 #!/bin/sh
 # bin/check: this project's one check contract. It is yours: edit it.
-# Tiers: commit (the pre-commit hook), integrate (before a merge), nightly (on a schedule) and verify-tree
-# (a whole tree, as `kitchen integrate` checks it). `bin/check --list` prints them.
-# A tier with no command fails: an empty check is never green.
+# Tiers: commit (the pre-commit hook), integrate (before a merge), nightly (on a schedule) and verify-tree.
+# `bin/check --list` prints them. A tier with no command fails: an empty check is never green.
 set -eu
 cd "$(dirname "$0")/.."
 
-tier_commit() {
-  # lint the skills, scan for private data and secrets, then the fast suites (about 20 s; no automation suite)
-  bin/kitchen check --lint-only
-  python3 -m unittest -q tests.test_principles tests.test_kitchen tests.test_hooks tests.test_corpus tests.test_source_compat tests.test_feature_map tests.test_guards
-}
-
-tier_integrate() {
-  # every test, the automation suite included (it needs srt: npm ci --ignore-scripts --prefix automation)
+run_all() {
   bin/kitchen check
-}
-
-tier_nightly() {
-  tier_integrate
-}
-
-tier_verify_tree() {
-  tier_integrate
 }
 
 case "${1:-}" in
   --list) printf '%s\n' commit integrate nightly verify-tree ;;
-  commit) tier_commit ;;
-  integrate) tier_integrate ;;
-  nightly) tier_nightly ;;
-  verify-tree) tier_verify_tree ;;
+  commit|integrate|nightly|verify-tree) run_all ;;
   *) echo "usage: bin/check --list | commit | integrate | nightly | verify-tree" >&2; exit 2 ;;
 esac

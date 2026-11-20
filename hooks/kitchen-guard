@@ -1,0 +1,932 @@
+#!/usr/bin/env python3
+"""PreToolUse guard for Bash calls: one process, four rules.
+
+  (a) git commit --no-verify / -n, --no-verify on hooked git commands, and core.hooksPath overrides;
+  (b) recursive rm outside temp/scratch dirs (including per-user agent CLI scratch dirs like claude-<uid>);
+  (c) git push to shared/protected branches (dev, main, master, and ~/.config/kitchen/shared-branches.txt);
+  (d) private-terms denylist on text published from a kitchen checkout (git commit, gh pr/issue create|edit|comment|review|merge).
+
+Fails closed (exit 2) when the payload cannot be read or a command mentioning git/rm/gh cannot be split.
+Known limits (see tests/corpus/hooks/cases.json): eval, nested $(...), xargs, find -exec, ANSI-C escapes ($'...'),
+git aliases, scripts in files, and commands piped into a shell.
+Principles: `prove` (repo hooks run on every commit), `doors` (no shared-branch push, no recursive rm outside temp,
+no private terms published from kitchen), `no-fallbacks` (fail closed on unreadable input or unparseable guarded
+commands), `encode-lessons` (rules encoded as one fast guard)."""
+from __future__ import annotations
+
+import errno
+import fnmatch
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+
+sys.dont_write_bytecode = True
+
+GUARD = "kitchen-guard"
+GUARDED_MENTION = re.compile(r"(?:^|[^A-Za-z0-9_])(?:git|rm|gh)(?:$|[^A-Za-z0-9_])")
+ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+HEREDOC_RE = re.compile(r"(?<!<)<<(-?)\s*(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_-]*))")
+SEPARATORS = {";", "&&", "||", "|", "&", "\n", "(", ")"}
+REDIRECTS = {"<", ">", ">>", "<>", ">&", "<&", ">|"}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+WRAPPERS = {"env", "sudo", "command", "time", "nice"}
+HOOKED_GIT = {"commit", "merge", "push", "am", "rebase", "cherry-pick", "revert"}
+HOOKS_CONFIG = ("core.hookspath", "include.", "includeif.")
+PUSH_CONFIG = ("push.", "remote.", "branch.", "include.", "includeif.")
+INHERITED_GIT_CONFIG = ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG")
+DEFAULT_SHARED = ("dev", "main", "master")
+GH_PUBLISH = {"pr": {"create", "new", "edit", "comment", "review", "merge"}, "issue": {"create", "new", "edit", "comment"}}
+KITCHEN_MARKERS = (("bin", "kitchen"), ("lib", "kitchen", "common.py"))
+MAX_BODY_BYTES = 1 << 20
+MAX_DEPTH = 6
+
+COMMIT_SHORT_VALUE = set("mFcCt")
+COMMIT_SHORT_OPT = set("Su")
+COMMIT_LONG_VALUE = {"--message", "--file", "--reuse-message", "--reedit-message", "--fixup", "--squash",
+                     "--author", "--date", "--template", "--cleanup", "--trailer", "--pathspec-from-file"}
+PUSH_LONG_VALUE = ("--repo", "--push-option", "--receive-pack", "--exec")
+ALL_BRANCHES = ("--all", "--branches", "--mirror")
+
+NO_VERIFY_ADVICE = ("Run it without that option. If a hook fails, fix what it reports (in the kitchen, `bin/kitchen check` "
+                    "shows the same failures); if the hook itself is broken, stop and tell the owner instead of skipping it.")
+PUSH_ADVICE = ("Push your own branch instead (`git push -u origin <your-branch>`) and open a pull request. "
+               "Shared branches change only on the owner's explicit request, and then the owner runs the push.")
+PUSH_BY_HAND = ("If this push is meant and safe, write the remote and branch literally (`git push origin <your-branch>`), "
+                "or ask the owner to run it by hand.")
+
+
+class SplitError(Exception):
+    pass
+
+
+@dataclass
+class Cmd:
+    argv: list[str]
+    cwd: str | None
+    env: dict[str, str] = field(default_factory=dict)
+    stdin_files: list[str] = field(default_factory=list)
+
+    @property
+    def name(self) -> str:
+        return os.path.basename(self.argv[0]) if self.argv else ""
+
+
+def _strip_heredocs(text: str) -> str:
+    """Drop heredoc bodies before shlex splitting so prose inside <<'EOF' ... EOF never breaks quoting."""
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for line in text.splitlines(keepends=True):
+        if pending:
+            delim, strip_tabs = pending[0]
+            candidate = (line.lstrip("\t") if strip_tabs else line).rstrip("\r\n")
+            if candidate == delim:
+                pending.pop(0)
+            continue
+        # Only look for heredoc markers outside quotes on this line.
+        cleaned, i, quote = [], 0, ""
+        while i < len(line):
+            ch = line[i]
+            if quote:
+                if ch == "\\" and quote == '"' and i + 1 < len(line):
+                    cleaned.append(line[i:i + 2])
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+                cleaned.append(ch)
+                i += 1
+            elif ch in ("'", '"'):
+                quote = ch
+                cleaned.append(ch)
+                i += 1
+            elif ch == "\\" and i + 1 < len(line):
+                cleaned.append(line[i:i + 2])
+                i += 2
+            elif ch == "#":
+                cleaned.append(line[i:])
+                break
+            elif line[i:i + 2] == "<<" and line[i:i + 3] != "<<<":
+                m = HEREDOC_RE.match(line, i)
+                if m:
+                    delim = m.group(2) or m.group(3) or m.group(4)
+                    pending.append((delim, m.group(1) == "-"))
+                    i = m.end()
+                    continue
+                cleaned.append(ch)
+                i += 1
+            else:
+                cleaned.append(ch)
+                i += 1
+        out.append("".join(cleaned))
+    return "".join(out)
+
+
+def _join_path(cwd: str | None, path: str) -> str | None:
+    if path == "~" or path.startswith("~/"):
+        path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    if cwd is None:
+        return None
+    return os.path.normpath(os.path.join(cwd, path))
+
+
+def _is_dynamic(word: str) -> bool:
+    return "$" in word or "`" in word
+
+
+def _tokenize(text: str) -> list[str]:
+    stripped = _strip_heredocs(text).replace("\\\n", " ")
+    lexer = shlex.shlex(stripped, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    try:
+        return list(lexer)
+    except ValueError as error:
+        raise SplitError(str(error)) from error
+
+
+def _unwrap(argv: list[str], cwd: str | None, env: dict[str, str]) -> tuple[list[str], str | None, dict[str, str]]:
+    """Strip leading VAR=val prefixes and wrappers (env, sudo, command, time, nice)."""
+    env = dict(env)
+    while argv:
+        if ASSIGN_RE.match(argv[0]):
+            k, _, v = argv[0].partition("=")
+            env[k] = v
+            argv = argv[1:]
+            continue
+        base = os.path.basename(argv[0])
+        if base not in WRAPPERS:
+            break
+        i = 1
+        if base == "env":
+            while i < len(argv):
+                a = argv[i]
+                if a == "--":
+                    i += 1
+                    break
+                if a in ("-u", "-C", "--chdir", "-S") and i + 1 < len(argv):
+                    if a in ("-C", "--chdir"):
+                        cwd = None if _is_dynamic(argv[i + 1]) else _join_path(cwd, argv[i + 1])
+                    i += 2
+                elif a.startswith(("-C", "--chdir=")):
+                    val = a.split("=", 1)[1] if "=" in a else a[2:]
+                    cwd = None if _is_dynamic(val) else _join_path(cwd, val)
+                    i += 1
+                elif a.startswith("-"):
+                    i += 1
+                elif ASSIGN_RE.match(a):
+                    k, _, v = a.partition("=")
+                    env[k] = v
+                    i += 1
+                else:
+                    break
+        elif base == "sudo":
+            while i < len(argv):
+                a = argv[i]
+                if a == "--":
+                    i += 1
+                    break
+                if a in ("-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T") and i + 1 < len(argv):
+                    if a == "-D":
+                        cwd = None if _is_dynamic(argv[i + 1]) else _join_path(cwd, argv[i + 1])
+                    i += 2
+                elif a.startswith("-"):
+                    i += 1
+                elif ASSIGN_RE.match(a):
+                    k, _, v = a.partition("=")
+                    env[k] = v
+                    i += 1
+                else:
+                    break
+        elif base == "command":
+            query = False
+            while i < len(argv) and argv[i].startswith("-"):
+                if argv[i] == "--":
+                    i += 1
+                    break
+                if "v" in argv[i][1:] or "V" in argv[i][1:]:
+                    query = True
+                i += 1
+            if query:
+                return [], cwd, env
+        elif base == "time":
+            while i < len(argv) and argv[i].startswith("-"):
+                if argv[i] == "--":
+                    i += 1
+                    break
+                i += 1
+        elif base == "nice":
+            while i < len(argv) and argv[i].startswith("-"):
+                if argv[i] == "--":
+                    i += 1
+                    break
+                if argv[i] == "-n" and i + 1 < len(argv):
+                    i += 2
+                else:
+                    i += 1
+        argv = argv[i:]
+    return argv, cwd, env
+
+
+def _shell_c_script(argv: list[str]) -> str | None:
+    """Return the -c script argument for sh/bash/zsh/dash/ksh, or None."""
+    if not argv or os.path.basename(argv[0]) not in SHELLS:
+        return None
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            return None
+        if a in ("-o", "+o") and i + 1 < len(argv):
+            i += 2
+            continue
+        if a.startswith("-") and not a.startswith("--"):
+            if "c" in a[1:]:
+                return argv[i + 1] if i + 1 < len(argv) else ""
+            i += 1
+            continue
+        return None
+    return None
+
+
+def _expand_vars(word: str, shell_vars: dict[str, str]) -> str:
+    if not shell_vars or "$" not in word:
+        return word
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                  lambda m: shell_vars.get(m.group(1) or m.group(2), m.group(0)), word)
+
+
+def split_commands(text: str, cwd: str | None = None, _depth: int = 0) -> list[Cmd]:
+    """Split a shell string into simple commands: handles ; && || | newlines, subshells, cd, wrappers, and sh -c."""
+    if _depth > MAX_DEPTH:
+        raise SplitError("nested shell commands exceed depth limit")
+    tokens = _tokenize(text)
+    cmds: list[Cmd] = []
+    cur_cwd = cwd
+    cwd_stack: list[str | None] = []
+    shell_vars: dict[str, str] = {}
+    raw_argv: list[str] = []
+    stdin_files: list[str] = []
+
+    def flush() -> None:
+        nonlocal cur_cwd, raw_argv, stdin_files
+        if not raw_argv:
+            stdin_files = []
+            return
+        expanded = [_expand_vars(w, shell_vars) for w in raw_argv]
+        argv, cmd_cwd, env = _unwrap(expanded, cur_cwd, {})
+        files = [_expand_vars(f, shell_vars) for f in stdin_files]
+        raw_argv, stdin_files = [], []
+        if not argv:
+            shell_vars.update(env)
+            return
+        if os.path.basename(argv[0]) == "cd":
+            target = next((a for a in argv[1:] if not a.startswith("-")), os.path.expanduser("~"))
+            cur_cwd = None if (target == "-" or _is_dynamic(target)) else _join_path(cmd_cwd, target)
+            return
+        script = _shell_c_script(argv)
+        if script is not None:
+            inner = split_commands(script, cmd_cwd, _depth + 1)
+            for item in inner:
+                if files and not item.stdin_files:
+                    item.stdin_files = list(files)
+            cmds.extend(inner)
+            return
+        cmds.append(Cmd(argv=argv, cwd=cmd_cwd, env=env, stdin_files=files))
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in SEPARATORS:
+            flush()
+            if tok == "(":
+                cwd_stack.append(cur_cwd)
+            elif tok == ")" and cwd_stack:
+                cur_cwd = cwd_stack.pop()
+            elif tok in ("||", "|"):
+                # Right side of || or | may not share a cd from the left side; keep conservative.
+                pass
+            i += 1
+        elif tok in REDIRECTS:
+            # Drop optional leading fd digit right before a redirect operator (e.g. 2>&1).
+            if raw_argv and raw_argv[-1].isdigit():
+                raw_argv.pop()
+            if i + 1 < len(tokens):
+                if tok in ("<", "<>"):
+                    stdin_files.append(tokens[i + 1])
+                i += 2
+            else:
+                i += 1
+        else:
+            raw_argv.append(tok)
+            i += 1
+    flush()
+    return cmds
+
+
+# ---------------------------------------------------------------- git helpers
+
+@dataclass
+class GitCall:
+    cmd: Cmd
+    sub: str
+    args: list[str]
+    cwd: str | None
+    global_opts: list[str]
+    config: list[tuple[str, str]]
+    config_files: list[str]
+
+
+def parse_git(cmd: Cmd) -> GitCall | None:
+    if cmd.name != "git":
+        return None
+    i = 1
+    cwd = cmd.cwd
+    global_opts: list[str] = []
+    config: list[tuple[str, str]] = []
+    config_files: list[str] = []
+    for var in INHERITED_GIT_CONFIG:
+        if var in cmd.env:
+            if var in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"):
+                config_files.append(var)
+            else:
+                config.append(("<unknown>", cmd.env[var]))
+    while i < len(cmd.argv):
+        a = cmd.argv[i]
+        if a == "-C" and i + 1 < len(cmd.argv):
+            val = cmd.argv[i + 1]
+            cwd = None if _is_dynamic(val) else _join_path(cwd, val)
+            global_opts += ["-C", val]
+            i += 2
+        elif a.startswith("-C") and len(a) > 2:
+            val = a[2:]
+            cwd = None if _is_dynamic(val) else _join_path(cwd, val)
+            global_opts += ["-C", val]
+            i += 1
+        elif a == "-c" and i + 1 < len(cmd.argv):
+            val = cmd.argv[i + 1]
+            key, _, cval = val.partition("=")
+            config.append(("<unknown>" if _is_dynamic(key) else key.lower(), cval))
+            i += 2
+        elif a.startswith("-c") and len(a) > 2:
+            val = a[2:]
+            key, _, cval = val.partition("=")
+            config.append(("<unknown>" if _is_dynamic(key) else key.lower(), cval))
+            i += 1
+        elif a in ("--git-dir", "--work-tree", "--namespace", "--config-env") and i + 1 < len(cmd.argv):
+            if a == "--config-env":
+                key = cmd.argv[i + 1].split("=", 1)[0].lower()
+                config.append((key, ""))
+            else:
+                global_opts += [a, cmd.argv[i + 1]]
+            i += 2
+        elif a.startswith(("--git-dir=", "--work-tree=", "--namespace=", "--config-env=")):
+            if a.startswith("--config-env="):
+                key = a.split("=", 1)[1].split("=", 1)[0].lower()
+                config.append((key, ""))
+            else:
+                global_opts.append(a)
+            i += 1
+        elif a.startswith("-"):
+            i += 1
+        else:
+            return GitCall(cmd, a, cmd.argv[i + 1:], cwd, global_opts, config, config_files)
+    return GitCall(cmd, "", [], cwd, global_opts, config, config_files)
+
+
+def run_git(call: GitCall, *args: str) -> str | None:
+    if not call.cwd:
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({k: v for k, v in call.cmd.env.items() if k.startswith("GIT_") and not _is_dynamic(v)})
+    opts = [o for o in call.global_opts if not o.startswith("-C")]  # cwd already incorporates -C
+    # Strip -C and its value from global_opts since we pass -C call.cwd
+    clean_opts: list[str] = []
+    i = 0
+    while i < len(call.global_opts):
+        if call.global_opts[i] == "-C":
+            i += 2
+        else:
+            clean_opts.append(call.global_opts[i])
+            i += 1
+    try:
+        res = subprocess.run(["git", "-C", call.cwd, *clean_opts, *args], capture_output=True, text=True, env=env, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def git_config_regexp(call: GitCall, pattern: str, *flags: str) -> list[tuple[str, str]] | None:
+    if not call.cwd:
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    clean_opts: list[str] = []
+    i = 0
+    while i < len(call.global_opts):
+        if call.global_opts[i] == "-C":
+            i += 2
+        else:
+            clean_opts.append(call.global_opts[i])
+            i += 1
+    try:
+        res = subprocess.run(["git", "-C", call.cwd, *clean_opts, "config", *flags, "--get-regexp", pattern],
+                             capture_output=True, text=True, env=env, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode == 1 and not res.stdout:
+        return []
+    if res.returncode != 0:
+        return None
+    return [tuple(line.split(" ", 1)) if " " in line else (line, "") for line in res.stdout.splitlines() if line]
+
+
+# ---------------------------------------------------------------- rule (a): no-verify & hooksPath
+
+def _is_no_verify(value: str) -> bool:
+    return len(value) >= len("--no-veri") and "--no-verify".startswith(value)
+
+
+def _commit_has_no_verify(args: list[str]) -> bool:
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return False
+        if a.startswith("--"):
+            if _is_no_verify(a):
+                return True
+            if a in COMMIT_LONG_VALUE:
+                i += 1
+        elif a.startswith("-") and len(a) > 1:
+            for k, ch in enumerate(a[1:]):
+                if ch == "n":
+                    return True
+                if ch in COMMIT_SHORT_VALUE or ch in COMMIT_SHORT_OPT:
+                    if ch in COMMIT_SHORT_VALUE and k == len(a) - 2:
+                        i += 1
+                    break
+        i += 1
+    return False
+
+
+def check_no_verify(call: GitCall) -> list[str]:
+    if call.sub not in HOOKED_GIT:
+        return []
+    keys = [k for k, _ in call.config if k == "<unknown>" or k.startswith(HOOKS_CONFIG)]
+    if keys or call.config_files:
+        what = f"`{keys[0]}` set on the command line" if keys else f"{call.config_files[0]} pointing at another config file"
+        return [f"`git {call.sub}` with {what} can change or skip the repo's hooks. {NO_VERIFY_ADVICE}"]
+    if call.sub == "commit":
+        if _commit_has_no_verify(call.args):
+            return [f"`git commit --no-verify` (or -n) skips the pre-commit and commit-msg hooks. {NO_VERIFY_ADVICE}"]
+    else:
+        for a in call.args:
+            if a == "--":
+                break
+            if _is_no_verify(a):
+                return [f"`git {call.sub} --no-verify` skips the repo's hooks. {NO_VERIFY_ADVICE}"]
+    return []
+
+
+# ---------------------------------------------------------------- rule (b): recursive rm
+
+def _temp_roots() -> set[str]:
+    roots = {os.path.realpath(tempfile.gettempdir()), os.path.realpath("/tmp")}
+    claude_tmp = os.environ.get("CLAUDE_CODE_TMPDIR")
+    if claude_tmp and os.path.isabs(claude_tmp):
+        roots.add(os.path.realpath(claude_tmp))
+    settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    try:
+        val = json.loads(open(settings, encoding="utf-8").read()).get("env", {}).get("CLAUDE_CODE_TMPDIR")
+        if isinstance(val, str) and os.path.isabs(val):
+            roots.add(os.path.realpath(val))
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
+    return roots
+
+
+def _scratch_roots() -> set[str]:
+    """Parent roots under which a per-user agent scratch dir (e.g. claude-<uid>) counts as temp."""
+    home = os.path.expanduser("~")
+    candidates = [tempfile.gettempdir(), "/tmp", "/var/tmp", os.path.join(home, ".cache"), os.path.join(home, "Library", "Caches")]
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache and os.path.isabs(xdg_cache):
+        candidates.append(xdg_cache)
+    return {os.path.realpath(p) for p in candidates if p}
+
+
+def _in_allowed_temp(resolved: str, roots: set[str], scratch_roots: set[str], allow_root: bool) -> bool:
+    if any((resolved == r and allow_root) or resolved.startswith(r.rstrip("/") + "/") for r in roots):
+        return True
+    # Per-user agent CLI scratch dir: e.g. <temp-or-cache-root>/.../claude-<uid>/...
+    marker = f"claude-{os.getuid()}"
+    for root in scratch_roots:
+        prefix = root.rstrip("/") + "/"
+        if resolved.startswith(prefix):
+            parts = resolved[len(prefix):].split("/")
+            if marker in parts:
+                idx = parts.index(marker)
+                # Allow deleting inside claude-<uid> (or claude-<uid> itself as a scratch dir).
+                if idx < len(parts):
+                    return True
+    return False
+
+
+def check_recursive_rm(cmd: Cmd) -> list[str]:
+    if cmd.name != "rm":
+        return []
+    recursive, targets, done = False, [], False
+    for a in cmd.argv[1:]:
+        if not done and a == "--":
+            done = True
+        elif not done and a.startswith("--"):
+            recursive = recursive or a == "--recursive"
+        elif not done and a.startswith("-") and len(a) > 1:
+            recursive = recursive or "r" in a or "R" in a
+        else:
+            targets.append(a)
+    if not recursive:
+        return []
+    roots, scratch = _temp_roots(), _scratch_roots()
+    reasons: list[str] = []
+    for target in targets:
+        advice = (f"Move it to the Trash instead: `trash {target}` (on Linux: `gio trash {target}`). "
+                  "Recursive rm is allowed only under temp/scratch dirs.")
+        if _is_dynamic(target):
+            reasons.append(f"`rm -r {target}`: cannot tell whether that path is inside temp/scratch. Write the path literally. {advice}")
+            continue
+        path = _join_path(cmd.cwd, target)
+        if path is None:
+            reasons.append(f"`rm -r {target}`: working directory is unknown after `cd`, so the path cannot be checked. {advice}")
+            continue
+        parts = path.split("/")
+        first_glob = next((k for k, part in enumerate(parts) if any(c in part for c in "*?[")), None)
+        if first_glob is None:
+            if _in_allowed_temp(os.path.realpath(path), roots, scratch, allow_root=False):
+                continue
+        else:
+            base = "/".join(parts[:first_glob]) or "/"
+            if ".." not in parts[first_glob:] and _in_allowed_temp(os.path.realpath(base), roots, scratch, allow_root=True):
+                continue
+        reasons.append(f"`rm -r {target}` is outside temp/scratch dirs. {advice}")
+    return reasons
+
+
+# ---------------------------------------------------------------- rule (c): shared push
+
+def _shared_patterns() -> list[str]:
+    config = os.environ.get("KITCHEN_CONFIG") or os.path.join(os.path.expanduser("~"), ".config", "kitchen")
+    patterns = list(DEFAULT_SHARED)
+    try:
+        with open(os.path.join(config, "shared-branches.txt"), encoding="utf-8") as handle:
+            patterns += [line.strip() for line in handle if line.strip() and not line.startswith("#")]
+    except FileNotFoundError:
+        pass
+    return patterns
+
+
+def _is_shared(branch: str, patterns: list[str]) -> bool:
+    if branch.startswith("refs/"):
+        if not branch.startswith("refs/heads/"):
+            return False
+        branch = branch[len("refs/heads/"):]
+    elif branch.startswith("heads/"):
+        branch = branch[len("heads/"):]
+    return any(fnmatch.fnmatchcase(branch, p) or fnmatch.fnmatchcase(p, branch) for p in patterns)
+
+
+def _abbreviates(opt: str, full: str) -> bool:
+    return len(opt) > 2 and full.startswith(opt)
+
+
+def _current_branch(call: GitCall) -> tuple[str | None, str | None]:
+    branch = run_git(call, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if not branch:
+        return None, None
+    upstream = run_git(call, "config", "--get", f"branch.{branch}.merge")
+    return branch, upstream
+
+
+def _refspec_reasons(call: GitCall, refspecs: list[str], deleting: bool, patterns: list[str], shorthand: bool = True) -> list[str]:
+    reasons: list[str] = []
+    skip_tag = False
+    for spec in refspecs:
+        if skip_tag:
+            skip_tag = False
+            continue
+        if _is_dynamic(spec):
+            return [f"cannot tell where `{spec}` pushes: it is a variable or command output. {PUSH_BY_HAND}"]
+        val = spec.lstrip("+")
+        if shorthand and val == "tag":
+            skip_tag = True
+            continue
+        if deleting:
+            src, dst = None, val
+        elif ":" in val:
+            src, dst = val.split(":", 1)
+        else:
+            src, dst = val, val
+        if not dst:
+            what = "the matching refspec `:`, which pushes every branch the remote also has" if not src else \
+                f"`{spec}` has no destination, so git picks one from config"
+            return [f"{what}; shared branches can be among them. {PUSH_BY_HAND}"]
+        if dst in ("HEAD", "@") or (src in ("HEAD", "@") and dst == src):
+            branch, _ = _current_branch(call)
+            if branch is None:
+                return [f"cannot tell which branch `{val}` names (no repo, detached HEAD or unknown directory). "
+                        "Name the destination: `git push origin HEAD:<your-branch>`."]
+            dst = branch
+        if _is_shared(dst, patterns):
+            reasons.append(f"`git push` to `{dst.replace('refs/heads/', '', 1)}`, a shared branch.")
+    return reasons
+
+
+def check_shared_push(call: GitCall) -> list[str]:
+    if call.sub != "push":
+        return []
+    keys = [k for k, _ in call.config if k == "<unknown>" or k.startswith(PUSH_CONFIG)]
+    if keys:
+        return [f"`{keys[0]}` is set for this command, and it decides where the push goes. {PUSH_BY_HAND} {PUSH_ADVICE}"]
+    inherited = [v for v in INHERITED_GIT_CONFIG if v in os.environ]
+    if inherited:
+        return [f"{inherited[0]} is set in this environment, so git reads config the hook does not replay. {PUSH_BY_HAND} {PUSH_ADVICE}"]
+    if call.config_files:
+        return [f"{call.config_files[0]} points git at a config file the hook has not read. {PUSH_BY_HAND} {PUSH_ADVICE}"]
+
+    longs, shorts, positionals, i = [], set(), [], 0
+    args = call.args
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            positionals += args[i + 1:]
+            break
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            longs.append(name)
+            if "=" not in a and any(_abbreviates(name, full) for full in PUSH_LONG_VALUE):
+                i += 1
+        elif a.startswith("-") and len(a) > 1:
+            for k, ch in enumerate(a[1:]):
+                shorts.add(ch)
+                if ch == "o":
+                    if k == len(a) - 2:
+                        i += 1
+                    break
+        else:
+            positionals.append(a)
+        i += 1
+
+    every = sorted({full for name in longs for full in ALL_BRANCHES if _abbreviates(name, full)})
+    if every:
+        return [f"`git push {' '.join(longs)}` means {' or '.join(every)}, which pushes every local branch, shared ones included. {PUSH_ADVICE}"]
+    if positionals and _is_dynamic(positionals[0]):
+        return [f"cannot tell where this push goes: the remote is a variable or command output. {PUSH_BY_HAND} {PUSH_ADVICE}"]
+
+    patterns = _shared_patterns()
+    refspecs = positionals[1:]
+    deleting = "d" in shorts or any(_abbreviates(name, "--delete") for name in longs)
+    if not refspecs:
+        branch, upstream = _current_branch(call)
+        pushes = git_config_regexp(call, r"^remote\..*\.push$")
+        mirrors = git_config_regexp(call, r"^remote\..*\.mirror$", "--bool")
+        if pushes is None or mirrors is None:
+            return [f"cannot read this repository's git config, so where a `git push` without a refspec goes is unknown. {PUSH_BY_HAND} {PUSH_ADVICE}"]
+        mirrored = [k[len("remote."):-len(".mirror")] for k, v in mirrors if v == "true"]
+        if mirrored:
+            return [f"remote.{mirrored[0]}.mirror is set, so `git push` to it mirrors every local branch, shared ones included. {PUSH_ADVICE}"]
+        reasons = [f"remote.{k[len('remote.'):-len('.push')]}.push is set: {r} {PUSH_ADVICE}"
+                   for k, spec in pushes for r in _refspec_reasons(call, [spec], False, patterns, shorthand=False)]
+        if reasons:
+            return reasons
+        if run_git(call, "config", "--get", "push.default") == "matching":
+            return [f"push.default is `matching`, so a bare `git push` updates every branch the remote also has, shared ones included. {PUSH_ADVICE}"]
+        if branch is None:
+            return [f"cannot tell which branch a `git push` without a refspec updates (no repo, detached HEAD or unknown directory). "
+                    f"Name it: `git push origin <your-branch>`. {PUSH_ADVICE}"]
+        for name in (branch, upstream):
+            if name and _is_shared(name, patterns):
+                return [f"`git push` from branch `{branch}` updates the shared branch `{name.replace('refs/heads/', '', 1)}`. {PUSH_ADVICE}"]
+        return []
+    return [f"{r} {PUSH_ADVICE}" for r in _refspec_reasons(call, refspecs, deleting, patterns)]
+
+
+# ---------------------------------------------------------------- rule (d): private denylist in kitchen repo
+
+def denylist_path() -> str:
+    return os.environ.get("KITCHEN_DENYLIST") or os.path.join(os.environ["HOME"], ".config", "kitchen", "denylist.txt")
+
+
+def private_terms() -> list[re.Pattern] | None:
+    """Matches lib/kitchen/common.py: smart case, whole words, `#` comments and blanks skipped."""
+    path = denylist_path()
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            return None
+        raise
+    if not stat.S_ISREG(mode):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        terms = [line.strip() for line in handle.read().splitlines() if line.strip() and not line.startswith("#")]
+    return [re.compile(rf"\b{re.escape(term)}\b", 0 if term != term.lower() else re.IGNORECASE) for term in terms]
+
+
+def _is_kitchen(toplevel: str | None) -> bool:
+    return bool(toplevel) and all(os.path.isfile(os.path.join(toplevel, *parts)) for parts in KITCHEN_MARKERS)
+
+
+def _body_files(args: list[str], commit: bool) -> list[str]:
+    files: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            break
+        if commit:
+            if a.startswith("--"):
+                name, eq, val = a.partition("=")
+                if len(name) >= len("--fil") and "--file".startswith(name):
+                    if eq:
+                        files.append(val)
+                    elif i + 1 < len(args):
+                        files.append(args[i + 1])
+                        i += 1
+                elif name in COMMIT_LONG_VALUE and not eq:
+                    i += 1
+            elif a.startswith("-") and len(a) > 1:
+                for k, ch in enumerate(a[1:], 1):
+                    if ch in COMMIT_SHORT_OPT:
+                        break
+                    if ch == "F" or ch in COMMIT_SHORT_VALUE:
+                        rest = a[k + 1:]
+                        if ch == "F" and rest:
+                            files.append(rest)
+                        elif ch == "F" and i + 1 < len(args):
+                            files.append(args[i + 1])
+                        if not rest:
+                            i += 1
+                        break
+        else:
+            if a.startswith("--body-file="):
+                files.append(a[len("--body-file="):])
+            elif a == "--body-file" and i + 1 < len(args):
+                files.append(args[i + 1])
+                i += 1
+            elif a.startswith("-") and not a.startswith("--") and "F" in a[1:]:
+                rest = a[a.index("F", 1) + 1:]
+                if rest:
+                    files.append(rest)
+                elif i + 1 < len(args):
+                    files.append(args[i + 1])
+                    i += 1
+        i += 1
+    return files
+
+
+def _read_file(path_arg: str, cwd: str | None) -> str:
+    if not path_arg or path_arg == "-" or _is_dynamic(path_arg):
+        return ""
+    path = _join_path(cwd, path_arg)
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(MAX_BODY_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _publish_target(cmd: Cmd) -> tuple[str, list[str], str | None, str | None] | None:
+    """(label, file_args, cwd, toplevel) when cmd publishes text via git commit or gh pr/issue."""
+    if cmd.name == "git":
+        call = parse_git(cmd)
+        if call and call.sub == "commit":
+            return ("git commit", _body_files(call.args, commit=True), call.cwd, run_git(call, "rev-parse", "--show-toplevel"))
+    if cmd.name == "gh":
+        words, i = [], 1
+        while i < len(cmd.argv) and len(words) < 2:
+            a = cmd.argv[i]
+            if a.startswith("-"):
+                attached = "=" in a or (not a.startswith("--") and len(a) > 2)
+                i += 1 if attached or a in ("-h", "--help", "--version") else 2
+                continue
+            words.append(a)
+            i += 1
+        if len(words) == 2 and words[1] in GH_PUBLISH.get(words[0], ()):
+            label = f"gh {words[0]} {words[1]}"
+            top = run_git(GitCall(cmd, "", [], cmd.cwd, [], [], []), "rev-parse", "--show-toplevel")
+            return (label, _body_files(cmd.argv[1:], commit=False), cmd.cwd, top)
+    return None
+
+
+def check_private_publish(cmds: list[Cmd], raw: str) -> list[str]:
+    mine = []
+    for cmd in cmds:
+        pub = _publish_target(cmd)
+        if pub and _is_kitchen(pub[3]):
+            mine.append((cmd, *pub))
+    if not mine:
+        return []
+    try:
+        patterns = private_terms()
+    except (OSError, UnicodeError, KeyError) as error:
+        return [f"cannot read the private denylist ({type(error).__name__}: {error}), so the text this command publishes in "
+                "the public kitchen repo cannot be checked. Fix the file (`kitchen check` reads it too), then run the command again."]
+    if not patterns:
+        return []
+    texts = [raw]
+    for cmd, _, file_args, pub_cwd, _ in mine:
+        texts.append(" ".join(cmd.argv))
+        for f in file_args:
+            texts.append(_read_file(f, pub_cwd))
+        for f in cmd.stdin_files:
+            texts.append(_read_file(f, cmd.cwd))
+        if "-" in file_args:
+            for other in cmds:
+                if other.name == "cat":
+                    for a in other.argv[1:]:
+                        if not a.startswith("-"):
+                            texts.append(_read_file(a, other.cwd))
+    found = list(dict.fromkeys(m.group(0) for p in patterns for t in texts for m in [p.search(t)] if m))
+    if not found:
+        return []
+    labels = ", ".join(dict.fromkeys(f"`{m[1]}`" for m in mine))
+    terms = ", ".join(f"`{t}`" for t in found)
+    return [f"the text {labels} publishes holds {terms}, from the private denylist, and the kitchen repo is public. "
+            "Remove it from the text, then run the command again."]
+
+
+# ---------------------------------------------------------------- entry point
+
+def check(cmds: list[Cmd], raw: str) -> list[str]:
+    reasons: list[str] = []
+    for cmd in cmds:
+        if cmd.name == "git":
+            call = parse_git(cmd)
+            if call:
+                reasons += check_no_verify(call)
+                reasons += check_shared_push(call)
+        elif cmd.name == "rm":
+            reasons += check_recursive_rm(cmd)
+    reasons += check_private_publish(cmds, raw)
+    return reasons
+
+
+def block(message: str) -> None:
+    sys.stderr.write(f"Blocked by the kitchen hook {GUARD}: {message}\n")
+    sys.exit(2)
+
+
+def payload_command(raw: str) -> tuple[str | None, str | None]:
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("the hook input is not a JSON object")
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise ValueError("tool_name is missing")
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if isinstance(command, list) and all(isinstance(part, str) for part in command):
+        command = " ".join(shlex.quote(part) for part in command)
+    if not isinstance(command, str):
+        if tool_name == "Bash":
+            raise ValueError("tool_input.command is missing or not a string")
+        return None, None
+    cwd = payload.get("cwd")
+    return command, cwd if isinstance(cwd, str) and cwd else None
+
+
+def main() -> None:
+    try:
+        command, cwd = payload_command(sys.stdin.read())
+    except Exception as error:  # noqa: BLE001 - includes RecursionError from deeply nested JSON
+        block(f"cannot read the hook input ({type(error).__name__}: {str(error)[:200]}). "
+              "The hook format may have changed; run `kitchen doctor`.")
+        return
+    if command is None:
+        sys.exit(0)
+    try:
+        cmds = split_commands(command, cwd)
+        reasons = check(cmds, command)
+    except SplitError as error:
+        if GUARDED_MENTION.search(command):
+            block(f"cannot parse this command to check it ({error}). Fix the quoting, or split it into simpler commands.")
+            return
+        sys.exit(0)
+    except Exception as error:  # noqa: BLE001 - a crashed guard must not pass silently
+        block(f"the guard crashed ({type(error).__name__}: {error}). Report it; `kitchen check` runs the hook corpus.")
+        return
+    if reasons:
+        block(" ".join(dict.fromkeys(reasons)))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
