@@ -65,7 +65,8 @@ class InstallTests(KitchenFixture):
         result = self.kitchen("install")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for target in (self.home / ".claude" / "skills" / "alpha", self.home / ".agents" / "skills" / "alpha"):
+        for target in (self.home / ".claude" / "skills" / "alpha", self.home / ".agents" / "skills" / "alpha",
+                       self.home / ".gemini" / "config" / "skills" / "alpha"):
             self.assertTrue(target.is_symlink())
             self.assertEqual(target.resolve(), skill.resolve())
         cli = self.home / ".local" / "bin" / "kitchen"

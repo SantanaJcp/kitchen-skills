@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """kitchen: install, check and maintain the personal agent setup.
 
-One source of truth for Claude Code and Codex, and nothing always on: the kitchen runs when you type /chef-mode.
-  skills/<name>/      -> ~/.claude/skills/<name> and ~/.agents/skills/<name>   (chef-mode and the skills it routes to)
+One source of truth for Claude Code, Codex and Antigravity, and nothing always on: the kitchen runs when you type /chef-mode.
+  skills/<name>/      -> ~/.claude/skills/<name>, ~/.agents/skills/<name> and ~/.gemini/config/skills/<name>
+                         (chef-mode and the skills it routes to)
   bin/kitchen         -> ~/.local/bin/kitchen
 Every installed path is an absolute symlink back into this repo. Guards are per project: `kitchen guards <repo>`.
 """
@@ -51,7 +52,8 @@ def skills_dir() -> Path:
 
 
 def skill_target_dirs(h: Path) -> list[Path]:
-    return [h / ".claude" / "skills", h / ".agents" / "skills"]
+    # Antigravity discovers global skills in ~/.gemini/config/skills and honors `disable-model-invocation: true`.
+    return [h / ".claude" / "skills", h / ".agents" / "skills", h / ".gemini" / "config" / "skills"]
 
 
 def repo_skills() -> list[Path]:
@@ -125,7 +127,7 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     set_hooks_path()
     print(f"installed  {len(repo_skills())} skills (chef-mode routes to the rest); "
-          "nothing runs until you type /chef-mode (Claude Code) or $chef-mode (Codex)")
+          "nothing runs until you type /chef-mode (Claude Code, Antigravity) or $chef-mode (Codex)")
     print("next:      in each repo you choose, type /chef-mode init (or run `kitchen init <repo>` for the instructions)")
     print("next:      kitchen doctor")
     return 0
@@ -373,7 +375,7 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    install = sub.add_parser("install", help="link chef-mode and the skills for Claude Code and Codex")
+    install = sub.add_parser("install", help="link chef-mode and the skills for Claude Code, Codex and Antigravity")
     install.add_argument("--backup", action="store_true", help="move conflicting unmanaged paths to ~/.kitchen-backups/")
     install.set_defaults(func=cmd_install)
 
