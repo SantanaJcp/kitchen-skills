@@ -1,6 +1,6 @@
 # kitchen-skills
 
-My personal agent kitchen: small, owned skills plus the minimal tooling that keeps them honest, shared by Claude Code and Codex from one source. Nothing is always on: type `/chef-mode` (Claude Code) or `$chef-mode` (Codex) and the agent works the kitchen's way for that session.
+My personal agent kitchen: small, owned skills plus the minimal tooling that keeps them honest, shared by Claude Code, Codex and Antigravity from one source. Nothing is always on: type `/chef-mode` (Claude Code, Antigravity) or `$chef-mode` (Codex) and the agent works the kitchen's way for that session.
 
 > Built on ideas from [Poteto's pstack](https://github.com/cursor/plugins/tree/main/pstack) and [Matt Pocock's skills](https://github.com/mattpocock/skills), rewritten small and owned.
 
@@ -28,7 +28,7 @@ Requirements: Python 3.11+ (stdlib only) and `git` for `bin/kitchen` / `lib/`; s
 ```bash
 git clone https://github.com/SantanaJcp/kitchen-skills.git
 cd kitchen-skills
-bin/kitchen install   # links the skills into ~/.claude/skills and ~/.agents/skills, and bin/kitchen into ~/.local/bin
+bin/kitchen install   # links the skills into ~/.claude/skills, ~/.agents/skills and ~/.gemini/config/skills (Antigravity), and bin/kitchen into ~/.local/bin
 bin/kitchen doctor    # verifies links, python3, gh, and any nightly timer
 ```
 
