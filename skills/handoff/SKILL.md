@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # handoff
 
-Write it to `${TMPDIR:-/tmp}/handoff-<repo>-<yyyymmdd-hhmm>.md`, never inside the workspace, and print the path. A prompt for another machine, or for me to paste, also goes in full in the reply: the path does not exist there. If I passed arguments, they describe what the next session will do; tailor the handoff to that.
+Write the handoff to `${TMPDIR:-/tmp}/handoff-<repo>-<yyyymmdd-hhmm>.md`, never inside the workspace, and print the path. If the handoff is for another machine or for me to paste, include it in full in the reply because that path will not exist there. Tailor it to any arguments I passed describing the next session's task.
 
 ## Contents
 
@@ -23,6 +23,6 @@ Reference specs, PRs, commits and logs by path or URL instead of copying them. R
 
 ## For the receiving agent
 
-Before trusting the handoff, re-measure the state block: `git rev-parse HEAD`, `git status`, the PR list. Report any difference before continuing.
+Before trusting the handoff, re-measure the state block: `git rev-parse HEAD`, `git status`, and the PR list. Report any difference before continuing. Once HEAD matches, trust verified items in Done instead of redoing finished work from scratch.
 
 Principles (the kitchen's PRINCIPLES.md): `handoff`, `evidence`.

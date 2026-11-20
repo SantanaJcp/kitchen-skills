@@ -65,7 +65,7 @@ Nightly checks are scheduled per machine with `automation/bin/install-schedule <
 
 Keep personal config outside this public repo:
 
-- `models.toml`: worker and cross-model reviewer setup, read directly by agents (`chef-mode`, `second-opinion`):
+- `models.toml`: worker and cross-model reviewer setup, read directly by agents (`chef-mode`, `second-opinion`). Reviewer tables are keyed by the author's model vendor (`claude`, `codex`, `gemini`); each entry names a provider (`claude`, `codex`, `antigravity`) and a model from another vendor:
 
 ```toml
 [worker]
@@ -81,7 +81,18 @@ model = "default"
 effort = "high"
 tier = "standard"
 
+[[reviewer.claude]]
+provider = "antigravity"
+model = "gemini-default"
+effort = "high"
+
 [[reviewer.codex]]
+provider = "claude"
+model = "default"
+effort = "high"
+tier = "standard"
+
+[[reviewer.gemini]]
 provider = "claude"
 model = "default"
 effort = "high"

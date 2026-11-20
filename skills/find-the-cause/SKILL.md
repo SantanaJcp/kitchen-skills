@@ -10,7 +10,9 @@ Every shipped line traces to runtime evidence. A change that "might help" is a h
 
 ## 1. Red
 
-Build one command that goes red on this exact symptom, and run it. It must be red-capable (drives the real code path and asserts the reported symptom), deterministic, fast, and runnable without me. Try in order: a failing test at the nearest seam, the project's verify skill, an HTTP or CLI script, a replayed captured payload, old-versus-new differential, `git bisect run`.
+Build and run one command that goes red on this exact symptom. It must drive the real code path, assert the reported symptom, run deterministically and fast, and need no human input.
+
+Try in order: a failing test at the nearest seam, the project's verify skill, an HTTP or CLI script, a replayed captured payload, old-versus-new differential, `git bisect run`.
 
 No red command, no hypotheses. If you cannot build one, stop, list what you tried, and ask for access or a captured artifact.
 
@@ -39,6 +41,8 @@ Only when fixing is authorized; otherwise stop and report the cause.
 
 ## Reply
 
-What broke, the root cause and the evidence that proves it, the fix, the red and green output trimmed to the assertion, and what remains unverified. Then say whether this class of bug can be made impossible, and at which layer: code, guard or lint, hook, or rule. When the cause took a deep dig to find, propose the cheap, always-on signal (a log line, a status field, an assertion) that would have shown it at first look.
+- What broke, the root cause with proving evidence, the fix, red-then-green output trimmed to the assertion, and what remains unverified.
+- Whether this class of bug can be made impossible, and at which layer: code, guard or lint, hook, or rule.
+- If the cause took a deep dig, propose the cheap always-on signal (log line, status field, assertion) that would have shown it at first look.
 
 Principles (the kitchen's PRINCIPLES.md): `root-cause`, `prove`.
