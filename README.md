@@ -83,7 +83,7 @@ tier = "standard"
 
 [[reviewer.claude]]
 provider = "antigravity"
-model = "gemini-default"
+model = "gemini-..."  # an exact model id from your T3 catalog (orchestrator_capabilities)
 effort = "high"
 
 [[reviewer.codex]]

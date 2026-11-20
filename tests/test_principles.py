@@ -88,6 +88,10 @@ class Principles(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, text, "second-opinion must document all three vendors, T3 providers, and effort options")
         self.assertRegex(text, r"model's vendor.*not the provider", "self-review check must compare model vendor, not provider alone")
+        for pair in ("`effort` for `claudeAgent`", "`reasoningEffort` for `codex`", "`thought_level` for `antigravity`"):
+            with self.subTest(pair=pair):
+                self.assertIn(pair, text, "each T3 provider maps effort to its own option")
+        self.assertIn("`target.model`", text, "T3 reviewers must pin the configured model, not leave the choice to T3")
 
     def test_chef_mode_names_and_lists_every_principle_and_leaf(self):
         self.assertEqual(sorted(declared(CHEF_MODE)), sorted(self.ids))

@@ -67,7 +67,7 @@ Read `../<skill>/SKILL.md` in full before the step that needs it (kitchen skills
   Goal: <one line> | Out of scope: <one line>
   Base SHA: <sha> | Branch/worktree: <ref and path>
   Verify: <exact command(s)> (this is the whole bar; add no extra gates)
-  Rules: work for the owner. Make reversible choices and report why; stop BLOCKED on one-way doors instead of asking a human. Block only on a failing run at this head or a user-facing bug; report pre-existing base issues in one line. If you spawn a helper, pass this header.
+  Rules: work for the owner. Make reversible choices and report why; stop BLOCKED on one-way doors, missing approval, or missing access instead of asking a human. Report ISSUES only for a failing run at this head or a user-facing bug; report pre-existing base issues in one line. If you spawn a helper, pass this header.
   Report: PASS / ISSUES / BLOCKED with measured/inferred evidence and touched files.
   Review budget: 2 rounds max (round 2 fixes confirmed P0/P1 only).
   Principles: <paste the 13 one-line principles above>

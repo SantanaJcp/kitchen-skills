@@ -23,6 +23,6 @@ Reference specs, PRs, commits and logs by path or URL instead of copying them. R
 
 ## For the receiving agent
 
-Before trusting the handoff, re-measure the state block: `git rev-parse HEAD`, `git status`, and the PR list. Report any difference before continuing. Once HEAD matches, trust verified items in Done instead of redoing finished work from scratch.
+Before trusting the handoff, re-measure the state block: `git rev-parse HEAD`, `git status`, and the PR list. Report any difference before continuing. Once HEAD and `git status` both match, trust verified items in Done instead of redoing finished work from scratch.
 
 Principles (the kitchen's PRINCIPLES.md): `handoff`, `evidence`.
