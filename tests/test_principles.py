@@ -82,6 +82,17 @@ class Principles(unittest.TestCase):
                 text = (REPO / rel).read_text(encoding="utf-8")
                 self.assertEqual([m.group(0) for m in level.finditer(text)], [], "set effort in models.toml instead")
 
+    def test_second_opinion_routes_three_vendors_and_checks_model_vendor(self):
+        text = (REPO / "skills" / "second-opinion" / "SKILL.md").read_text(encoding="utf-8")
+        for token in ("`claude`", "`codex`", "`gemini`", "`claudeAgent`", "`antigravity`", "`reasoningEffort`", "`thought_level`"):
+            with self.subTest(token=token):
+                self.assertIn(token, text, "second-opinion must document all three vendors, T3 providers, and effort options")
+        self.assertRegex(text, r"model's vendor.*not the provider", "self-review check must compare model vendor, not provider alone")
+        for pair in ("`effort` for `claudeAgent`", "`reasoningEffort` for `codex`", "`thought_level` for `antigravity`"):
+            with self.subTest(pair=pair):
+                self.assertIn(pair, text, "each T3 provider maps effort to its own option")
+        self.assertIn("`target.model`", text, "T3 reviewers must pin the configured model, not leave the choice to T3")
+
     def test_chef_mode_names_and_lists_every_principle_and_leaf(self):
         self.assertEqual(sorted(declared(CHEF_MODE)), sorted(self.ids))
         self.assertEqual(enforced_by_a_control([CHEF_MODE]), set())

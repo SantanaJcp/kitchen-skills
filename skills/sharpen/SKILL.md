@@ -13,8 +13,12 @@ Deeper, not bigger: the same goal, done the way the best person in the field wou
 3. Which methods and tools would they use?
 4. What, other than you or me, would show the result is right: a measurement, a test, a source, someone who can check it?
 
-Then rewrite my prompt to ask for exactly that. Leave the choices that are mine open instead of deciding them. Keep my goal and my scope: when the deeper version needs more than I asked for, say so in one line under the prompt instead of writing it in.
+Rewrite my prompt to ask for that.
 
-Reply with the rewritten prompt in a code block, ready to paste, and under it one line per question above.
+- Have it tell the agent to prototype or measure any choice an experiment can settle, and recommend an option from what it observed.
+- Leave product or preference choices that no experiment can settle open for me.
+- Keep my goal and scope. If the deeper version needs more than I asked for, say so in one line under the prompt instead of writing it in.
+
+Reply with the rewritten prompt in a code block, ready to paste, followed by one line per question above.
 
 Principles (the kitchen's PRINCIPLES.md): `prove`, `owner-attention`.

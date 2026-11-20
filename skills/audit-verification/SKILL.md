@@ -28,21 +28,23 @@ Keep three things separate in the report: **Inventory** (what the map lists), **
 
 ## Pass
 
-0. **Locate** `.agents/skills/verify-*/`. None: stop and point to `../chef-mode/playbooks/init/verify/` and `../chef-mode/playbooks/init.md`. State the audited profile (environment, commit SHA, dataset, account/role, verifier flags); every result holds only for that profile.
-1. **Inventory**: check the map's README against its files (fix missing, extra, duplicate, or dead entries). Sweep `git log <baseline>..HEAD` for user-facing surfaces missing from the map (require a concrete path). If a `formal-<area>` skill exists, run its `bin/formal drift`; red is a finding for `formal-verification`.
-2. **Source wave** (capped at **4 workers** in parallel): assign feature files in scope to read-only workers (batch if more than 4 files). Each answers "how does this feature work for a user?" from source and returns: summary, source entry points, likely drift with `file:line` (or none), and one live recipe. Workers never drive the app or edit. Reconcile summaries, spot-check drift, and merge recipes into as few app states as practical.
-3. **Drives**: exercise every feature in scope at least once. If the nightly guard already ran green on this exact SHA with the same profile, cite its record and coverage evidence and drive live only what it does not cover; a red record makes the outcome **blocked**. Hold three invariants:
-   - health-check (`doctor`) before the first drive and after any failed drive; reset/relaunch if wedged;
+0. **Locate** `.agents/skills/verify-*/`. If none exists, stop and point to `../chef-mode/playbooks/init/verify/` and `../chef-mode/playbooks/init.md`. State the audited profile (environment, commit SHA, dataset, account/role, verifier flags); every result holds only for that profile.
+1. **Inventory:** check the map's README against its files and fix missing, extra, duplicate, or dead entries. Sweep `git log <baseline>..HEAD` for user-facing surfaces missing from the map (require a concrete path). If a `formal-<area>` skill exists, run its `bin/formal drift`; red is a finding for `formal-verification`.
+2. **Source wave** (capped at **4 workers** in parallel): assign feature files in scope to read-only workers, batching if there are more than 4.
+   - Each worker reads source to answer "how does this feature work for a user?" and returns: summary, source entry points, likely drift with `file:line` (or none), and one live recipe.
+   - Workers never drive the app or edit files. Reconcile summaries, spot-check drift, and merge recipes into as few app states as practical.
+3. **Drives:** exercise every feature in scope at least once. If the nightly guard already ran green on this exact SHA and profile, cite its record and coverage evidence and drive live only what it missed; a red record makes the outcome **blocked**. Hold three invariants:
+   - health-check (`doctor`) before the first drive and after any failed drive; reset or relaunch if wedged;
    - evidence survives cleanup; verify it at its named path;
    - clean up everything a drive started after failures and at the end.
-   Fix skill drift that causes `doctor` to fail and retry once before calling it blocked. An "unreachable" feature needs the concrete prerequisite and route attempted.
-4. **Assertions**: for each feature, name the check that decides pass or fail. "No error" or "exit 0" alone is a gap.
+   Fix skill drift that makes `doctor` fail and retry once before calling it blocked. An "unreachable" feature requires the concrete prerequisite and route attempted.
+4. **Assertions:** name the check that decides pass or fail for each feature. "No error" or "exit 0" alone is a gap.
 5. **Can it fail?** Run at least one negative and positive control by hand on a feature in scope (in a scratch copy if the verifier has no control command):
-   - **negative control**: inject a fault or nullify the execution/effect (skip the drive, stub the action to a no-op, drop the write) — the verifier must go red on that assertion;
-   - **positive control**: unbroken copy, same command — must go green.
+   - **negative control:** inject a fault or nullify the execution or effect (skip the drive, stub the action to a no-op, drop the write). The verifier must go red on that assertion.
+   - **positive control:** run the same command on an unbroken copy. It must go green.
    Staying green under a nullified effect is the most important finding of the audit.
-6. **Triage**: fix doc drift; fix harness gaps and re-drive live before shipping; report product bugs outside the PR. Never turn a product defect into a green expectation; use an explicit XFAIL referencing the defect if the verifier must keep running.
-7. **Ship or stop**: for **changed**, re-read every changed file and open one PR. On a full pass, close any open audit findings issues that no longer reproduce (`gh issue close <n> --comment ...` naming the audited SHA). Keep run notes in scratch; never commit them.
+6. **Triage:** fix doc drift; fix harness gaps and re-drive live before shipping; report product bugs outside the PR. Never turn a product defect into a green expectation; use an explicit XFAIL naming the defect if the verifier must keep running.
+7. **Ship or stop:** for **changed**, re-read every edited file and open one PR. On a full pass, close open audit findings issues that no longer reproduce (`gh issue close <n> --comment ...` naming the audited SHA). Keep run notes in scratch; never commit them.
 
 ## Reply
 
