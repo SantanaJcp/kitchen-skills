@@ -1,0 +1,5 @@
+interface:
+  display_name: "Unslop"
+  short_description: "Cut AI writing tells and filler from prose, docs, and PRs"
+policy:
+  allow_implicit_invocation: false

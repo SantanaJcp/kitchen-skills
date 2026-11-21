@@ -69,7 +69,7 @@ The owner's attention is the scarcest resource in the kitchen. On reversible wor
 - **When:** planning, reporting, designing any check or automation.
 - **Includes (pstack):**
   - [*Never Block on the Human*](principles/never-block-on-the-human.md): tempted to ask "should I do X?" on reversible work; never a one-way door, nor anything sent or published.
-- **Enforced by:** the kitchen stays off until the owner types `/chef-mode`, and `install` writes nothing every session reads; the nightly guard notifies only on red or incomplete and opens one issue while red, closed when green; the init playbook asks the owner once, only about what the repo cannot answer; `catch-me-up`, `make-me-realize`, `feature-xray`, `sharpen`, `wait-what`.
+- **Enforced by:** the kitchen stays off until the owner types `/chef-mode`, and `install` writes nothing every session reads; the nightly guard notifies only on red or incomplete and opens one issue while red, closed when green; the init playbook asks the owner once, only about what the repo cannot answer; `catch-me-up`, `make-me-realize`, `feature-xray`, `sharpen`, `unslop`, `wait-what`.
 
 ## 7. Know your doors (`doors`)
 
@@ -100,7 +100,7 @@ Prefer the smallest change that does the job. Skills are workflows, not manuals:
   - [*Subtract Before You Add*](principles/subtract-before-you-add.md): sequencing an addition, refactor or rewrite.
   - [*Minimize Reader Load*](principles/minimize-reader-load.md): reviewing or shaping code that is hard to trace.
   - [*Guard the Context Window*](principles/guard-the-context-window.md): context is filling up: large outputs, long files, repeated reads, a fan-out.
-- **Enforced by:** `kitchen check` (`SKILL.md` at most 150 lines, one-line descriptions, folder name equals `name`); the Minimalist lens of `second-opinion`; `no-comments`. Standard library only: rule only.
+- **Enforced by:** `kitchen check` (`SKILL.md` at most 150 lines, one-line descriptions, folder name equals `name`); the Minimalist lens of `second-opinion`; `no-comments`; `unslop`. Standard library only: rule only.
 
 ## 10. Separate before you share (`isolate`)
 
