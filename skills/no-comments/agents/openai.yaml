@@ -1,0 +1,5 @@
+interface:
+  display_name: "No comments"
+  short_description: "Strip comment noise with Comment Sicko, fix workarounds, and encode constraints"
+policy:
+  allow_implicit_invocation: false

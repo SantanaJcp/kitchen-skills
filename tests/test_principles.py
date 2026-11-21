@@ -116,7 +116,7 @@ class Principles(unittest.TestCase):
         routed = {name for row in section.splitlines() if row.startswith("|")
                   for name in NAME.findall(row.rstrip(" |").rsplit("|", 1)[-1])}
         skills = {p.parent.name for p in REPO.glob("skills/*/SKILL.md")} - {"chef-mode"}
-        self.assertEqual(len(skills), 11, "all 12 skills stay")
+        self.assertEqual(len(skills), 12, "all 13 skills stay")
         self.assertEqual(sorted(skills - routed - set(OWNER_TYPED)), [], "add a row to chef-mode's playbook table")
         self.assertEqual(sorted(set(OWNER_TYPED) - skills), [], "drop a gone skill from OWNER_TYPED")
 

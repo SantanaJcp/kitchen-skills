@@ -33,6 +33,7 @@ Read `../<skill>/SKILL.md` in full before the step that needs it (kitchen skills
 | Set a repo up for agents ("kitchen init", guardrails) | [playbooks/init.md](playbooks/init.md) |
 | Bug, failure, flake, slowdown, or read-only diagnosis | `find-the-cause` |
 | "Analiza", "qué hace X", read-only area investigation | `feature-xray` |
+| Strip comment noise and workarounds before review | `no-comments` |
 | Diff ready to merge, or changes to auth, tenant, sync, data, migrations | `second-opinion` |
 | Plan or request with open decisions | `make-me-realize` |
 | Continue in a new session, tool, or machine | `handoff` |

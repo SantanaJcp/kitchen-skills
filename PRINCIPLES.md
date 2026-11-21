@@ -48,7 +48,7 @@ Reproduce first, red. Form hypotheses that can be falsified. Fix the cause, then
 - **Includes (pstack):**
   - [*Fix Root Causes*](principles/fix-root-causes.md): debugging anything broken, failing, flaky or slow.
   - [*Attack the Premise*](principles/attack-the-premise.md): two fixes that share one premise have failed the same gate.
-- **Enforced by:** the `find-the-cause` skill. Otherwise rule only.
+- **Enforced by:** the `find-the-cause` and `no-comments` skills. Otherwise rule only.
 
 ## 5. A repeated correction is an environment defect (`encode-lessons`)
 
@@ -59,7 +59,7 @@ If the owner has to say it twice, the environment is wrong, not the session. Fix
 - **Includes (pstack):**
   - [*Encode Lessons in Structure*](principles/encode-lessons-in-structure.md): you write the same instruction a second time, or a correction repeats.
   - [*Build the Lever*](principles/build-the-lever.md): any work that is not trivial: edits, migrations, analyses, checks.
-- **Enforced by:** the `retro` skill and `kitchen retro`; attack corpora in `tests/corpus/` (a miss found in review becomes a bypass case); `kitchen check`; `kitchen-guard`; `tests/test_principles.py`.
+- **Enforced by:** the `retro` skill and `kitchen retro`; `no-comments`; attack corpora in `tests/corpus/` (a miss found in review becomes a bypass case); `kitchen check`; `kitchen-guard`; `tests/test_principles.py`.
 
 ## 6. Spend the owner's attention only on decisions (`owner-attention`)
 
@@ -100,7 +100,7 @@ Prefer the smallest change that does the job. Skills are workflows, not manuals:
   - [*Subtract Before You Add*](principles/subtract-before-you-add.md): sequencing an addition, refactor or rewrite.
   - [*Minimize Reader Load*](principles/minimize-reader-load.md): reviewing or shaping code that is hard to trace.
   - [*Guard the Context Window*](principles/guard-the-context-window.md): context is filling up: large outputs, long files, repeated reads, a fan-out.
-- **Enforced by:** `kitchen check` (`SKILL.md` at most 150 lines, one-line descriptions, folder name equals `name`); the Minimalist lens of `second-opinion`. Standard library only: rule only.
+- **Enforced by:** `kitchen check` (`SKILL.md` at most 150 lines, one-line descriptions, folder name equals `name`); the Minimalist lens of `second-opinion`; `no-comments`. Standard library only: rule only.
 
 ## 10. Separate before you share (`isolate`)
 

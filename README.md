@@ -12,7 +12,7 @@ My personal agent kitchen: small, owned skills plus the minimal tooling that kee
 | `principles/` | One short leaf per nested principle, linked from `PRINCIPLES.md` and `chef-mode` |
 | `decisions.md` | Decisions about the kitchen that outlive a session |
 | `skills/chef-mode/` | The mode: the 13 principles inline, doors and autonomy ladder, and playbooks routing to the other skills |
-| `skills/<name>/` | Twelve manual-only skills, reached through `chef-mode` or by name |
+| `skills/<name>/` | Thirteen manual-only skills, reached through `chef-mode` or by name |
 | `bin/kitchen` | The CLI: `install`, `doctor`, `check`, `guards`, `init`, `retro` |
 | `hooks/` | `kitchen-guard` (PreToolUse Bash guard) and `chef-mode-after-compact` (SessionStart compact reminder) |
 | `automation/` | Minimal nightly guard (`nightly-guard`, `install-schedule`) |
@@ -112,6 +112,7 @@ tier = "standard"
 | `make-me-realize` | Settle open decisions through numbered questions before designing |
 | `feature-xray` | Read-only investigation ending in decisions |
 | `find-the-cause` | Something is broken or slow and the cause is unknown |
+| `no-comments` | Strip comment noise with Comment Sicko, fix workarounds, and encode constraints |
 | `second-opinion` | Cross-model review before merging (one run per reviewer, two-round budget) |
 | `handoff` | Pass work to another agent, tool, or session |
 | `catch-me-up` | Summarize what happened since your last message and what waits on you |
