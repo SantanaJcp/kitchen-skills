@@ -12,7 +12,7 @@ My personal agent kitchen: small, owned skills plus the minimal tooling that kee
 | `principles/` | One short leaf per nested principle, linked from `PRINCIPLES.md` and `chef-mode` |
 | `decisions.md` | Decisions about the kitchen that outlive a session |
 | `skills/chef-mode/` | The mode: the 13 principles inline, doors and autonomy ladder, and playbooks routing to the other skills |
-| `skills/<name>/` | Thirteen manual-only skills, reached through `chef-mode` or by name |
+| `skills/<name>/` | Fourteen manual-only skills, reached through `chef-mode` or by name |
 | `bin/kitchen` | The CLI: `install`, `doctor`, `check`, `guards`, `init`, `retro` |
 | `hooks/` | `kitchen-guard` (PreToolUse Bash guard) and `chef-mode-after-compact` (SessionStart compact reminder) |
 | `automation/` | Minimal nightly guard (`nightly-guard`, `install-schedule`) |
@@ -118,6 +118,7 @@ tier = "standard"
 | `catch-me-up` | Summarize what happened since your last message and what waits on you |
 | `retro` | Turn repeated corrections into environment fixes (manual) |
 | `wait-what` | Re-explain the last answer simply |
+| `unslop` | Cut AI writing tells and filler from prose, docs, and PRs |
 | `sharpen` | Make a prompt deeper, not bigger, before starting |
 | `audit-verification` | Prove a project's `verify-*` skill still tells the truth (manual) |
 | `formal-verification` | Model-check a high-risk invariant and keep it in step with code |

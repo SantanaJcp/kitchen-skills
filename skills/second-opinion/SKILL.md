@@ -39,7 +39,7 @@ Forbidden: edits, commits, checkout/switch, reset, stash, push, merge, installs,
 Authorized tests: <exact commands or "none">. Project rules: <repo>/AGENTS.md.
 
 Apply all three lenses in one pass:
-- Skeptic: inputs, states, or orderings that break; swallowed errors; unproven claims; tests that pass on broken behavior or assert implementation or recomputed expectations.
+- Skeptic: inputs, states, or orderings that break; blast radius beyond the diff (callers, consumers, config, shared state); swallowed errors; unproven claims (verify key safety claims by running authorized code); tests that pass on broken behavior or assert implementation or recomputed expectations.
 - Architect: structural fit, leaking responsibilities, scale, concurrency, or ordering assumptions.
 - Minimalist: what can be deleted, single-call abstractions, reader load (>3 files to trace a value).
 

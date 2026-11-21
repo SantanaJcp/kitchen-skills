@@ -17,7 +17,7 @@ Temporary fixtures are allowed when you own them alone: a scratch file, a temp d
 ## Steps
 
 1. **Scope.** State the area, the question it answers, and what is out of scope.
-2. **Map from source.** Entry points, data flow, callers, configuration, tests. Cite `file:line`.
+2. **Map from source.** Entry points, data flow, callers, configuration, tests. Cite `file:line`. For "why" questions, read the commits and PR discussions that introduced and changed the target, not just the current code; cite what authors wrote, mark inferences, and say what the record does not answer.
 3. **Churn.** `git log --since=60.days --stat -- <path>`: what changes often, who touched it last, which large files change the most (size × commits).
 4. **Check against reality** when it is cheap: run the tests or the verify command that covers it. Label each claim measured, inferred or guess.
 5. **Look for** dead or orphaned pieces, docs or comments that contradict the code, existing fallbacks (where each is, when it activates and what it hides), and risks.

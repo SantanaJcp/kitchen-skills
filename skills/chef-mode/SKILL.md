@@ -34,6 +34,7 @@ Read `../<skill>/SKILL.md` in full before the step that needs it (kitchen skills
 | Bug, failure, flake, slowdown, or read-only diagnosis | `find-the-cause` |
 | "Analiza", "qué hace X", read-only area investigation | `feature-xray` |
 | Strip comment noise and workarounds before review | `no-comments` |
+| Prose, docs, READMEs, PR descriptions, or AI-tell cleanup | `unslop` |
 | Diff ready to merge, or changes to auth, tenant, sync, data, migrations | `second-opinion` |
 | Plan or request with open decisions | `make-me-realize` |
 | Continue in a new session, tool, or machine | `handoff` |
@@ -41,7 +42,7 @@ Read `../<skill>/SKILL.md` in full before the step that needs it (kitchen skills
 | Repeated corrections retrospective | `retro` |
 | Verify skill audit | `audit-verification` |
 | Model-check an invariant / `formal-<area>` drift | `formal-verification` |
-| Feature, fix, or refactor | Work loop: goal first -> grep `decisions.md` -> smallest change -> verify (`bin/check` + `verify-*`) -> `second-opinion` -> merge per rung |
+| Feature, fix, or refactor | Work loop: goal first -> grep `decisions.md` -> smallest change -> `no-comments` (code diffs) -> verify (`bin/check` + `verify-*`) -> `second-opinion` -> merge per rung |
 
 ## Doors and autonomy ladder
 
@@ -55,6 +56,7 @@ Read `../<skill>/SKILL.md` in full before the step that needs it (kitchen skills
 ## Working and delegation
 
 - **Goal first:** open your first message with the goal, out of scope, and smallest expected change without waiting.
+- **Prototype empirical forks:** before asking on a choice an experiment can settle (behavior, timing, layout, output), prototype or measure it and let the result decide. Reserve questions for product or preference calls.
 - **Candor:** no is an acceptable answer. Push back or say "this does not earn its place" when true; a recommendation is judgment, not validation.
 - **Reply style:** lead with what changes for the owner, in short declarative sentences with no filler. Label every claim measured, inferred, or guess.
 - **One thread per task:** use `handoff` to continue in a new thread when scope shifts or context grows heavy.
